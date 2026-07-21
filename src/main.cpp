@@ -380,6 +380,7 @@ int main(int argc, char* argv[]) {
 
         // CORREÇÃO: Linha de totalização de instâncias reposta no painel
         ImGui::Text("Instancias: 100000");
+        ImGui::Text("Velocidade efetiva: %.0fx", last_frame_ms > 0.0 ? (last_ticks_this_frame / (last_frame_ms / 1000.0)) / 60.0 : 0.0);
 
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
@@ -405,7 +406,11 @@ int main(int argc, char* argv[]) {
             accumulator -= DT;
             ticks_this_frame++;
 
-            if (ticks_this_frame >= 10000) {
+            // Orçamento de TEMPO por frame: a simulação nunca segura a UI por mais de 100 ms.
+            // Se a velocidade pedida excede a capacidade, descartamos o atraso — a
+            // velocidade efetiva passa a ser o que a CPU entrega, e a janela continua viva.
+            double sim_elapsed_ms = (double)(SDL_GetPerformanceCounter() - sim_start_timer) * 1000.0 / frequency;
+            if (sim_elapsed_ms > 100.0) {
                 accumulator = 0.0;
                 break;
             }
