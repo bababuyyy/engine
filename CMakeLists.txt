@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.28)
 project(engine CXX)
 
+# Habilita a infraestrutura global do CTest no projeto
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -53,9 +56,8 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-# Adicionamos os novos arquivos puristas no build (jobs.h é listado para fins de IDE)
+# Engine principal mantida intacta
 add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h)
-
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
 target_include_directories(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm)
@@ -63,3 +65,28 @@ target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm)
 if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 endif()
+
+# --- SUÍTE DE TESTES (M0) ---
+
+# O executável de testes roda PURAMENTE com módulos isolados.
+# Não há ligação com SDL3, GLM ou ImGui. Se compilar, provamos a pureza estrutural do design.
+add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp)
+target_include_directories(sim_tests PRIVATE src)
+if(MSVC)
+    target_compile_options(sim_tests PRIVATE /W4)
+endif()
+
+# Registro do teste da bateria headless
+# O diretório de execução precisa ser o do projeto para o golden file aterrisar e ser lido de `tests/`
+add_test(NAME sim_headless 
+         COMMAND sim_tests
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# Registro do Linter de regressões
+add_test(NAME regression_lint 
+         COMMAND ${CMAKE_COMMAND} 
+         -DSRC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp 
+         -DJOBS_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/core/jobs.h
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint.cmake
+)

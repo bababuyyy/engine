@@ -30,4 +30,6 @@ namespace sim {
     // Hash do estado do mundo para auditoria de determinismo bit a bit
     uint64_t state_hash(const World& w, uint64_t tick);
 
+    inline constexpr float WANDER_SPEED = 1.5f; // Fonte única da velocidade: o teste imprime este valor
+
 }

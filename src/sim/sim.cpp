@@ -28,7 +28,7 @@ namespace sim {
     void wander_system(World& w, uint64_t tick, core::JobSystem& js, int num_threads, size_t chunk_size) {
         js.parallel_for(w.count, chunk_size, num_threads, [&](size_t begin, size_t end) {
             const float dt = 1.0f / 60.0f;
-            const float speed = 1.5f;
+            const float speed = WANDER_SPEED;
 
             for (size_t i = begin; i < end; i++) {
                 if ((tick + i) % 30 == 0) {
