@@ -3,6 +3,7 @@
 #include <vector>
 #include "../core/jobs.h"
 
+// Módulo purista da CPU: Nenhum include de SDL ou bibliotecas de vídeo
 namespace sim {
 
     struct Vec3 { float x, y, z; };
@@ -23,9 +24,10 @@ namespace sim {
     };
 
     void init_world(World& w, uint64_t seed, size_t count);
-
-    // Atualização das assinaturas com integração transparente ao JobSystem
     void wander_system(World& w, uint64_t tick, core::JobSystem& js, int num_threads, size_t chunk_size = 4096);
     void step(World& w, uint64_t tick, core::JobSystem& js, int num_threads);
+
+    // Hash do estado do mundo para auditoria de determinismo bit a bit
+    uint64_t state_hash(const World& w, uint64_t tick);
 
 }

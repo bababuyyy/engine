@@ -26,8 +26,6 @@ namespace sim {
     }
 
     void wander_system(World& w, uint64_t tick, core::JobSystem& js, int num_threads, size_t chunk_size) {
-        // Envolve a matemática do sistema em lotes paralelizáveis
-        // RESTRITAMENTE PROIBIDO O USO DE MUTEX AQUI DENTRO.
         js.parallel_for(w.count, chunk_size, num_threads, [&](size_t begin, size_t end) {
             const float dt = 1.0f / 60.0f;
             const float speed = 1.5f;
@@ -69,5 +67,27 @@ namespace sim {
 
     void step(World& w, uint64_t tick, core::JobSystem& js, int num_threads) {
         wander_system(w, tick, js, num_threads);
+    }
+
+    // Algoritmo FNV-1a (64-bit) rodando estritamente em serial para garantir a ordem dos bytes
+    uint64_t state_hash(const World& w, uint64_t tick) {
+        const uint64_t fnv_offset_basis = 14695981039346656037ULL;
+        const uint64_t fnv_prime = 1099511628211ULL;
+        uint64_t hash = fnv_offset_basis;
+
+        // Lambda para iterar byte a byte e acumular o hash
+        auto hash_bytes = [&](const uint8_t* data, size_t size) {
+            for (size_t i = 0; i < size; ++i) {
+                hash ^= data[i];
+                hash *= fnv_prime;
+            }
+            };
+
+        // As std::vector garantem que os dados SoA sejam blocos contíguos perfeitos na memória
+        hash_bytes(reinterpret_cast<const uint8_t*>(w.position.data()), w.position.size() * sizeof(Vec3));
+        hash_bytes(reinterpret_cast<const uint8_t*>(w.velocity.data()), w.velocity.size() * sizeof(Vec3));
+        hash_bytes(reinterpret_cast<const uint8_t*>(&tick), sizeof(tick));
+
+        return hash;
     }
 }

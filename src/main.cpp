@@ -36,31 +36,17 @@ struct AppLog {
     }
 };
 
-struct Vertex {
-    float x, y, z;
-    float r, g, b;
-};
-
-struct InstanceData {
-    float x, y, z;
-    float r, g, b;
-};
+struct Vertex { float x, y, z; float r, g, b; };
+struct InstanceData { float x, y, z; float r, g, b; };
 
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        SDL_Log("Erro no SDL_Init: %s", SDL_GetError());
-        return 1;
-    }
+    if (!SDL_Init(SDL_INIT_VIDEO)) return 1;
 
     SDL_Window* window = SDL_CreateWindow("Minha Engine", 1280, 720, 0);
-    if (!window) {
-        SDL_Log("Erro no SDL_CreateWindow: %s", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
+    if (!window) return 1;
 
 #ifdef NDEBUG
     const bool gpu_debug = false;
@@ -70,20 +56,9 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUShaderFormat format_flags = SDL_GPU_SHADERFORMAT_DXBC | SDL_GPU_SHADERFORMAT_DXIL;
     SDL_GPUDevice* device = SDL_CreateGPUDevice(format_flags, gpu_debug, nullptr);
-    if (!device) {
-        SDL_Log("Erro no SDL_CreateGPUDevice: %s", SDL_GetError());
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
+    if (!device) return 1;
 
-    if (!SDL_ClaimWindowForGPUDevice(device, window)) {
-        SDL_Log("Erro no SDL_ClaimWindowForGPUDevice: %s", SDL_GetError());
-        SDL_DestroyGPUDevice(device);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
+    if (!SDL_ClaimWindowForGPUDevice(device, window)) return 1;
 
     if (!SDL_SetGPUSwapchainParameters(device, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, SDL_GPU_PRESENTMODE_VSYNC)) {
         SDL_Log("Erro no SDL_SetGPUSwapchainParameters: %s", SDL_GetError());
@@ -97,7 +72,7 @@ int main(int argc, char* argv[]) {
     vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
     vs_info.num_uniform_buffers = 1;
     SDL_GPUShader* vs = SDL_CreateGPUShader(device, &vs_info);
-    if (!vs) { SDL_Log("Erro ao criar VS: %s", SDL_GetError()); return 1; }
+    if (!vs) return 1;
 
     SDL_GPUShaderCreateInfo ps_info = {};
     ps_info.code = g_basic_ps;
@@ -106,7 +81,7 @@ int main(int argc, char* argv[]) {
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
-    if (!ps) { SDL_Log("Erro ao criar PS: %s", SDL_GetError()); return 1; }
+    if (!ps) return 1;
 
     core::JobSystem js;
 
@@ -114,29 +89,17 @@ int main(int argc, char* argv[]) {
     sim::init_world(world, 42, 100000);
 
     Vertex vertices[] = {
-        { -100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f },
-        {  100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f },
-        {  100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f },
-        { -100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f },
-
-        { -0.15f, 0.0f,  0.15f,   1.0f, 0.0f, 0.0f },
-        {  0.15f, 0.0f,  0.15f,   0.0f, 1.0f, 0.0f },
-        {  0.15f, 0.0f, -0.15f,   0.0f, 0.0f, 1.0f },
-        { -0.15f, 0.0f, -0.15f,   1.0f, 1.0f, 0.0f },
-        { -0.15f, 0.3f,  0.15f,   1.0f, 0.0f, 1.0f },
-        {  0.15f, 0.3f,  0.15f,   0.0f, 1.0f, 1.0f },
-        {  0.15f, 0.3f, -0.15f,   1.0f, 1.0f, 1.0f },
-        { -0.15f, 0.3f, -0.15f,   0.0f, 0.0f, 0.0f }
+        { -100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f }, {  100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f },
+        {  100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f }, { -100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f },
+        { -0.15f, 0.0f,  0.15f,   1.0f, 0.0f, 0.0f }, {  0.15f, 0.0f,  0.15f,   0.0f, 1.0f, 0.0f },
+        {  0.15f, 0.0f, -0.15f,   0.0f, 0.0f, 1.0f }, { -0.15f, 0.0f, -0.15f,   1.0f, 1.0f, 0.0f },
+        { -0.15f, 0.3f,  0.15f,   1.0f, 0.0f, 1.0f }, {  0.15f, 0.3f,  0.15f,   0.0f, 1.0f, 1.0f },
+        {  0.15f, 0.3f, -0.15f,   1.0f, 1.0f, 1.0f }, { -0.15f, 0.3f, -0.15f,   0.0f, 0.0f, 0.0f }
     };
 
     uint16_t indices[] = {
-        0, 1, 2,  0, 2, 3,
-        4, 5, 6,  4, 6, 7,
-        8, 10, 9, 8, 11, 10,
-        4, 7, 11, 4, 11, 8,
-        5, 9, 10, 5, 10, 6,
-        4, 8, 9,  4, 9, 5,
-        7, 6, 10, 7, 10, 11
+        0, 1, 2, 0, 2, 3,  4, 5, 6, 4, 6, 7,  8, 10, 9, 8, 11, 10,
+        4, 7, 11, 4, 11, 8,  5, 9, 10, 5, 10, 6,  4, 8, 9, 4, 9, 5,  7, 6, 10, 7, 10, 11
     };
 
     InstanceData neutral_inst = { 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f };
@@ -213,7 +176,6 @@ int main(int argc, char* argv[]) {
     SDL_GPUVertexAttribute attrs[4] = {};
     attrs[0].location = 0; attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[0].offset = 0;                 attrs[0].buffer_slot = 0;
     attrs[1].location = 1; attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[1].offset = 3 * sizeof(float); attrs[1].buffer_slot = 0;
-
     attrs[2].location = 2; attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[2].offset = 0;                 attrs[2].buffer_slot = 1;
     attrs[3].location = 3; attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[3].offset = 3 * sizeof(float); attrs[3].buffer_slot = 1;
 
@@ -234,10 +196,7 @@ int main(int argc, char* argv[]) {
     pipe_info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
 
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipe_info);
-    if (!pipeline) {
-        SDL_Log("Erro ao criar pipeline: %s", SDL_GetError());
-        return 1;
-    }
+    if (!pipeline) return 1;
 
     ImGui::CreateContext();
     ImGui_ImplSDL3_InitForSDLGPU(window);
@@ -253,6 +212,7 @@ int main(int argc, char* argv[]) {
     int sim_threads = max_hardware_threads;
 
     app_log.add("JobSystem ativado em pool com %d workers físicos disponíveis.", max_hardware_threads);
+    app_log.add("Mundo seed=%llu", (unsigned long long)world.seed); // Log inicial de criação do mundo
 
     glm::vec3 cam_pos(0.0f, 35.0f, -70.0f);
     float cam_yaw = 0.0f;
@@ -261,6 +221,8 @@ int main(int argc, char* argv[]) {
 
     constexpr uint64_t SIM_HZ = 60;
     constexpr double DT = 1.0 / 60.0;
+    constexpr uint64_t HASH_PERIOD = 60; // 1 segundo de jogo
+
     uint64_t sim_tick = 0;
     double accumulator = 0.0;
 
@@ -273,9 +235,16 @@ int main(int argc, char* argv[]) {
     double last_frame_ms = 0.0;
     double last_sync_ms = 0.0;
     double last_sim_ms_per_tick = 0.0;
+    double last_hash_ms = 0.0;
     int last_ticks_this_frame = 0;
 
     bool first_sync = true;
+
+    // Variáveis de controle de parada e auditoria de hash
+    bool arm_stop = false;
+    uint64_t stop_at_tick = 6000;
+    uint64_t last_calculated_hash = 0;
+    uint64_t last_hash_tick = 0;
 
     uint64_t last_displayed_second = ~0ULL;
     int64_t last_displayed_scale = -1;
@@ -362,8 +331,6 @@ int main(int argc, char* argv[]) {
         ImGui::NewFrame();
 
         ImGui::Begin("Tempo");
-
-        // CORREÇÃO: Variável prev_sim_threads removida do bloco para manter compilação livre de warnings /W4
         if (ImGui::SliderInt("Threads", &sim_threads, 1, max_hardware_threads)) {
             app_log.add("Poder de processamento ajustado para %d threads.", sim_threads);
         }
@@ -377,17 +344,37 @@ int main(int argc, char* argv[]) {
         uint64_t game_seconds = sim_tick / SIM_HZ;
         ImGui::Text("Tick: %llu", (unsigned long long)sim_tick);
         ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)(game_seconds / 86400), (unsigned long long)((game_seconds / 3600) % 24), (unsigned long long)((game_seconds / 60) % 60));
-
-        // CORREÇÃO: Linha de totalização de instâncias reposta no painel
         ImGui::Text("Instancias: 100000");
-        ImGui::Text("Velocidade efetiva: %.0fx", last_frame_ms > 0.0 ? (last_ticks_this_frame / (last_frame_ms / 1000.0)) / 60.0 : 0.0);
-
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
+
+        // Exibição da Velocidade Efetiva
+        double effective_speed = frame_time > 0.0 ? (last_ticks_this_frame * DT) / frame_time : 0.0;
+        ImGui::Text("Velocidade efetiva: %.1fx", effective_speed);
+
         ImGui::Text("Sim ms/tick: %.3f", last_sim_ms_per_tick);
         ImGui::Text("Sync ms: %.3f", last_sync_ms);
+        ImGui::Text("Hash ms: %.3f", last_hash_ms);
         ImGui::Text("Ticks no frame: %d", last_ticks_this_frame);
+
+        ImGui::Separator();
+        ImGui::Text("Determinismo:");
+        ImGui::Text("Hash @ tick %llu: %016llX", (unsigned long long)last_hash_tick, (unsigned long long)last_calculated_hash);
+
+        ImGui::InputScalar("Alvo", ImGuiDataType_U64, &stop_at_tick);
+        if (stop_at_tick > sim_tick) {
+            if (ImGui::Button("Rodar até e pausar")) {
+                arm_stop = true;
+                app_log.add("Auditoria armada para o tick %llu.", (unsigned long long)stop_at_tick);
+            }
+        }
+        else {
+            ImGui::BeginDisabled();
+            ImGui::Button("Rodar até e pausar");
+            ImGui::EndDisabled();
+        }
+
         ImGui::End();
 
         ImGui::Begin("Log");
@@ -406,11 +393,28 @@ int main(int argc, char* argv[]) {
             accumulator -= DT;
             ticks_this_frame++;
 
-            // Orçamento de TEMPO por frame: a simulação nunca segura a UI por mais de 100 ms.
-            // Se a velocidade pedida excede a capacidade, descartamos o atraso — a
-            // velocidade efetiva passa a ser o que a CPU entrega, e a janela continua viva.
-            double sim_elapsed_ms = (double)(SDL_GetPerformanceCounter() - sim_start_timer) * 1000.0 / frequency;
-            if (sim_elapsed_ms > 100.0) {
+            // Disparo da Trava de Auditoria
+            if (arm_stop && sim_tick == stop_at_tick) {
+                time_scale = 0;
+                arm_stop = false;
+
+                uint64_t hash_start = SDL_GetPerformanceCounter();
+                uint64_t exact_hash = sim::state_hash(world, sim_tick);
+                last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
+
+                app_log.add("Parado no tick %llu | hash %016llX", (unsigned long long)sim_tick, (unsigned long long)exact_hash);
+
+                last_calculated_hash = exact_hash;
+                last_hash_tick = sim_tick;
+
+                // Quebra o loop in-frame para travar de fato a renderização no estado exato congelado
+                break;
+            }
+
+            // Orçamento restrito a 100ms de custo de simulação real por frame (Prevenção de Espiral de Morte)
+            uint64_t current_timer = SDL_GetPerformanceCounter();
+            double elapsed_sim_ms = (double)(current_timer - sim_start_timer) * 1000.0 / frequency;
+            if (elapsed_sim_ms >= 100.0) {
                 accumulator = 0.0;
                 break;
             }
@@ -422,6 +426,14 @@ int main(int argc, char* argv[]) {
         if (last_ticks_this_frame > 0) {
             double frame_sim_cost_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
             last_sim_ms_per_tick = frame_sim_cost_ms / last_ticks_this_frame;
+
+            // Hash iterativo gerado para controle passivo (Somente se não coincidir com a quebra exata acima)
+            if (last_hash_tick != sim_tick) {
+                uint64_t hash_start = SDL_GetPerformanceCounter();
+                last_calculated_hash = sim::state_hash(world, sim_tick);
+                last_hash_tick = sim_tick;
+                last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
+            }
         }
 
         game_seconds = sim_tick / SIM_HZ;
@@ -551,11 +563,9 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
     SDL_ReleaseGPUBuffer(device, vertex_buffer);
     SDL_ReleaseGPUBuffer(device, index_buffer);
-
     SDL_ReleaseGPUBuffer(device, neutral_instance_buffer);
     SDL_ReleaseGPUBuffer(device, crowd_instance_buffer);
     SDL_ReleaseGPUTransferBuffer(device, dyn_transfer_buf);
-
     SDL_ReleaseGPUTexture(device, depth_texture);
     SDL_ReleaseGPUShader(device, vs);
     SDL_ReleaseGPUShader(device, ps);
