@@ -1,6 +1,7 @@
 #pragma once
+#include <cstdint>
 
-// Header agnóstico: PROIBIDA a inclusão de SDL, ImGui, GLM, sim.h ou até mesmo headers sujos do Jolt.
+// Header agnóstico: PROIBIDA a inclusão de SDL, ImGui, GLM, sim.h ou headers sujos do Jolt.
 // A interface pública expõe apenas plain-old-data (POD) seguros.
 
 namespace phys {
@@ -21,12 +22,20 @@ namespace phys {
     void phys_init();
     void phys_shutdown();
 
-    // Cria colisores estáticos genéricos na cena
-    void phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz);
+    // Cria colisores estáticos genéricos na cena com suporte a eixos básicos de rotação
+    void phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz, float rot_yaw = 0.0f, float rot_pitch = 0.0f);
+
+    // Cria um colisor movimentável pela API sem assimilação de forças, retornando a ID atrelada
+    uint32_t phys_create_kinematic_box(float px, float py, float pz, float hx, float hy, float hz);
+    void phys_move_kinematic(uint32_t id, float x, float y, float z);
 
     // Injeta a cápsula do CharacterVirtual no ecossistema físico
     void phys_create_character(float px, float py, float pz);
 
-    // Chamada isolada por tick: Consome input, injeta gravidade, processa a atualização global e retorna estado atual
+    // Controle e teleporte atrelado às chaves de dev-tool
+    void phys_teleport_character(float px, float py, float pz);
+    bool phys_resize_character(bool agachado);
+
+    // Chamada isolada por tick: Consome input, processa a atualização global e retorna estado atual
     PhysState phys_update_character(const PhysInput& input);
 }

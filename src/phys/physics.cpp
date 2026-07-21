@@ -10,6 +10,7 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 
@@ -54,7 +55,6 @@ namespace phys {
         }
 
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
-        // Nome legível das camadas (o profiler da Jolt exige este override quando ativo)
         virtual const char* GetBroadPhaseLayerName(BroadPhaseLayer inLayer) const override
         {
             return ((BroadPhaseLayer::Type)inLayer == 0) ? "NON_MOVING" : "MOVING";
@@ -106,7 +106,6 @@ namespace phys {
         RegisterTypes();
 
         temp_allocator = new TempAllocatorImpl(10 * 1024 * 1024);
-
         job_system = new JobSystemThreadPool(cMaxPhysicsJobs, cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1);
 
         bp_layer_interface = new BPLayerInterfaceImpl();
@@ -129,25 +128,65 @@ namespace phys {
         Factory::sInstance = nullptr;
     }
 
-    void phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz) {
-        BodyInterface& body_interface = physics_system->GetBodyInterface();
-        // ShapeSettings nasce no HEAP: a Jolt assume posse via refcount e o
-        // destroi sozinha — nunca passar endereco de variavel local para ela.
-        BodyCreationSettings bcs(new BoxShapeSettings(Vec3(hx, hy, hz)),
-            RVec3(px, py, pz), Quat::sIdentity(),
-            EMotionType::Static, Layers::NON_MOVING);
-        Body* box = body_interface.CreateBody(bcs);
-        body_interface.AddBody(box->GetID(), EActivation::DontActivate);
+    void phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz, float rot_yaw, float rot_pitch) {
+        BodyInterface& bi = physics_system->GetBodyInterface();
+        Quat q_yaw = Quat::sRotation(Vec3::sAxisY(), rot_yaw);
+        Quat q_pitch = Quat::sRotation(Vec3::sAxisX(), rot_pitch);
+        Quat rot = q_yaw * q_pitch;
+
+        BodyCreationSettings bcs(new BoxShapeSettings(Vec3(hx, hy, hz)), RVec3(px, py, pz), rot, EMotionType::Static, Layers::NON_MOVING);
+        Body* box = bi.CreateBody(bcs);
+        bi.AddBody(box->GetID(), EActivation::DontActivate);
+    }
+
+    uint32_t phys_create_kinematic_box(float px, float py, float pz, float hx, float hy, float hz) {
+        BodyInterface& bi = physics_system->GetBodyInterface();
+        BodyCreationSettings bcs(new BoxShapeSettings(Vec3(hx, hy, hz)), RVec3(px, py, pz), Quat::sIdentity(), EMotionType::Kinematic, Layers::MOVING);
+        Body* box = bi.CreateBody(bcs);
+        bi.AddBody(box->GetID(), EActivation::Activate);
+        return box->GetID().GetIndexAndSequenceNumber();
+    }
+
+    void phys_move_kinematic(uint32_t id, float x, float y, float z) {
+        BodyInterface& bi = physics_system->GetBodyInterface();
+        bi.MoveKinematic(BodyID(id), RVec3(x, y, z), Quat::sIdentity(), 1.0f / 60.0f);
     }
 
     void phys_create_character(float px, float py, float pz) {
-        Ref<Shape> capsule = CapsuleShapeSettings(0.5f, 0.4f).Create().Get();
+        // CORREÇÃO 2: Cápsula deslocada com o pivô absoluto ancorado nos pés.
+        float half_height = 0.5f;
+        Ref<Shape> capsule = RotatedTranslatedShapeSettings(
+            Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
+            new CapsuleShapeSettings(half_height, 0.4f)
+        ).Create().Get();
+
         CharacterVirtualSettings settings;
         settings.mShape = capsule;
-
-        settings.mSupportingVolume = Plane(Vec3::sAxisY(), -0.5f);
+        // O plano de suporte desce para refletir o novo centro (pés) na Origem Y = 0.0f
+        settings.mSupportingVolume = Plane(Vec3::sAxisY(), 0.0f);
 
         character = new CharacterVirtual(&settings, RVec3(px, py, pz), Quat::sIdentity(), physics_system);
+    }
+
+    void phys_teleport_character(float px, float py, float pz) {
+        character->SetPosition(RVec3(px, py, pz));
+    }
+
+    bool phys_resize_character(bool agachado) {
+        // CORREÇÃO 2: Mantém o pivô fixo no chão escalonando o corpo apenas para cima
+        float half_height = agachado ? 0.15f : 0.5f;
+        ShapeRefC new_shape = RotatedTranslatedShapeSettings(
+            Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
+            new CapsuleShapeSettings(half_height, 0.4f)
+        ).Create().Get();
+
+        bool success = character->SetShape(new_shape,
+            1.5f * physics_system->GetPhysicsSettings().mPenetrationSlop,
+            physics_system->GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
+            physics_system->GetDefaultLayerFilter(Layers::MOVING),
+            {}, {}, *temp_allocator);
+
+        return success;
     }
 
     PhysState phys_update_character(const PhysInput& input) {
@@ -158,18 +197,15 @@ namespace phys {
         bool on_ground = (ground_state == CharacterVirtual::EGroundState::OnGround);
 
         Vec3 vel = character->GetLinearVelocity();
+        Vec3 ground_vel = character->GetGroundVelocity();
 
-        if (on_ground && vel.GetY() < 0.0f) {
-            vel.SetY(0.0f);
+        // CORREÇÃO 1: Vincula a massa à plataforma transportadora herdando a inércia do terreno + inputs
+        if (on_ground) {
+            vel = ground_vel + Vec3(input.move_x * 6.0f, input.jump ? 8.0f : 0.0f, input.move_z * 6.0f);
         }
-        vel.SetY(vel.GetY() + gravity.GetY() * dt);
-
-        if (input.jump && on_ground) {
-            vel.SetY(8.0f);
+        else {
+            vel.SetY(vel.GetY() + gravity.GetY() * dt);
         }
-
-        vel.SetX(input.move_x * 6.0f);
-        vel.SetZ(input.move_z * 6.0f);
 
         character->SetLinearVelocity(vel);
 
@@ -179,7 +215,6 @@ namespace phys {
         ShapeFilter shape_filter;
 
         character->Update(dt, gravity, bp_filter, obj_filter, body_filter, shape_filter, *temp_allocator);
-
         physics_system->Update(dt, 1, temp_allocator, job_system);
 
         RVec3 pos = character->GetPosition();
