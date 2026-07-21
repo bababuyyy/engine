@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 project(engine CXX)
 
-# Habilita a infraestrutura global do CTest no projeto
 enable_testing()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -32,6 +31,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
+# Integração da engine de física Jolt ancorada exatamente na v5.6.0
+FetchContent_Declare(
+    JoltPhysics
+    GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG v5.6.0
+    SOURCE_SUBDIR "Build"
+)
+# A Jolt deve herdar a runtime e as flags do projeto (DLL /MD) — os defaults
+# dela (/MT + flags próprias) causam runtime dupla no link (LNK2005 _Lockit).
+# Verificado no Build/CMakeLists.txt da tag v5.6.0, linhas 18 e 119.
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(JoltPhysics)
+
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -56,27 +69,23 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-# Engine principal mantida intacta
-add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h)
+# Adiciona o physics.cpp ao build principal
+add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp)
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
 target_include_directories(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm)
+target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
 
 if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 endif()
 
-# --- SUÍTE DE TESTES (M0) ---
-
-# O executável de testes roda PURAMENTE com módulos isolados.
+# Testes Headless do motor isolados sem vinculação à bibliotecas gráficas ou físicas
 add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp)
 target_include_directories(sim_tests PRIVATE src)
 if(MSVC)
     target_compile_options(sim_tests PRIVATE /W4)
 endif()
 
-# CORREÇÃO: Teste de Golden File habilitado integralmente APENAS no pipeline de Release.
-# O Debug utilizará flag headless para pular apenas a checagem da assinatura.
 if(CMAKE_BUILD_TYPE MATCHES "Rel")
     add_test(NAME sim_headless 
              COMMAND sim_tests
@@ -89,7 +98,6 @@ else()
     )
 endif()
 
-# Registro do Linter de regressões ativado sob qualquer configuração de build
 add_test(NAME regression_lint 
          COMMAND ${CMAKE_COMMAND} 
          -DSRC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp 

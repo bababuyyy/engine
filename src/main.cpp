@@ -11,9 +11,11 @@
 #include <vector>
 #include <string>
 #include <cstdarg>
+#include <cmath>
 
 #include "core/jobs.h"
 #include "sim/sim.h"
+#include "phys/physics.h"
 
 typedef unsigned char BYTE;
 #include "basic_vs.h"
@@ -88,17 +90,31 @@ int main(int argc, char* argv[]) {
     sim::World world;
     sim::init_world(world, 42, 100000);
 
+    phys::phys_init();
+    phys::phys_create_static_box(0.0f, -0.5f, 0.0f, 100.0f, 0.5f, 100.0f);
+    phys::phys_create_static_box(0.0f, 0.5f, 0.0f, 0.5f, 0.5f, 0.5f);
+    phys::phys_create_character(3.0f, 2.0f, -3.0f);
+
     Vertex vertices[] = {
         { -100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f }, {  100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f },
         {  100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f }, { -100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f },
         { -0.15f, 0.0f,  0.15f,   1.0f, 0.0f, 0.0f }, {  0.15f, 0.0f,  0.15f,   0.0f, 1.0f, 0.0f },
         {  0.15f, 0.0f, -0.15f,   0.0f, 0.0f, 1.0f }, { -0.15f, 0.0f, -0.15f,   1.0f, 1.0f, 0.0f },
         { -0.15f, 0.3f,  0.15f,   1.0f, 0.0f, 1.0f }, {  0.15f, 0.3f,  0.15f,   0.0f, 1.0f, 1.0f },
-        {  0.15f, 0.3f, -0.15f,   1.0f, 1.0f, 1.0f }, { -0.15f, 0.3f, -0.15f,   0.0f, 0.0f, 0.0f }
+        {  0.15f, 0.3f, -0.15f,   1.0f, 1.0f, 1.0f }, { -0.15f, 0.3f, -0.15f,   0.0f, 0.0f, 0.0f },
+        { -0.4f, -0.9f,  0.4f,   1.0f, 1.0f, 1.0f }, {  0.4f, -0.9f,  0.4f,   1.0f, 1.0f, 1.0f },
+        {  0.4f, -0.9f, -0.4f,   1.0f, 1.0f, 1.0f }, { -0.4f, -0.9f, -0.4f,   1.0f, 1.0f, 1.0f },
+        { -0.4f,  0.9f,  0.4f,   1.0f, 1.0f, 1.0f }, {  0.4f,  0.9f,  0.4f,   1.0f, 1.0f, 1.0f },
+        {  0.4f,  0.9f, -0.4f,   1.0f, 1.0f, 1.0f }, { -0.4f,  0.9f, -0.4f,   1.0f, 1.0f, 1.0f },
+        { -0.5f, 0.0f,  0.5f,   0.7f, 0.7f, 0.7f }, {  0.5f, 0.0f,  0.5f,   0.7f, 0.7f, 0.7f },
+        {  0.5f, 0.0f, -0.5f,   0.7f, 0.7f, 0.7f }, { -0.5f, 0.0f, -0.5f,   0.7f, 0.7f, 0.7f },
+        { -0.5f, 1.0f,  0.5f,   0.7f, 0.7f, 0.7f }, {  0.5f, 1.0f,  0.5f,   0.7f, 0.7f, 0.7f },
+        {  0.5f, 1.0f, -0.5f,   0.7f, 0.7f, 0.7f }, { -0.5f, 1.0f, -0.5f,   0.7f, 0.7f, 0.7f }
     };
 
     uint16_t indices[] = {
-        0, 1, 2, 0, 2, 3,  4, 5, 6, 4, 6, 7,  8, 10, 9, 8, 11, 10,
+        0, 1, 2, 0, 2, 3,
+        4, 5, 6, 4, 6, 7,  8, 10, 9, 8, 11, 10,
         4, 7, 11, 4, 11, 8,  5, 9, 10, 5, 10, 6,  4, 8, 9, 4, 9, 5,  7, 6, 10, 7, 10, 11
     };
 
@@ -129,6 +145,9 @@ int main(int argc, char* argv[]) {
     SDL_GPUBufferCreateInfo c_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, (uint32_t)(world.count * sizeof(InstanceData)) };
     SDL_GPUBuffer* crowd_instance_buffer = SDL_CreateGPUBuffer(device, &c_inst_info);
 
+    SDL_GPUBufferCreateInfo char_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, sizeof(InstanceData) };
+    SDL_GPUBuffer* char_instance_buffer = SDL_CreateGPUBuffer(device, &char_inst_info);
+
     SDL_GPUCommandBuffer* copy_cmd = SDL_AcquireGPUCommandBuffer(device);
     SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(copy_cmd);
 
@@ -150,6 +169,9 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUTransferBufferCreateInfo dyn_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)(world.count * sizeof(InstanceData)) };
     SDL_GPUTransferBuffer* dyn_transfer_buf = SDL_CreateGPUTransferBuffer(device, &dyn_tb_info);
+
+    SDL_GPUTransferBufferCreateInfo char_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, sizeof(InstanceData) };
+    SDL_GPUTransferBuffer* char_transfer_buf = SDL_CreateGPUTransferBuffer(device, &char_tb_info);
 
     SDL_GPUTextureCreateInfo depth_info = {};
     depth_info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -213,6 +235,7 @@ int main(int argc, char* argv[]) {
 
     app_log.add("JobSystem ativado em pool com %d workers físicos disponíveis.", max_hardware_threads);
     app_log.add("Mundo seed=%llu", (unsigned long long)world.seed);
+    app_log.add("AVISO: Pause e un-pause realocados para a tecla [P]. Espaco configurado p/ pulos.");
 
     glm::vec3 cam_pos(0.0f, 35.0f, -70.0f);
     float cam_yaw = 0.0f;
@@ -235,17 +258,17 @@ int main(int argc, char* argv[]) {
     double last_sync_ms = 0.0;
     double last_sim_ms_per_tick = 0.0;
     double last_hash_ms = 0.0;
+    double last_phys_ms = 0.0;
     int last_ticks_this_frame = 0;
 
     bool first_sync = true;
-
     bool arm_stop = false;
     uint64_t stop_at_tick = 6000;
     uint64_t last_calculated_hash = 0;
     uint64_t last_hash_tick = 0;
-
-    // CORREÇÃO: Toggle que salva orçamento massivo da CPU mantendo o Hash apenas quando ativado pelo usuário
     bool audit_hash = false;
+
+    phys::PhysState active_phys_state = { 3.0f, 2.0f, -3.0f, false };
 
     uint64_t last_displayed_second = ~0ULL;
     int64_t last_displayed_scale = -1;
@@ -291,7 +314,8 @@ int main(int argc, char* argv[]) {
             if (!ImGui::GetIO().WantCaptureKeyboard) {
                 if (event.type == SDL_EVENT_KEY_DOWN) {
                     if (event.key.key == SDLK_ESCAPE) running = false;
-                    else if (event.key.key == SDLK_SPACE) {
+                    // Correção: Atualizado para SDLK_P
+                    else if (event.key.key == SDLK_P) {
                         if (time_scale == 0) set_scale(previous_time_scale, "Tecla");
                         else set_scale(0, "Tecla");
                     }
@@ -309,9 +333,9 @@ int main(int argc, char* argv[]) {
         if (frame_time > 0.25) frame_time = 0.25;
         last_frame_ms = frame_time * 1000.0;
 
+        const bool* keys = SDL_GetKeyboardState(nullptr);
+
         if (!ImGui::GetIO().WantCaptureKeyboard) {
-            int num_keys;
-            const bool* keys = SDL_GetKeyboardState(&num_keys);
             float speed = 35.0f * (float)frame_time;
             if (keys[SDL_SCANCODE_LSHIFT]) speed *= 4.0f;
 
@@ -319,10 +343,6 @@ int main(int argc, char* argv[]) {
             glm::vec3 right = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front));
             glm::vec3 up(0, 1, 0);
 
-            if (keys[SDL_SCANCODE_W]) cam_pos += front * speed;
-            if (keys[SDL_SCANCODE_S]) cam_pos -= front * speed;
-            if (keys[SDL_SCANCODE_A]) cam_pos -= right * speed;
-            if (keys[SDL_SCANCODE_D]) cam_pos += right * speed;
             if (keys[SDL_SCANCODE_E]) cam_pos += up * speed;
             if (keys[SDL_SCANCODE_Q]) cam_pos -= up * speed;
         }
@@ -336,11 +356,11 @@ int main(int argc, char* argv[]) {
             app_log.add("Poder de processamento ajustado para %d threads.", sim_threads);
         }
 
-        if (ImGui::Button("Pausa")) set_scale(0, "Botão"); ImGui::SameLine();
-        if (ImGui::Button("1x"))    set_scale(1, "Botão"); ImGui::SameLine();
-        if (ImGui::Button("10x"))   set_scale(10, "Botão"); ImGui::SameLine();
-        if (ImGui::Button("100x"))  set_scale(100, "Botão"); ImGui::SameLine();
-        if (ImGui::Button("1000x")) set_scale(1000, "Botão");
+        if (ImGui::Button("Pausa [P]")) set_scale(0, "Botão"); ImGui::SameLine();
+        if (ImGui::Button("1x"))        set_scale(1, "Botão"); ImGui::SameLine();
+        if (ImGui::Button("10x"))       set_scale(10, "Botão"); ImGui::SameLine();
+        if (ImGui::Button("100x"))      set_scale(100, "Botão"); ImGui::SameLine();
+        if (ImGui::Button("1000x"))     set_scale(1000, "Botão");
 
         uint64_t game_seconds = sim_tick / SIM_HZ;
         ImGui::Text("Tick: %llu", (unsigned long long)sim_tick);
@@ -354,23 +374,21 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Velocidade efetiva: %.1fx", effective_speed);
 
         ImGui::Text("Sim ms/tick: %.3f", last_sim_ms_per_tick);
+        ImGui::Text("Phys ms: %.3f", last_phys_ms);
+        ImGui::Text("No chao: %s", active_phys_state.on_ground ? "sim" : "nao");
         ImGui::Text("Sync ms: %.3f", last_sync_ms);
         ImGui::Text("Hash ms: %.3f", last_hash_ms);
         ImGui::Text("Ticks no frame: %d", last_ticks_this_frame);
 
         ImGui::Separator();
         ImGui::Text("Determinismo:");
-
-        // CORREÇÃO: Renderiza a checkbox no painel linkada ao toggle
         ImGui::Checkbox("Auditoria de hash", &audit_hash);
-
         ImGui::Text("Hash @ tick %llu: %016llX", (unsigned long long)last_hash_tick, (unsigned long long)last_calculated_hash);
 
         ImGui::InputScalar("Alvo", ImGuiDataType_U64, &stop_at_tick);
         if (stop_at_tick > sim_tick) {
             if (ImGui::Button("Rodar até e pausar")) {
                 arm_stop = true;
-                // CORREÇÃO: Disparar a trava liga implícita e compulsoriamente a auditoria do log
                 audit_hash = true;
                 app_log.add("Auditoria armada para o tick %llu.", (unsigned long long)stop_at_tick);
             }
@@ -395,11 +413,31 @@ int main(int argc, char* argv[]) {
 
         while (accumulator >= DT) {
             sim::step(world, sim_tick, js, sim_threads);
+
+            uint64_t phys_start = SDL_GetPerformanceCounter();
+
+            phys::PhysInput p_input = {};
+            if (!ImGui::GetIO().WantCaptureKeyboard) {
+                if (keys[SDL_SCANCODE_W]) p_input.move_z -= 1.0f;
+                if (keys[SDL_SCANCODE_S]) p_input.move_z += 1.0f;
+                if (keys[SDL_SCANCODE_A]) p_input.move_x -= 1.0f;
+                if (keys[SDL_SCANCODE_D]) p_input.move_x += 1.0f;
+
+                if (p_input.move_x != 0.0f || p_input.move_z != 0.0f) {
+                    float len = std::sqrt(p_input.move_x * p_input.move_x + p_input.move_z * p_input.move_z);
+                    p_input.move_x /= len;
+                    p_input.move_z /= len;
+                }
+                p_input.jump = keys[SDL_SCANCODE_SPACE];
+            }
+
+            active_phys_state = phys::phys_update_character(p_input);
+            last_phys_ms = (double)(SDL_GetPerformanceCounter() - phys_start) * 1000.0 / frequency;
+
             sim_tick++;
             accumulator -= DT;
             ticks_this_frame++;
 
-            // O hash imutável interno de auditoria de limite continua operando sem restrições do Toggle
             if (arm_stop && sim_tick == stop_at_tick) {
                 time_scale = 0;
                 arm_stop = false;
@@ -431,7 +469,6 @@ int main(int argc, char* argv[]) {
             double frame_sim_cost_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
             last_sim_ms_per_tick = frame_sim_cost_ms / last_ticks_this_frame;
 
-            // CORREÇÃO: Envelopamento do loop de iteração atrelado ao checkbox no painel "audit_hash"
             if (audit_hash) {
                 if (last_hash_tick != sim_tick) {
                     uint64_t hash_start = SDL_GetPerformanceCounter();
@@ -441,7 +478,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             else {
-                last_hash_ms = 0.0; // Põe o contador explícito de UI pra dormir se o hash for ignorado
+                last_hash_ms = 0.0;
             }
         }
 
@@ -486,12 +523,25 @@ int main(int argc, char* argv[]) {
             }
             SDL_UnmapGPUTransferBuffer(device, dyn_transfer_buf);
 
-            SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
+            InstanceData* mapped_char = (InstanceData*)SDL_MapGPUTransferBuffer(device, char_transfer_buf, true);
+            mapped_char[0].x = active_phys_state.x;
+            mapped_char[0].y = active_phys_state.y;
+            mapped_char[0].z = active_phys_state.z;
+            mapped_char[0].r = 1.0f; mapped_char[0].g = 1.0f; mapped_char[0].b = 1.0f;
+            SDL_UnmapGPUTransferBuffer(device, char_transfer_buf);
+
+            // Correção: Variável de cópia descolada para corrigir o C4456 shadowing notice reportado na linha de validação anterior
+            SDL_GPUCopyPass* char_copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
+
             SDL_GPUTransferBufferLocation loc = { dyn_transfer_buf, 0 };
             SDL_GPUBufferRegion reg = { crowd_instance_buffer, 0, (uint32_t)(world.count * sizeof(InstanceData)) };
+            SDL_UploadToGPUBuffer(char_copy_pass, &loc, &reg, true);
 
-            SDL_UploadToGPUBuffer(copy_pass, &loc, &reg, true);
-            SDL_EndGPUCopyPass(copy_pass);
+            SDL_GPUTransferBufferLocation char_loc = { char_transfer_buf, 0 };
+            SDL_GPUBufferRegion char_reg = { char_instance_buffer, 0, sizeof(InstanceData) };
+            SDL_UploadToGPUBuffer(char_copy_pass, &char_loc, &char_reg, true);
+
+            SDL_EndGPUCopyPass(char_copy_pass);
 
             uint64_t sync_end_timer = SDL_GetPerformanceCounter();
             last_sync_ms = (double)(sync_end_timer - sync_start_timer) * 1000.0 / frequency;
@@ -542,9 +592,15 @@ int main(int argc, char* argv[]) {
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_floor, 1);
             SDL_DrawGPUIndexedPrimitives(scene_pass, 6, 1, 0, 0, 0);
 
+            SDL_DrawGPUIndexedPrimitives(scene_pass, 36, 1, 6, 16, 0);
+
             SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);
             SDL_DrawGPUIndexedPrimitives(scene_pass, 36, 100000, 6, 0, 0);
+
+            SDL_GPUBufferBinding inst_bind_char = { char_instance_buffer, 0 };
+            SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_char, 1);
+            SDL_DrawGPUIndexedPrimitives(scene_pass, 36, 1, 6, 8, 0);
 
             SDL_EndGPURenderPass(scene_pass);
 
@@ -574,13 +630,20 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUBuffer(device, index_buffer);
     SDL_ReleaseGPUBuffer(device, neutral_instance_buffer);
     SDL_ReleaseGPUBuffer(device, crowd_instance_buffer);
+    SDL_ReleaseGPUBuffer(device, char_instance_buffer);
+
     SDL_ReleaseGPUTransferBuffer(device, dyn_transfer_buf);
+    SDL_ReleaseGPUTransferBuffer(device, char_transfer_buf);
+
     SDL_ReleaseGPUTexture(device, depth_texture);
     SDL_ReleaseGPUShader(device, vs);
     SDL_ReleaseGPUShader(device, ps);
 
     SDL_DestroyGPUDevice(device);
     SDL_DestroyWindow(window);
+
+    phys::phys_shutdown();
+
     SDL_Quit();
 
     return 0;
