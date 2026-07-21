@@ -22,8 +22,9 @@ namespace phys {
     void phys_init();
     void phys_shutdown();
 
-    // Cria colisores estáticos genéricos na cena com suporte a eixos básicos de rotação
-    void phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz, float rot_yaw = 0.0f, float rot_pitch = 0.0f);
+    // Cria colisores estáticos e retorna a ID Jolt embutida num descritor genérico (necessário pro F5 Reload)
+    uint32_t phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz, float rot_yaw = 0.0f, float rot_pitch = 0.0f);
+    void phys_destroy_body(uint32_t id);
 
     // Cria um colisor movimentável pela API sem assimilação de forças, retornando a ID atrelada
     uint32_t phys_create_kinematic_box(float px, float py, float pz, float hx, float hy, float hz);

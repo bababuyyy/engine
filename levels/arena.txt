@@ -1,0 +1,4 @@
+# Arena principal do Liririandi (edite e aperte F5 no jogo!)
+box 0 -0.5 0 100 0.5 100 0.35 0.35 0.35
+box 0 0.5 0 0.5 0.5 0.5 0.7 0.7 0.7
+spawn 3 2 -3

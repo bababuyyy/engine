@@ -31,16 +31,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-# Integração da engine de física Jolt ancorada exatamente na v5.6.0
 FetchContent_Declare(
     JoltPhysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
     GIT_TAG v5.6.0
     SOURCE_SUBDIR "Build"
 )
-# A Jolt deve herdar a runtime e as flags do projeto (DLL /MD) — os defaults
-# dela (/MT + flags próprias) causam runtime dupla no link (LNK2005 _Lockit).
-# Verificado no Build/CMakeLists.txt da tag v5.6.0, linhas 18 e 119.
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
 set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(JoltPhysics)
@@ -69,17 +65,19 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-# Adiciona o physics.cpp ao build principal
-add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp)
+# Reflete a inclusão do source logic isolado para interpretação de level na compilação do engine
+add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp)
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
 target_include_directories(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
+
+# Caminho absoluto da pasta de níveis (dev build): F5 recarrega o arquivo-FONTE
+target_compile_definitions(engine PRIVATE LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/")
 
 if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 endif()
 
-# Testes Headless do motor isolados sem vinculação à bibliotecas gráficas ou físicas
 add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp)
 target_include_directories(sim_tests PRIVATE src)
 if(MSVC)

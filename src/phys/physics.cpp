@@ -128,7 +128,7 @@ namespace phys {
         Factory::sInstance = nullptr;
     }
 
-    void phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz, float rot_yaw, float rot_pitch) {
+    uint32_t phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz, float rot_yaw, float rot_pitch) {
         BodyInterface& bi = physics_system->GetBodyInterface();
         Quat q_yaw = Quat::sRotation(Vec3::sAxisY(), rot_yaw);
         Quat q_pitch = Quat::sRotation(Vec3::sAxisX(), rot_pitch);
@@ -137,6 +137,14 @@ namespace phys {
         BodyCreationSettings bcs(new BoxShapeSettings(Vec3(hx, hy, hz)), RVec3(px, py, pz), rot, EMotionType::Static, Layers::NON_MOVING);
         Body* box = bi.CreateBody(bcs);
         bi.AddBody(box->GetID(), EActivation::DontActivate);
+        return box->GetID().GetIndexAndSequenceNumber();
+    }
+
+    void phys_destroy_body(uint32_t id) {
+        BodyInterface& bi = physics_system->GetBodyInterface();
+        BodyID bid(id);
+        bi.RemoveBody(bid);
+        bi.DestroyBody(bid);
     }
 
     uint32_t phys_create_kinematic_box(float px, float py, float pz, float hx, float hy, float hz) {
@@ -153,7 +161,6 @@ namespace phys {
     }
 
     void phys_create_character(float px, float py, float pz) {
-        // CORREÇÃO 2: Cápsula deslocada com o pivô absoluto ancorado nos pés.
         float half_height = 0.5f;
         Ref<Shape> capsule = RotatedTranslatedShapeSettings(
             Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
@@ -162,7 +169,6 @@ namespace phys {
 
         CharacterVirtualSettings settings;
         settings.mShape = capsule;
-        // O plano de suporte desce para refletir o novo centro (pés) na Origem Y = 0.0f
         settings.mSupportingVolume = Plane(Vec3::sAxisY(), 0.0f);
 
         character = new CharacterVirtual(&settings, RVec3(px, py, pz), Quat::sIdentity(), physics_system);
@@ -173,7 +179,6 @@ namespace phys {
     }
 
     bool phys_resize_character(bool agachado) {
-        // CORREÇÃO 2: Mantém o pivô fixo no chão escalonando o corpo apenas para cima
         float half_height = agachado ? 0.15f : 0.5f;
         ShapeRefC new_shape = RotatedTranslatedShapeSettings(
             Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
@@ -199,7 +204,6 @@ namespace phys {
         Vec3 vel = character->GetLinearVelocity();
         Vec3 ground_vel = character->GetGroundVelocity();
 
-        // CORREÇÃO 1: Vincula a massa à plataforma transportadora herdando a inércia do terreno + inputs
         if (on_ground) {
             vel = ground_vel + Vec3(input.move_x * 6.0f, input.jump ? 8.0f : 0.0f, input.move_z * 6.0f);
         }

@@ -16,6 +16,7 @@
 #include "core/jobs.h"
 #include "sim/sim.h"
 #include "phys/physics.h"
+#include "level/level.h"
 
 typedef unsigned char BYTE;
 #include "basic_vs.h"
@@ -97,9 +98,7 @@ int main(int argc, char* argv[]) {
 
     phys::phys_init();
 
-    phys::phys_create_static_box(0.0f, -0.5f, 0.0f, 100.0f, 0.5f, 100.0f);
-    phys::phys_create_static_box(0.0f, 0.5f, 0.0f, 0.5f, 0.5f, 0.5f);
-
+    // Cria a física permanente da cena de tortura apenas UMA VEZ
     phys::phys_create_static_box(300.0f, -0.5f, 0.0f, 15.0f, 0.5f, 15.0f);
     phys::phys_create_static_box(295.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, 0.785398f);
     phys::phys_create_static_box(305.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, -0.785398f);
@@ -110,128 +109,160 @@ int main(int argc, char* argv[]) {
     }
 
     uint32_t plat_id = phys::phys_create_kinematic_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f);
-    phys::phys_create_character(3.0f, 2.0f, -3.0f);
+    phys::phys_create_character(0.0f, 2.0f, 0.0f);
 
-    // --- REFINAMENTO DO CÓDIGO DA GPU (Geração Programática de MeshRanges) ---
-    std::vector<Vertex> vertices;
-    std::vector<uint16_t> indices;
+    AppLog app_log;
 
-    auto add_quad_y0 = [&](float cx, float cz, float half, float r, float g, float b) -> MeshRange {
-        uint32_t base = (uint32_t)vertices.size();
-        uint32_t start_idx = (uint32_t)indices.size();
+    MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma;
+    size_t level_box_count = 0;
+    std::vector<uint32_t> level_body_ids;
 
-        vertices.push_back({ cx - half, 0.0f, cz + half, r, g, b });
-        vertices.push_back({ cx + half, 0.0f, cz + half, r, g, b });
-        vertices.push_back({ cx + half, 0.0f, cz - half, r, g, b });
-        vertices.push_back({ cx - half, 0.0f, cz - half, r, g, b });
+    SDL_GPUBuffer* vertex_buffer = nullptr;
+    SDL_GPUBuffer* index_buffer = nullptr;
 
-        indices.push_back(base + 0);
-        indices.push_back(base + 1);
-        indices.push_back(base + 2);
-        indices.push_back(base + 0);
-        indices.push_back(base + 2);
-        indices.push_back(base + 3);
+    glm::vec3 current_player_pos(0.0f);
+    glm::vec3 prev_player_pos(0.0f);
+    phys::PhysState active_phys_state = { 0.0f, 0.0f, 0.0f, false };
 
-        return { start_idx, 6 };
-        };
+    auto build_level = [&](const level::LevelData& lvl) {
+        for (uint32_t id : level_body_ids) phys::phys_destroy_body(id);
+        level_body_ids.clear();
 
-    auto add_box = [&](float cx, float cy, float cz, float hx, float hy, float hz, float r, float g, float b, float rot_yaw = 0.0f, float rot_pitch = 0.0f) -> MeshRange {
-        uint32_t base = (uint32_t)vertices.size();
-        uint32_t start_idx = (uint32_t)indices.size();
+        if (vertex_buffer) SDL_ReleaseGPUBuffer(device, vertex_buffer);
+        if (index_buffer) SDL_ReleaseGPUBuffer(device, index_buffer);
 
-        glm::mat4 mat(1.0f);
-        mat = glm::translate(mat, glm::vec3(cx, cy, cz));
-        mat = glm::rotate(mat, rot_yaw, glm::vec3(0, 1, 0));
-        mat = glm::rotate(mat, rot_pitch, glm::vec3(1, 0, 0));
-        mat = glm::scale(mat, glm::vec3(hx, hy, hz));
+        std::vector<Vertex> vertices;
+        std::vector<uint16_t> indices;
 
-        glm::vec3 corners[8] = {
-            {-1, -1,  1}, { 1, -1,  1}, { 1,  1,  1}, {-1,  1,  1},
-            {-1, -1, -1}, { 1, -1, -1}, { 1,  1, -1}, {-1,  1, -1}
-        };
+        auto add_box = [&](float cx, float cy, float cz, float hx, float hy, float hz, float r, float g, float b, float rot_yaw = 0.0f, float rot_pitch = 0.0f) {
+            uint32_t base = (uint32_t)vertices.size();
+            uint32_t start_idx = (uint32_t)indices.size();
 
-        for (int i = 0; i < 8; ++i) {
-            glm::vec4 p = mat * glm::vec4(corners[i], 1.0f);
-            vertices.push_back({ p.x, p.y, p.z, r, g, b });
+            glm::mat4 mat(1.0f);
+            mat = glm::translate(mat, glm::vec3(cx, cy, cz));
+            mat = glm::rotate(mat, rot_yaw, glm::vec3(0, 1, 0));
+            mat = glm::rotate(mat, rot_pitch, glm::vec3(1, 0, 0));
+            mat = glm::scale(mat, glm::vec3(hx, hy, hz));
+
+            glm::vec3 corners[8] = {
+                {-1, -1,  1}, { 1, -1,  1}, { 1,  1,  1}, {-1,  1,  1},
+                {-1, -1, -1}, { 1, -1, -1}, { 1,  1, -1}, {-1,  1, -1}
+            };
+            for (int i = 0; i < 8; ++i) {
+                glm::vec4 p = mat * glm::vec4(corners[i], 1.0f);
+                vertices.push_back({ p.x, p.y, p.z, r, g, b });
+            }
+
+            uint16_t local_inds[36] = {
+                0,1,2, 0,2,3,  1,5,6, 1,6,2,  5,4,7, 5,7,6,
+                4,0,3, 4,3,7,  3,2,6, 3,6,7,  4,5,1, 4,1,0
+            };
+            for (int i = 0; i < 36; ++i) indices.push_back(base + local_inds[i]);
+
+            return MeshRange{ start_idx, 36 };
+            };
+
+        uint32_t lvl_start = indices.size();
+        for (const auto& b : lvl.boxes) {
+            add_box(b.cx, b.cy, b.cz, b.hx, b.hy, b.hz, b.r, b.g, b.b);
+            uint32_t bid = phys::phys_create_static_box(b.cx, b.cy, b.cz, b.hx, b.hy, b.hz);
+            level_body_ids.push_back(bid);
         }
+        nivel_range = { lvl_start, (uint32_t)indices.size() - lvl_start };
 
-        uint16_t local_inds[36] = {
-            0,1,2, 0,2,3,  1,5,6, 1,6,2,  5,4,7, 5,7,6,
-            4,0,3, 4,3,7,  3,2,6, 3,6,7,  4,5,1, 4,1,0
-        };
-        for (int i = 0; i < 36; ++i) {
-            indices.push_back(base + local_inds[i]);
+        uint32_t tortura_start = indices.size();
+        add_box(300.0f, -0.5f, 0.0f, 15.0f, 0.5f, 15.0f, 0.3f, 0.4f, 0.3f);
+        add_box(295.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, 0.4f, 0.3f, 0.3f, 0.785398f);
+        add_box(305.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, 0.4f, 0.3f, 0.3f, -0.785398f);
+        add_box(300.0f, 2.5f, 12.0f, 5.0f, 2.5f, 0.5f, 0.3f, 0.3f, 0.4f);
+        add_box(300.0f, 0.0f, -10.0f, 2.0f, 0.1f, 3.0f, 0.4f, 0.4f, 0.3f, 0.0f, 0.785398f);
+        for (int i = 0; i < 8; i++) {
+            add_box(305.0f, 0.125f + i * 0.25f, -12.0f - i * 0.5f, 2.0f, 0.125f, 0.25f, 0.5f, 0.5f, 0.5f);
         }
+        tortura_range = { tortura_start, (uint32_t)indices.size() - tortura_start };
 
-        return { start_idx, 36 };
+        cubo_multidao = add_box(0.0f, 0.15f, 0.0f, 0.15f, 0.15f, 0.15f, 1.0f, 1.0f, 1.0f);
+        cubo_jogador = add_box(0.0f, 0.9f, 0.0f, 0.4f, 0.9f, 0.4f, 1.0f, 1.0f, 1.0f);
+        cubo_jogador_agachado = add_box(0.0f, 0.45f, 0.0f, 0.4f, 0.45f, 0.4f, 1.0f, 1.0f, 1.0f);
+        cubo_plataforma = add_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f, 1.0f, 1.0f, 1.0f);
+
+        uint32_t vb_size = (uint32_t)(vertices.size() * sizeof(Vertex));
+        uint32_t ib_size = (uint32_t)(indices.size() * sizeof(uint16_t));
+
+        SDL_GPUTransferBufferCreateInfo tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, vb_size + ib_size };
+        SDL_GPUTransferBuffer* temp_transfer = SDL_CreateGPUTransferBuffer(device, &tb_info);
+
+        void* map = SDL_MapGPUTransferBuffer(device, temp_transfer, false);
+        memcpy(map, vertices.data(), vb_size);
+        memcpy((uint8_t*)map + vb_size, indices.data(), ib_size);
+        SDL_UnmapGPUTransferBuffer(device, temp_transfer);
+
+        SDL_GPUBufferCreateInfo vb_info = { SDL_GPU_BUFFERUSAGE_VERTEX, vb_size };
+        vertex_buffer = SDL_CreateGPUBuffer(device, &vb_info);
+
+        SDL_GPUBufferCreateInfo ib_info = { SDL_GPU_BUFFERUSAGE_INDEX, ib_size };
+        index_buffer = SDL_CreateGPUBuffer(device, &ib_info);
+
+        SDL_GPUCommandBuffer* copy_cmd = SDL_AcquireGPUCommandBuffer(device);
+        SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(copy_cmd);
+
+        SDL_GPUTransferBufferLocation vb_loc = { temp_transfer, 0 };
+        SDL_GPUBufferRegion vb_reg = { vertex_buffer, 0, vb_size };
+        SDL_UploadToGPUBuffer(copy_pass, &vb_loc, &vb_reg, false);
+
+        SDL_GPUTransferBufferLocation ib_loc = { temp_transfer, vb_size };
+        SDL_GPUBufferRegion ib_reg = { index_buffer, 0, ib_size };
+        SDL_UploadToGPUBuffer(copy_pass, &ib_loc, &ib_reg, false);
+
+        SDL_EndGPUCopyPass(copy_pass);
+        SDL_SubmitGPUCommandBuffer(copy_cmd);
+        SDL_ReleaseGPUTransferBuffer(device, temp_transfer);
+
+        phys::phys_teleport_character(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
+        active_phys_state.x = lvl.spawn.x;
+        active_phys_state.y = lvl.spawn.y;
+        active_phys_state.z = lvl.spawn.z;
+        current_player_pos = glm::vec3(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
+        prev_player_pos = current_player_pos;
+
+        level_box_count = lvl.boxes.size();
+        app_log.add("Nivel recarregado: %zu caixas", level_box_count);
         };
 
-    MeshRange chao = add_quad_y0(0.0f, 0.0f, 100.0f, 0.35f, 0.35f, 0.35f);
-    MeshRange cubo_central = add_box(0.0f, 0.5f, 0.0f, 0.5f, 0.5f, 0.5f, 0.7f, 0.7f, 0.7f);
-    MeshRange cubo_multidao = add_box(0.0f, 0.15f, 0.0f, 0.15f, 0.15f, 0.15f, 1.0f, 1.0f, 1.0f);
-    MeshRange cubo_jogador = add_box(0.0f, 0.9f, 0.0f, 0.4f, 0.9f, 0.4f, 1.0f, 1.0f, 1.0f);
-    MeshRange cubo_plataforma = add_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f, 1.0f, 1.0f, 1.0f);
-
-    uint32_t tortura_start = (uint32_t)indices.size();
-    add_box(300.0f, -0.5f, 0.0f, 15.0f, 0.5f, 15.0f, 0.3f, 0.4f, 0.3f);
-    add_box(295.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, 0.4f, 0.3f, 0.3f, 0.785398f);
-    add_box(305.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, 0.4f, 0.3f, 0.3f, -0.785398f);
-    add_box(300.0f, 2.5f, 12.0f, 5.0f, 2.5f, 0.5f, 0.3f, 0.3f, 0.4f);
-    add_box(300.0f, 0.0f, -10.0f, 2.0f, 0.1f, 3.0f, 0.4f, 0.4f, 0.3f, 0.0f, 0.785398f);
-    for (int i = 0; i < 8; i++) {
-        add_box(305.0f, 0.125f + i * 0.25f, -12.0f - i * 0.5f, 2.0f, 0.125f, 0.25f, 0.5f, 0.5f, 0.5f);
+    level::LevelData initial_lvl = level::load_level(LEVELS_DIR "arena.txt");
+    if (initial_lvl.ok) {
+        build_level(initial_lvl);
     }
-    MeshRange tortura = { tortura_start, (uint32_t)indices.size() - tortura_start };
+    else {
+        app_log.add("Aviso: Falha ao carregar arena.txt");
+    }
 
     InstanceData neutral_inst = { 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f };
-
-    uint32_t vb_size = (uint32_t)(vertices.size() * sizeof(Vertex));
-    uint32_t ib_size = (uint32_t)(indices.size() * sizeof(uint16_t));
     uint32_t neutral_size = sizeof(InstanceData);
 
-    SDL_GPUTransferBufferCreateInfo tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, vb_size + ib_size + neutral_size };
-    SDL_GPUTransferBuffer* temp_transfer = SDL_CreateGPUTransferBuffer(device, &tb_info);
-
-    void* map = SDL_MapGPUTransferBuffer(device, temp_transfer, false);
-    memcpy(map, vertices.data(), vb_size);
-    memcpy((uint8_t*)map + vb_size, indices.data(), ib_size);
-    memcpy((uint8_t*)map + vb_size + ib_size, &neutral_inst, neutral_size);
-    SDL_UnmapGPUTransferBuffer(device, temp_transfer);
-
-    SDL_GPUBufferCreateInfo vb_info = { SDL_GPU_BUFFERUSAGE_VERTEX, vb_size };
-    SDL_GPUBuffer* vertex_buffer = SDL_CreateGPUBuffer(device, &vb_info);
-
-    SDL_GPUBufferCreateInfo ib_info = { SDL_GPU_BUFFERUSAGE_INDEX, ib_size };
-    SDL_GPUBuffer* index_buffer = SDL_CreateGPUBuffer(device, &ib_info);
+    SDL_GPUTransferBufferCreateInfo n_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, neutral_size };
+    SDL_GPUTransferBuffer* n_transfer = SDL_CreateGPUTransferBuffer(device, &n_tb_info);
+    void* n_map = SDL_MapGPUTransferBuffer(device, n_transfer, false);
+    memcpy(n_map, &neutral_inst, neutral_size);
+    SDL_UnmapGPUTransferBuffer(device, n_transfer);
 
     SDL_GPUBufferCreateInfo n_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, neutral_size };
     SDL_GPUBuffer* neutral_instance_buffer = SDL_CreateGPUBuffer(device, &n_inst_info);
 
+    SDL_GPUCommandBuffer* n_cmd = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass* n_pass = SDL_BeginGPUCopyPass(n_cmd);
+    SDL_GPUTransferBufferLocation n_loc = { n_transfer, 0 };
+    SDL_GPUBufferRegion n_reg = { neutral_instance_buffer, 0, neutral_size };
+    SDL_UploadToGPUBuffer(n_pass, &n_loc, &n_reg, false);
+    SDL_EndGPUCopyPass(n_pass);
+    SDL_SubmitGPUCommandBuffer(n_cmd);
+    SDL_ReleaseGPUTransferBuffer(device, n_transfer);
+
     SDL_GPUBufferCreateInfo c_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, (uint32_t)(world.count * sizeof(InstanceData)) };
     SDL_GPUBuffer* crowd_instance_buffer = SDL_CreateGPUBuffer(device, &c_inst_info);
 
-    // Buffer comportará 2 instâncias dinâmicas (Instance 0: Personagem | Instance 1: Plataforma Móvel)
     SDL_GPUBufferCreateInfo char_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, 2 * sizeof(InstanceData) };
     SDL_GPUBuffer* char_instance_buffer = SDL_CreateGPUBuffer(device, &char_inst_info);
-
-    SDL_GPUCommandBuffer* copy_cmd = SDL_AcquireGPUCommandBuffer(device);
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(copy_cmd);
-
-    SDL_GPUTransferBufferLocation vb_loc = { temp_transfer, 0 };
-    SDL_GPUBufferRegion vb_reg = { vertex_buffer, 0, vb_size };
-    SDL_UploadToGPUBuffer(copy_pass, &vb_loc, &vb_reg, false);
-
-    SDL_GPUTransferBufferLocation ib_loc = { temp_transfer, vb_size };
-    SDL_GPUBufferRegion ib_reg = { index_buffer, 0, ib_size };
-    SDL_UploadToGPUBuffer(copy_pass, &ib_loc, &ib_reg, false);
-
-    SDL_GPUTransferBufferLocation n_loc = { temp_transfer, vb_size + ib_size };
-    SDL_GPUBufferRegion n_reg = { neutral_instance_buffer, 0, neutral_size };
-    SDL_UploadToGPUBuffer(copy_pass, &n_loc, &n_reg, false);
-
-    SDL_EndGPUCopyPass(copy_pass);
-    SDL_SubmitGPUCommandBuffer(copy_cmd);
-    SDL_ReleaseGPUTransferBuffer(device, temp_transfer);
 
     SDL_GPUTransferBufferCreateInfo dyn_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)(world.count * sizeof(InstanceData)) };
     SDL_GPUTransferBuffer* dyn_transfer_buf = SDL_CreateGPUTransferBuffer(device, &dyn_tb_info);
@@ -294,7 +325,6 @@ int main(int argc, char* argv[]) {
     imgui_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
     ImGui_ImplSDLGPU3_Init(&imgui_info);
 
-    AppLog app_log;
     int max_hardware_threads = (int)std::thread::hardware_concurrency();
     if (max_hardware_threads < 1) max_hardware_threads = 1;
     int sim_threads = max_hardware_threads;
@@ -338,14 +368,14 @@ int main(int argc, char* argv[]) {
     uint64_t last_hash_tick = 0;
     bool audit_hash = false;
 
-    phys::PhysState active_phys_state = { 3.0f, 2.0f, -3.0f, false };
-
     std::vector<glm::vec3> pos_history(60, glm::vec3(0.0f));
     int history_idx = 0;
     int history_count = 0;
     int ticks_in_air = 0;
 
     phys::PhysState plat_state = { 0.0f, 0.0f, 0.0f, false };
+    glm::vec3 current_plat_pos(0.0f);
+    glm::vec3 prev_plat_pos(0.0f);
 
     uint64_t last_displayed_second = ~0ULL;
     int64_t last_displayed_scale = -1;
@@ -399,10 +429,23 @@ int main(int argc, char* argv[]) {
                         cam_follow = !cam_follow;
                         app_log.add("Camera: %s", cam_follow ? "FOLLOW" : "FLY");
                     }
+                    else if (event.key.key == SDLK_F5) {
+                        SDL_WaitForGPUIdle(device);
+                        level::LevelData new_lvl = level::load_level(LEVELS_DIR "arena.txt");
+                        if (new_lvl.ok) build_level(new_lvl);
+                        else app_log.add("Erro: Falha ao recarregar arena.txt");
+                    }
                     else if (event.key.key == SDLK_T) {
                         in_torture = !in_torture;
-                        if (in_torture) phys::phys_teleport_character(300.0f, 2.0f, 0.0f);
-                        else phys::phys_teleport_character(3.0f, 2.0f, -3.0f);
+                        glm::vec3 target = in_torture ? glm::vec3(300.0f, 2.0f, 0.0f) : glm::vec3(3.0f, 2.0f, -3.0f);
+
+                        phys::phys_teleport_character(target.x, target.y, target.z);
+                        active_phys_state.x = target.x;
+                        active_phys_state.y = target.y;
+                        active_phys_state.z = target.z;
+                        current_player_pos = target;
+                        prev_player_pos = target;
+
                         app_log.add("Teleporte: %s", in_torture ? "Cena de Tortura" : "Origem");
                     }
                     else if (event.key.key == SDLK_C) {
@@ -431,17 +474,125 @@ int main(int argc, char* argv[]) {
 
         const bool* keys = SDL_GetKeyboardState(nullptr);
 
+        accumulator += frame_time * time_scale;
+
+        uint64_t sim_start_timer = SDL_GetPerformanceCounter();
+        int ticks_this_frame = 0;
+
+        while (accumulator >= DT) {
+            sim::step(world, sim_tick, js, sim_threads);
+
+            uint64_t phys_start = SDL_GetPerformanceCounter();
+
+            prev_player_pos = current_player_pos;
+            prev_plat_pos = current_plat_pos;
+
+            float t = (sim_tick % 240) / 240.0f * 2.0f * 3.14159265f;
+            float sine = std::sin(t);
+            plat_state.x = 303.0f + 3.0f * sine;
+            plat_state.y = 2.5f + 1.5f * sine;
+            plat_state.z = -5.0f + 3.0f * sine;
+            phys::phys_move_kinematic(plat_id, plat_state.x, plat_state.y, plat_state.z);
+
+            phys::PhysInput p_input = {};
+
+            if (cam_follow && !ImGui::GetIO().WantCaptureKeyboard) {
+                glm::vec3 front_loop(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
+                glm::vec3 front_xz(front_loop.x, 0.0f, front_loop.z);
+                if (glm::length(front_xz) > 0.0001f) front_xz = glm::normalize(front_xz);
+                else front_xz = glm::vec3(0, 0, 1);
+
+                glm::vec3 right_xz = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front_xz));
+
+                float w_s = 0.0f;
+                float d_a = 0.0f;
+                if (keys[SDL_SCANCODE_W]) w_s += 1.0f;
+                if (keys[SDL_SCANCODE_S]) w_s -= 1.0f;
+                if (keys[SDL_SCANCODE_A]) d_a -= 1.0f;
+                if (keys[SDL_SCANCODE_D]) d_a += 1.0f;
+
+                glm::vec3 dir = front_xz * w_s + right_xz * d_a;
+                if (glm::length(dir) > 0.0001f) dir = glm::normalize(dir);
+
+                p_input.move_x = dir.x;
+                p_input.move_z = dir.z;
+                p_input.jump = keys[SDL_SCANCODE_SPACE];
+            }
+
+            active_phys_state = phys::phys_update_character(p_input);
+            last_phys_ms = (double)(SDL_GetPerformanceCounter() - phys_start) * 1000.0 / frequency;
+
+            current_player_pos = glm::vec3(active_phys_state.x, active_phys_state.y, active_phys_state.z);
+            current_plat_pos = glm::vec3(plat_state.x, plat_state.y, plat_state.z);
+
+            pos_history[history_idx] = current_player_pos;
+            history_idx = (history_idx + 1) % 60;
+            if (history_count < 60) history_count++;
+
+            if (active_phys_state.on_ground) ticks_in_air = 0;
+            else ticks_in_air++;
+
+            sim_tick++;
+            accumulator -= DT;
+            ticks_this_frame++;
+
+            if (arm_stop && sim_tick == stop_at_tick) {
+                time_scale = 0;
+                arm_stop = false;
+
+                uint64_t hash_start = SDL_GetPerformanceCounter();
+                uint64_t exact_hash = sim::state_hash(world, sim_tick);
+                last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
+
+                app_log.add("Parado no tick %llu | hash %016llX", (unsigned long long)sim_tick, (unsigned long long)exact_hash);
+
+                last_calculated_hash = exact_hash;
+                last_hash_tick = sim_tick;
+
+                break;
+            }
+
+            uint64_t tick_timer_curr = SDL_GetPerformanceCounter();
+            double elapsed_sim_ms = (double)(tick_timer_curr - sim_start_timer) * 1000.0 / frequency;
+            if (elapsed_sim_ms >= 100.0) {
+                accumulator = 0.0;
+                break;
+            }
+        }
+
+        uint64_t sim_end_timer = SDL_GetPerformanceCounter();
+        last_ticks_this_frame = ticks_this_frame;
+
+        if (last_ticks_this_frame > 0) {
+            double frame_sim_cost_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
+            last_sim_ms_per_tick = frame_sim_cost_ms / last_ticks_this_frame;
+
+            if (audit_hash) {
+                if (last_hash_tick != sim_tick) {
+                    uint64_t hash_start = SDL_GetPerformanceCounter();
+                    last_calculated_hash = sim::state_hash(world, sim_tick);
+                    last_hash_tick = sim_tick;
+                    last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
+                }
+            }
+            else {
+                last_hash_ms = 0.0;
+            }
+        }
+
+        float alpha = (float)(accumulator / DT);
+        glm::vec3 interp_player = glm::mix(prev_player_pos, current_player_pos, alpha);
+        glm::vec3 interp_plat = glm::mix(prev_plat_pos, current_plat_pos, alpha);
+
         glm::vec3 front(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
         glm::vec3 right = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front));
         glm::vec3 up(0, 1, 0);
 
         if (cam_follow) {
-            glm::vec3 player_pos(active_phys_state.x, active_phys_state.y, active_phys_state.z);
             glm::vec3 offset(0, 6, -10);
-
             glm::mat4 rot = glm::rotate(glm::mat4(1.0f), cam_yaw, glm::vec3(0, 1, 0));
             glm::vec3 rot_offset = glm::vec3(rot * glm::vec4(offset, 1.0f));
-            glm::vec3 target_cam = player_pos + rot_offset;
+            glm::vec3 target_cam = interp_player + rot_offset;
 
             cam_pos = glm::mix(cam_pos, target_cam, 10.0f * (float)frame_time);
         }
@@ -488,6 +639,7 @@ int main(int argc, char* argv[]) {
         uint64_t game_seconds = sim_tick / SIM_HZ;
         ImGui::Text("Tick: %llu", (unsigned long long)sim_tick);
         ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)(game_seconds / 86400), (unsigned long long)((game_seconds / 3600) % 24), (unsigned long long)((game_seconds / 60) % 60));
+        ImGui::Text("Nivel: arena.txt (%zu caixas)", level_box_count);
         ImGui::Text("Instancias: 100000");
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
@@ -504,7 +656,8 @@ int main(int argc, char* argv[]) {
 
         ImGui::Separator();
         ImGui::Text("Spike / Instrumentacao");
-        ImGui::Text("Pos: %.4f, %.4f, %.4f", active_phys_state.x, active_phys_state.y, active_phys_state.z);
+        ImGui::Text("Pos Fis: %.4f, %.4f, %.4f", active_phys_state.x, active_phys_state.y, active_phys_state.z);
+        ImGui::Text("Pos Vis: %.4f, %.4f, %.4f (alpha=%.2f)", interp_player.x, interp_player.y, interp_player.z, alpha);
         ImGui::Text("Jitter (StdDev 60t): %.6f", std_dev);
         ImGui::Text("No chao: %s", active_phys_state.on_ground ? "sim" : "nao");
         ImGui::Text("Ticks no ar: %d", ticks_in_air);
@@ -534,111 +687,6 @@ int main(int argc, char* argv[]) {
         for (const std::string& line : app_log.lines) ImGui::TextUnformatted(line.c_str());
         if (app_log.auto_scroll) { ImGui::SetScrollHereY(1.0f); app_log.auto_scroll = false; }
         ImGui::End();
-
-        accumulator += frame_time * time_scale;
-
-        uint64_t sim_start_timer = SDL_GetPerformanceCounter();
-        int ticks_this_frame = 0;
-
-        while (accumulator >= DT) {
-            sim::step(world, sim_tick, js, sim_threads);
-
-            uint64_t phys_start = SDL_GetPerformanceCounter();
-
-            float t = (sim_tick % 240) / 240.0f * 2.0f * 3.14159265f;
-            float sine = std::sin(t);
-            plat_state.x = 303.0f + 3.0f * sine;
-            plat_state.y = 2.5f + 1.5f * sine;
-            plat_state.z = -5.0f + 3.0f * sine;
-            phys::phys_move_kinematic(plat_id, plat_state.x, plat_state.y, plat_state.z);
-
-            phys::PhysInput p_input = {};
-
-            if (cam_follow && !ImGui::GetIO().WantCaptureKeyboard) {
-                glm::vec3 front_loop(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
-                glm::vec3 front_xz(front_loop.x, 0.0f, front_loop.z);
-                if (glm::length(front_xz) > 0.0001f) {
-                    front_xz = glm::normalize(front_xz);
-                }
-                else {
-                    front_xz = glm::vec3(0, 0, 1);
-                }
-                glm::vec3 right_xz = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front_xz));
-
-                float w_s = 0.0f;
-                float d_a = 0.0f;
-                if (keys[SDL_SCANCODE_W]) w_s += 1.0f;
-                if (keys[SDL_SCANCODE_S]) w_s -= 1.0f;
-                if (keys[SDL_SCANCODE_A]) d_a -= 1.0f;
-                if (keys[SDL_SCANCODE_D]) d_a += 1.0f;
-
-                glm::vec3 dir = front_xz * w_s + right_xz * d_a;
-                if (glm::length(dir) > 0.0001f) {
-                    dir = glm::normalize(dir);
-                }
-
-                p_input.move_x = dir.x;
-                p_input.move_z = dir.z;
-                p_input.jump = keys[SDL_SCANCODE_SPACE];
-            }
-
-            active_phys_state = phys::phys_update_character(p_input);
-            last_phys_ms = (double)(SDL_GetPerformanceCounter() - phys_start) * 1000.0 / frequency;
-
-            pos_history[history_idx] = glm::vec3(active_phys_state.x, active_phys_state.y, active_phys_state.z);
-            history_idx = (history_idx + 1) % 60;
-            if (history_count < 60) history_count++;
-
-            if (active_phys_state.on_ground) ticks_in_air = 0;
-            else ticks_in_air++;
-
-            sim_tick++;
-            accumulator -= DT;
-            ticks_this_frame++;
-
-            if (arm_stop && sim_tick == stop_at_tick) {
-                time_scale = 0;
-                arm_stop = false;
-
-                uint64_t hash_start = SDL_GetPerformanceCounter();
-                uint64_t exact_hash = sim::state_hash(world, sim_tick);
-                last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
-
-                app_log.add("Parado no tick %llu | hash %016llX", (unsigned long long)sim_tick, (unsigned long long)exact_hash);
-
-                last_calculated_hash = exact_hash;
-                last_hash_tick = sim_tick;
-
-                break;
-            }
-
-            uint64_t current_timer = SDL_GetPerformanceCounter();
-            double elapsed_sim_ms = (double)(current_timer - sim_start_timer) * 1000.0 / frequency;
-            if (elapsed_sim_ms >= 100.0) {
-                accumulator = 0.0;
-                break;
-            }
-        }
-
-        uint64_t sim_end_timer = SDL_GetPerformanceCounter();
-        last_ticks_this_frame = ticks_this_frame;
-
-        if (last_ticks_this_frame > 0) {
-            double frame_sim_cost_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
-            last_sim_ms_per_tick = frame_sim_cost_ms / last_ticks_this_frame;
-
-            if (audit_hash) {
-                if (last_hash_tick != sim_tick) {
-                    uint64_t hash_start = SDL_GetPerformanceCounter();
-                    last_calculated_hash = sim::state_hash(world, sim_tick);
-                    last_hash_tick = sim_tick;
-                    last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
-                }
-            }
-            else {
-                last_hash_ms = 0.0;
-            }
-        }
 
         game_seconds = sim_tick / SIM_HZ;
         if (game_seconds != last_displayed_second || time_scale != last_displayed_scale) {
@@ -683,16 +731,14 @@ int main(int argc, char* argv[]) {
 
             InstanceData* mapped_char = (InstanceData*)SDL_MapGPUTransferBuffer(device, char_transfer_buf, true);
 
-            // Instância 0: Jogador
-            mapped_char[0].x = active_phys_state.x;
-            mapped_char[0].y = active_phys_state.y;
-            mapped_char[0].z = active_phys_state.z;
+            mapped_char[0].x = interp_player.x;
+            mapped_char[0].y = interp_player.y;
+            mapped_char[0].z = interp_player.z;
             mapped_char[0].r = 1.0f; mapped_char[0].g = 1.0f; mapped_char[0].b = 1.0f;
 
-            // Instância 1: Plataforma Móvel Visual
-            mapped_char[1].x = plat_state.x;
-            mapped_char[1].y = plat_state.y;
-            mapped_char[1].z = plat_state.z;
+            mapped_char[1].x = interp_plat.x;
+            mapped_char[1].y = interp_plat.y;
+            mapped_char[1].z = interp_plat.z;
             mapped_char[1].r = 0.8f; mapped_char[1].g = 0.5f; mapped_char[1].b = 0.1f;
 
             SDL_UnmapGPUTransferBuffer(device, char_transfer_buf);
@@ -722,7 +768,6 @@ int main(int argc, char* argv[]) {
         }
 
         if (swapchain_texture) {
-            glm::vec3 front(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
             glm::mat4 proj = glm::perspectiveLH_ZO(glm::radians(70.0f), 1280.0f / 720.0f, 0.1f, 500.0f);
             glm::mat4 view = glm::lookAtLH(cam_pos, cam_pos + front, glm::vec3(0, 1, 0));
             glm::mat4 mvp = proj * view;
@@ -754,29 +799,23 @@ int main(int argc, char* argv[]) {
             SDL_GPUBufferBinding ib_bind = { index_buffer, 0 };
             SDL_BindGPUIndexBuffer(scene_pass, &ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
-            // Bind global neutro para estáticos
             SDL_GPUBufferBinding inst_bind_floor = { neutral_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_floor, 1);
 
-            // Draw [1]: Chão
-            SDL_DrawGPUIndexedPrimitives(scene_pass, chao.index_count, 1, chao.first_index, 0, 0);
+            SDL_DrawGPUIndexedPrimitives(scene_pass, nivel_range.index_count, 1, nivel_range.first_index, 0, 0);
 
-            // Draw [2]: Cena Estática de Tortura
-            SDL_DrawGPUIndexedPrimitives(scene_pass, tortura.index_count, 1, tortura.first_index, 0, 0);
+            SDL_DrawGPUIndexedPrimitives(scene_pass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
 
-            // Draw [3]: Cubo Central
-            SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_central.index_count, 1, cubo_central.first_index, 0, 0);
-
-            // Draw [4]: Multidão Automata (100k instâncias)
             SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);
             SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_multidao.index_count, 100000, cubo_multidao.first_index, 0, 0);
 
-            // Draw [5]: Personagem & Plataforma Móvel (Uso de first_instance despachado sobre o mesmo VBO instanciado)
             SDL_GPUBufferBinding inst_bind_char = { char_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_char, 1);
 
-            SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_jogador.index_count, 1, cubo_jogador.first_index, 0, 0);
+            MeshRange range_active_player = is_crouched ? cubo_jogador_agachado : cubo_jogador;
+            SDL_DrawGPUIndexedPrimitives(scene_pass, range_active_player.index_count, 1, range_active_player.first_index, 0, 0);
+
             SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_plataforma.index_count, 1, cubo_plataforma.first_index, 0, 1);
 
             SDL_EndGPURenderPass(scene_pass);
@@ -803,8 +842,8 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseWindowFromGPUDevice(device, window);
 
     SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
-    SDL_ReleaseGPUBuffer(device, vertex_buffer);
-    SDL_ReleaseGPUBuffer(device, index_buffer);
+    if (vertex_buffer) SDL_ReleaseGPUBuffer(device, vertex_buffer);
+    if (index_buffer) SDL_ReleaseGPUBuffer(device, index_buffer);
     SDL_ReleaseGPUBuffer(device, neutral_instance_buffer);
     SDL_ReleaseGPUBuffer(device, crowd_instance_buffer);
     SDL_ReleaseGPUBuffer(device, char_instance_buffer);
