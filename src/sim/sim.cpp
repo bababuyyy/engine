@@ -1,0 +1,75 @@
+#include "sim.h"
+#include <cmath>
+
+namespace sim {
+
+    void init_world(World& w, uint64_t seed, size_t count) {
+        w.seed = seed;
+        w.count = count;
+
+        w.position.resize(count);
+        w.velocity.resize(count);
+        w.color.resize(count);
+
+        int cols = 317;
+        for (size_t i = 0; i < count; i++) {
+            int row = (int)i / cols;
+            int col = (int)i % cols;
+
+            w.position[i] = { (col - (cols / 2.0f)) * 0.6f, 0.0f, (row - ((int)count / cols) / 2.0f) * 0.6f };
+            w.velocity[i] = { 0.0f, 0.0f, 0.0f };
+
+            // Replicamos a fórmula determinística de cores do milestone anterior puramente aqui
+            w.color[i].x = 0.2f + 0.8f * ((i % 11) / 10.0f);
+            w.color[i].y = 0.2f + 0.8f * ((i % 7) / 6.0f);
+            w.color[i].z = 0.2f + 0.8f * ((i % 13) / 12.0f);
+        }
+    }
+
+    void wander_system(World& w, uint64_t tick) {
+        const float dt = 1.0f / 60.0f;
+        const float speed = 1.5f;
+
+        // O laço não tem dependência cruzada entre iterações.
+        // O estado não é compartilhado, cada cubo tem seu destino derivado unicamente do hash.
+        for (size_t i = 0; i < w.count; i++) {
+            if ((tick + i) % 30 == 0) {
+                // Mistura a seed do mundo com o relógio macro (tick/30) e o ID do cubo.
+                uint64_t hash_input = w.seed ^ ((tick / 30) * 0x9E3779B97F4A7C15ULL) ^ (i * 0xBF58476D1CE4E5B9ULL);
+                uint64_t h = splitmix64(hash_input);
+
+                // Mapeia o resultado do hash limpo para um círculo trigonométrico em radianos
+                float angle = (h % 360000) / 360000.0f * 6.2831853f;
+                w.velocity[i].x = std::cos(angle) * speed;
+                w.velocity[i].z = std::sin(angle) * speed;
+            }
+
+            w.position[i].x += w.velocity[i].x * dt;
+            w.position[i].z += w.velocity[i].z * dt;
+            w.position[i].y = 0.0f;
+
+            // Rebatimento reflexivo duro ao encostar nos limites invisíveis do pátio
+            if (w.position[i].x > 95.0f) {
+                w.position[i].x = 95.0f;
+                w.velocity[i].x = -w.velocity[i].x;
+            }
+            else if (w.position[i].x < -95.0f) {
+                w.position[i].x = -95.0f;
+                w.velocity[i].x = -w.velocity[i].x;
+            }
+
+            if (w.position[i].z > 95.0f) {
+                w.position[i].z = 95.0f;
+                w.velocity[i].z = -w.velocity[i].z;
+            }
+            else if (w.position[i].z < -95.0f) {
+                w.position[i].z = -95.0f;
+                w.velocity[i].z = -w.velocity[i].z;
+            }
+        }
+    }
+
+    void step(World& w, uint64_t tick) {
+        wander_system(w, tick);
+    }
+}

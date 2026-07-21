@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Busca do SDL3
 FetchContent_Declare(
     SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
@@ -16,7 +15,6 @@ set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON  CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(SDL3)
 
-# Busca do GLM (Math) header-only
 FetchContent_Declare(
     glm
     GIT_REPOSITORY https://github.com/g-truc/glm.git
@@ -24,7 +22,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
-# Busca do ImGui
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -44,14 +41,11 @@ add_library(imgui_lib STATIC
 target_include_directories(imgui_lib PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(imgui_lib PUBLIC SDL3::SDL3-static)
 
-# --- COMPILAÇÃO DE SHADERS (FXC) ---
-# Procura o compilador fxc.exe do SDK do Windows para transformar HLSL em headers DXBC
 find_program(FXC fxc HINTS 
     "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
     "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
 )
 
-# Adiciona um comando customizado para compilar o shader antes de buildar a engine
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h
     COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h /Vn g_basic_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
@@ -59,12 +53,10 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-add_executable(engine src/main.cpp)
+# Adiciona o novo módulo sim isolado da Engine na compilação
+add_executable(engine src/main.cpp src/sim/sim.cpp)
 
-# Forçamos os headers gerados no target_sources para garantir que a engine dependa de sua criação
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
-
-# Inclui o diretório de build para que o main.cpp ache "basic_vs.h" e o glm
 target_include_directories(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm)
 
