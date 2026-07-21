@@ -3,14 +3,21 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlgpu3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
 #include <string>
 #include <cstdarg>
 
-// Estrutura simples para o Log sem criar classes ou wrappers complexos.
-// Armazena até 256 linhas e controla o autoscroll da UI.
+// Os headers gerados pelo fxc declaram os arrays como 'const BYTE', um tipo
+// do Windows. O typedef abaixo o define sem precisar incluir <windows.h> inteiro.
+typedef unsigned char BYTE;
+#include "basic_vs.h"
+#include "basic_ps.h"
+
 struct AppLog {
     std::vector<std::string> lines;
     bool auto_scroll = true;
@@ -23,11 +30,14 @@ struct AppLog {
         va_end(args);
 
         lines.push_back(buf);
-        if (lines.size() > 256) {
-            lines.erase(lines.begin());
-        }
+        if (lines.size() > 256) lines.erase(lines.begin());
         auto_scroll = true;
     }
+};
+
+struct Vertex {
+    float x, y, z;
+    float r, g, b;
 };
 
 void simulation_step() {
@@ -37,70 +47,186 @@ int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        SDL_Log("Erro no SDL_Init: %s", SDL_GetError());
-        return 1;
-    }
+    if (!SDL_Init(SDL_INIT_VIDEO)) return 1;
 
     SDL_Window* window = SDL_CreateWindow("Minha Engine", 1280, 720, 0);
-    if (!window) {
-        SDL_Log("Erro no SDL_CreateWindow: %s", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
+    if (!window) return 1;
 
-    SDL_GPUShaderFormat format_flags = SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_MSL;
+    // Forçamos o backend D3D12 via DXBC/DXIL por conta dos binários gerados pelo fxc
+    SDL_GPUShaderFormat format_flags = SDL_GPU_SHADERFORMAT_DXBC | SDL_GPU_SHADERFORMAT_DXIL;
     SDL_GPUDevice* device = SDL_CreateGPUDevice(format_flags, true, nullptr);
-    if (!device) {
-        SDL_Log("Erro no SDL_CreateGPUDevice: %s", SDL_GetError());
-        SDL_DestroyWindow(window);
-        SDL_Quit();
+    if (!device) return 1;
+
+    if (!SDL_ClaimWindowForGPUDevice(device, window)) return 1;
+
+    // Configura a composição SDR e VSync para travar o framerate à taxa nativa do monitor
+    SDL_SetGPUSwapchainParameters(device, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, SDL_GPU_PRESENTMODE_VSYNC);
+
+    // --- CRIAÇÃO DE SHADERS (DXBC) ---
+    SDL_GPUShaderCreateInfo vs_info = {};
+    vs_info.code = g_basic_vs;
+    vs_info.code_size = sizeof(g_basic_vs);
+    vs_info.entrypoint = "VSMain";
+    vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    vs_info.num_uniform_buffers = 1; // Necessário para aceitar o 'space1' do basic.hlsl
+    SDL_GPUShader* vs = SDL_CreateGPUShader(device, &vs_info);
+
+    SDL_GPUShaderCreateInfo ps_info = {};
+    ps_info.code = g_basic_ps;
+    ps_info.code_size = sizeof(g_basic_ps);
+    ps_info.entrypoint = "PSMain";
+    ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
+
+    // --- GEOMETRIA E UPLOAD ---
+    Vertex vertices[] = {
+        // Chão (Quad 200x200 centrado em Y=0)
+        { -100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f }, // 0
+        {  100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f }, // 1
+        {  100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f }, // 2
+        { -100.0f, 0.0f, -100.0f,   0.35f, 0.35f, 0.35f }, // 3
+
+        // Cubo (1x1x1 apoiado no chão - Y vai de 0 a 1)
+        { -0.5f, 0.0f,  0.5f,   1.0f, 0.0f, 0.0f }, // 4: base
+        {  0.5f, 0.0f,  0.5f,   0.0f, 1.0f, 0.0f }, // 5
+        {  0.5f, 0.0f, -0.5f,   0.0f, 0.0f, 1.0f }, // 6
+        { -0.5f, 0.0f, -0.5f,   1.0f, 1.0f, 0.0f }, // 7
+        { -0.5f, 1.0f,  0.5f,   1.0f, 0.0f, 1.0f }, // 8: topo
+        {  0.5f, 1.0f,  0.5f,   0.0f, 1.0f, 1.0f }, // 9
+        {  0.5f, 1.0f, -0.5f,   1.0f, 1.0f, 1.0f }, // 10
+        { -0.5f, 1.0f, -0.5f,   0.0f, 0.0f, 0.0f }  // 11
+    };
+
+    uint16_t indices[] = {
+        // Chão
+        0, 1, 2,  0, 2, 3,
+        // Cubo (Cull NONE elimina problemas estritos de winding, mas definimos Faces para indexação básica)
+        4, 5, 6,  4, 6, 7,       // Baixo
+        8, 10, 9, 8, 11, 10,     // Topo
+        4, 7, 11, 4, 11, 8,      // Esquerda
+        5, 9, 10, 5, 10, 6,      // Direita
+        4, 8, 9,  4, 9, 5,       // Frente
+        7, 6, 10, 7, 10, 11      // Traz
+    };
+
+    uint32_t vb_size = sizeof(vertices);
+    uint32_t ib_size = sizeof(indices);
+
+    // Cria e mapeia o Transfer Buffer (staging) para copiar dados da CPU para memória temporária.
+    SDL_GPUTransferBufferCreateInfo tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, vb_size + ib_size };
+    SDL_GPUTransferBuffer* transfer_buf = SDL_CreateGPUTransferBuffer(device, &tb_info);
+
+    void* map = SDL_MapGPUTransferBuffer(device, transfer_buf, false);
+    memcpy(map, vertices, vb_size);
+    memcpy((uint8_t*)map + vb_size, indices, ib_size);
+    SDL_UnmapGPUTransferBuffer(device, transfer_buf);
+
+    // Cria os buffers definitivos (rápidos) que viverão na VRAM
+    SDL_GPUBufferCreateInfo vb_info = { SDL_GPU_BUFFERUSAGE_VERTEX, vb_size };
+    SDL_GPUBuffer* vertex_buffer = SDL_CreateGPUBuffer(device, &vb_info);
+
+    SDL_GPUBufferCreateInfo ib_info = { SDL_GPU_BUFFERUSAGE_INDEX, ib_size };
+    SDL_GPUBuffer* index_buffer = SDL_CreateGPUBuffer(device, &ib_info);
+
+    // Inicia um comando de Upload para transferir a memória do buffer temporário para os buffers nativos.
+    SDL_GPUCommandBuffer* copy_cmd = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(copy_cmd);
+
+    SDL_GPUTransferBufferLocation vb_loc = { transfer_buf, 0 };
+    SDL_GPUBufferRegion vb_reg = { vertex_buffer, 0, vb_size };
+    SDL_UploadToGPUBuffer(copy_pass, &vb_loc, &vb_reg, false);
+
+    SDL_GPUTransferBufferLocation ib_loc = { transfer_buf, vb_size };
+    SDL_GPUBufferRegion ib_reg = { index_buffer, 0, ib_size };
+    SDL_UploadToGPUBuffer(copy_pass, &ib_loc, &ib_reg, false);
+
+    SDL_EndGPUCopyPass(copy_pass);
+    SDL_SubmitGPUCommandBuffer(copy_cmd);
+    SDL_ReleaseGPUTransferBuffer(device, transfer_buf); // Apaga buffer de cópia, não precisamos mais
+
+    // --- DEPTH BUFFER ---
+    SDL_GPUTextureCreateInfo depth_info = {};
+    depth_info.type = SDL_GPU_TEXTURETYPE_2D;
+    depth_info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT; // Standard matemático nativo de profundidade
+    depth_info.width = 1280;
+    depth_info.height = 720;
+    depth_info.layer_count_or_depth = 1;
+    depth_info.num_levels = 1;
+    depth_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    depth_info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+    SDL_GPUTexture* depth_texture = SDL_CreateGPUTexture(device, &depth_info);
+
+    // --- PIPELINE DE GRAPHICS ---
+    SDL_GPUGraphicsPipelineCreateInfo pipe_info = {};
+    pipe_info.vertex_shader = vs;
+    pipe_info.fragment_shader = ps;
+    pipe_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE; // Dispensa face culling para este nível
+    pipe_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+
+    // Configuração de profundidade (o Z-buffer clássico LESS evita triângulos traseiros pintarem em cima dos dianteiros)
+    pipe_info.depth_stencil_state.enable_depth_test = true;
+    pipe_info.depth_stencil_state.enable_depth_write = true;
+    pipe_info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
+
+    SDL_GPUVertexAttribute attrs[2] = {};
+    attrs[0].location = 0; attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[0].offset = 0;
+    attrs[1].location = 1; attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[1].offset = 3 * sizeof(float);
+
+    SDL_GPUVertexBufferDescription vb_desc = {};
+    vb_desc.slot = 0; vb_desc.pitch = sizeof(Vertex);
+    vb_desc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+    pipe_info.vertex_input_state.num_vertex_attributes = 2;
+    pipe_info.vertex_input_state.vertex_attributes = attrs;
+    pipe_info.vertex_input_state.num_vertex_buffers = 1;
+    pipe_info.vertex_input_state.vertex_buffer_descriptions = &vb_desc;
+
+    SDL_GPUColorTargetDescription color_desc = {};
+    color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    pipe_info.target_info.num_color_targets = 1;
+    pipe_info.target_info.color_target_descriptions = &color_desc;
+    pipe_info.target_info.has_depth_stencil_target = true;
+    pipe_info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+
+    SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipe_info);
+    if (!pipeline) {
+        SDL_Log("Erro ao criar pipeline: %s", SDL_GetError());
         return 1;
     }
 
-    if (!SDL_ClaimWindowForGPUDevice(device, window)) {
-        SDL_Log("Erro no SDL_ClaimWindowForGPUDevice: %s", SDL_GetError());
-        SDL_DestroyGPUDevice(device);
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-
-    // --- SETUP DO DEAR IMGUI ---
-    // Inicializa o contexto global do ImGui logo após a janela estar atrelada à GPU.
+    // Setup de interface
     ImGui::CreateContext();
     ImGui_ImplSDL3_InitForSDLGPU(window);
-
-    ImGui_ImplSDLGPU3_InitInfo init_info = {};
-    init_info.Device = device;
-    init_info.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(device, window);
-    init_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
-    ImGui_ImplSDLGPU3_Init(&init_info);
+    ImGui_ImplSDLGPU3_InitInfo imgui_info = {};
+    imgui_info.Device = device;
+    imgui_info.ColorTargetFormat = SDL_GetGPUSwapchainTextureFormat(device, window);
+    imgui_info.MSAASamples = SDL_GPU_SAMPLECOUNT_1;
+    ImGui_ImplSDLGPU3_Init(&imgui_info);
 
     AppLog app_log;
-    app_log.add("Sistemas inicializados com sucesso.");
+    app_log.add("Pipeline 3D e Shaders ativos.");
 
+    // --- ESTADO CÂMERA ---
+    glm::vec3 cam_pos(4.0f, 3.0f, -8.0f);
+    float cam_yaw = -0.46f;   // Valores iniciais apontando grosseiramente para a origem da cena.
+    float cam_pitch = -0.32f;
+    bool rmb_down = false;
+
+    // --- SIMULAÇÃO ---
     constexpr uint64_t SIM_HZ = 60;
     constexpr double DT = 1.0 / 60.0;
-
     uint64_t sim_tick = 0;
     double accumulator = 0.0;
-
     int64_t time_scale = 1;
     int64_t previous_time_scale = 1;
 
-    uint64_t last_displayed_second = ~0ULL;
-    int64_t last_displayed_scale = -1;
-
     uint64_t current_time = SDL_GetPerformanceCounter();
     uint64_t frequency = SDL_GetPerformanceFrequency();
-
-    // Variáveis para registrar o tempo de simulação do frame anterior para exibir na UI
     double last_frame_ms = 0.0;
-    double last_sim_ms = 0.0;
-    int last_ticks_this_frame = 0;
 
-    // Função lambda para DRY ao alterar a escala de tempo, registrando a origem no log.
     auto set_scale = [&](int64_t new_scale, const char* origin) {
         if (time_scale != new_scale) {
             time_scale = new_scale;
@@ -113,15 +239,35 @@ int main(int argc, char* argv[]) {
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            // Entrega o evento ao ImGui para tratar cliques, digitação e foco.
             ImGui_ImplSDL3_ProcessEvent(&event);
 
-            if (event.type == SDL_EVENT_QUIT) {
-                running = false;
+            if (event.type == SDL_EVENT_QUIT) running = false;
+
+            if (!ImGui::GetIO().WantCaptureMouse) {
+                // Alternância do Mouse Relative mode via segurar o botão direito (câmera livre)
+                if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT) {
+                    rmb_down = true;
+                    SDL_SetWindowRelativeMouseMode(window, true);
+                }
+                else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == SDL_BUTTON_RIGHT) {
+                    rmb_down = false;
+                    SDL_SetWindowRelativeMouseMode(window, false);
+                }
+                else if (event.type == SDL_EVENT_MOUSE_MOTION && rmb_down) {
+                    float sens = 0.002f;
+                    cam_yaw += event.motion.xrel * sens;
+                    cam_pitch -= event.motion.yrel * sens;
+                    if (cam_pitch > 1.5f) cam_pitch = 1.5f;
+                    if (cam_pitch < -1.5f) cam_pitch = -1.5f;
+                }
+            }
+            else {
+                if (rmb_down) {
+                    rmb_down = false;
+                    SDL_SetWindowRelativeMouseMode(window, false);
+                }
             }
 
-            // Os atalhos nativos da engine só reagem se a UI não estiver capturando teclado.
-            // Impede que digitar "1" no console dispare a mudança de timescale do jogo.
             if (!ImGui::GetIO().WantCaptureKeyboard) {
                 if (event.type == SDL_EVENT_KEY_DOWN) {
                     if (event.key.key == SDLK_ESCAPE) running = false;
@@ -140,17 +286,32 @@ int main(int argc, char* argv[]) {
         uint64_t new_time = SDL_GetPerformanceCounter();
         double frame_time = (double)(new_time - current_time) / frequency;
         current_time = new_time;
-
         if (frame_time > 0.25) frame_time = 0.25;
         last_frame_ms = frame_time * 1000.0;
 
-        // --- IMGUI NEW FRAME ---
-        // Prepara as ferramentas de UI antes da simulação, alimentando-a com dados do frame passado.
+        // Processa as teclas de movimentação de câmera desvinculadas da timestep logic
+        if (!ImGui::GetIO().WantCaptureKeyboard) {
+            int num_keys;
+            const bool* keys = SDL_GetKeyboardState(&num_keys);
+            float speed = 5.0f * (float)frame_time;
+            if (keys[SDL_SCANCODE_LSHIFT]) speed *= 4.0f;
+
+            glm::vec3 front(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
+            glm::vec3 right = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front));
+            glm::vec3 up(0, 1, 0);
+
+            if (keys[SDL_SCANCODE_W]) cam_pos += front * speed;
+            if (keys[SDL_SCANCODE_S]) cam_pos -= front * speed;
+            if (keys[SDL_SCANCODE_A]) cam_pos -= right * speed;
+            if (keys[SDL_SCANCODE_D]) cam_pos += right * speed;
+            if (keys[SDL_SCANCODE_E]) cam_pos += up * speed;
+            if (keys[SDL_SCANCODE_Q]) cam_pos -= up * speed;
+        }
+
         ImGui_ImplSDLGPU3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        // Painel: Tempo
         ImGui::Begin("Tempo");
         if (ImGui::Button("Pausa")) set_scale(0, "Botão"); ImGui::SameLine();
         if (ImGui::Button("1x"))    set_scale(1, "Botão"); ImGui::SameLine();
@@ -159,75 +320,26 @@ int main(int argc, char* argv[]) {
         if (ImGui::Button("1000x")) set_scale(1000, "Botão");
 
         uint64_t game_seconds = sim_tick / SIM_HZ;
-        uint64_t days = game_seconds / 86400;
-        uint64_t hours = (game_seconds / 3600) % 24;
-        uint64_t minutes = (game_seconds / 60) % 60;
-
         ImGui::Text("Tick: %llu", (unsigned long long)sim_tick);
-        ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)days, (unsigned long long)hours, (unsigned long long)minutes);
+        ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)(game_seconds / 86400), (unsigned long long)((game_seconds / 3600) % 24), (unsigned long long)((game_seconds / 60) % 60));
+        ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
-        ImGui::Text("Sim ms: %.3f", last_sim_ms);
-        ImGui::Text("Ticks no frame: %d", last_ticks_this_frame);
+        ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
         ImGui::End();
 
-        // Painel: Log
         ImGui::Begin("Log");
-        for (const std::string& line : app_log.lines) {
-            ImGui::TextUnformatted(line.c_str());
-        }
-        if (app_log.auto_scroll) {
-            ImGui::SetScrollHereY(1.0f);
-            app_log.auto_scroll = false;
-        }
+        for (const std::string& line : app_log.lines) ImGui::TextUnformatted(line.c_str());
+        if (app_log.auto_scroll) { ImGui::SetScrollHereY(1.0f); app_log.auto_scroll = false; }
         ImGui::End();
 
-        // --- SIMULAÇÃO ---
         accumulator += frame_time * time_scale;
-
-        // Mede unicamente o tempo real gasto processando a lógica interna do acumulador neste frame.
-        uint64_t sim_start_timer = SDL_GetPerformanceCounter();
-        int ticks_this_frame = 0;
-
         while (accumulator >= DT) {
             simulation_step();
             sim_tick++;
             accumulator -= DT;
-            ticks_this_frame++;
-
-            if (ticks_this_frame >= 10000) {
-                accumulator = 0.0;
-                break;
-            }
         }
 
-        uint64_t sim_end_timer = SDL_GetPerformanceCounter();
-        last_sim_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
-        last_ticks_this_frame = ticks_this_frame;
-
-        // Recalcula o relógio APÓS a simulação, para o título exibir tick e hora do mesmo instante.
-        game_seconds = sim_tick / SIM_HZ;
-        days = game_seconds / 86400;
-        hours = (game_seconds / 3600) % 24;
-        minutes = (game_seconds / 60) % 60;
-
-        // Atualização do título da janela conforme especificação existente
-        if (game_seconds != last_displayed_second || time_scale != last_displayed_scale) {
-            last_displayed_second = game_seconds;
-            last_displayed_scale = time_scale;
-            char title_buffer[256];
-            if (time_scale == 0) {
-                snprintf(title_buffer, sizeof(title_buffer), "Minha Engine | dia %llu %02llu:%02llu | tick %llu | pausado",
-                    (unsigned long long)days, (unsigned long long)hours, (unsigned long long)minutes, (unsigned long long)sim_tick);
-            }
-            else {
-                snprintf(title_buffer, sizeof(title_buffer), "Minha Engine | dia %llu %02llu:%02llu | tick %llu | %lldx",
-                    (unsigned long long)days, (unsigned long long)hours, (unsigned long long)minutes, (unsigned long long)sim_tick, (long long)time_scale);
-            }
-            SDL_SetWindowTitle(window, title_buffer);
-        }
-
-        // --- RENDERIZAÇÃO ---
-        // Finaliza a compilação lógica da UI antes de tocar na GPU.
+        // --- MATEMÁTICA E RENDER ---
         ImGui::Render();
         ImDrawData* dd = ImGui::GetDrawData();
 
@@ -235,41 +347,81 @@ int main(int argc, char* argv[]) {
         if (!cmd_buffer) continue;
 
         SDL_GPUTexture* swapchain_texture = nullptr;
-        SDL_WaitAndAcquireGPUSwapchainTexture(cmd_buffer, window, &swapchain_texture, nullptr, nullptr);
+        if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd_buffer, window, &swapchain_texture, nullptr, nullptr)) {
+            SDL_SubmitGPUCommandBuffer(cmd_buffer);
+            continue;
+        }
 
-        // Se estiver minimizada, a swapchain retorna nula. Pulamos o setup e render, mas submetemos o cmd_buffer para não travar.
         if (swapchain_texture) {
-            // O PrepareDrawData cria e envia os buffers de vértices/índices do frame para a VRAM.
-            // Precisa rodar ANTES do pass pois transferências de memória não podem ocorrer durante um render pass ativo.
+            // As matrizes Left-Handed com Z caindo de Zero to One (ZO) casam com a view nativa do SDL3 e backend D3D.
+            glm::vec3 front(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
+            glm::mat4 proj = glm::perspectiveLH_ZO(glm::radians(70.0f), 1280.0f / 720.0f, 0.1f, 500.0f);
+            glm::mat4 view = glm::lookAtLH(cam_pos, cam_pos + front, glm::vec3(0, 1, 0));
+            glm::mat4 mvp = proj * view; // Como os shaders HLSL esperam Column-Major, o default do GLM entra perfeitamente sem Transpose.
+
+            // 1. O Push da uniforme via API nova precisa ser feito antes de abrirmos o passe de renderização.
+            SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
             ImGui_ImplSDLGPU3_PrepareDrawData(dd, cmd_buffer);
 
-            SDL_GPUColorTargetInfo color_target_info = {};
-            color_target_info.texture = swapchain_texture;
-            color_target_info.clear_color = { 0.05f, 0.07f, 0.12f, 1.0f };
-            color_target_info.load_op = SDL_GPU_LOADOP_CLEAR;
-            color_target_info.store_op = SDL_GPU_STOREOP_STORE;
+            // 2. PASS 1 (CENA): Desenha com CLEAR da tela e usa Depth habilitado
+            SDL_GPUColorTargetInfo color_target = {};
+            color_target.texture = swapchain_texture;
+            color_target.clear_color = { 0.05f, 0.07f, 0.12f, 1.0f };
+            color_target.load_op = SDL_GPU_LOADOP_CLEAR;
+            color_target.store_op = SDL_GPU_STOREOP_STORE;
 
-            SDL_GPURenderPass* render_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target_info, 1, nullptr);
+            SDL_GPUDepthStencilTargetInfo depth_target = {};
+            depth_target.texture = depth_texture;
+            depth_target.clear_depth = 1.0f;
+            depth_target.load_op = SDL_GPU_LOADOP_CLEAR;
+            depth_target.store_op = SDL_GPU_STOREOP_STORE;
+            depth_target.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+            depth_target.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+            depth_target.cycle = true;
 
-            // O RenderDrawData emite os "draw calls" que de fato pintam a UI na textura do swapchain.
-            // Precisa rodar DENTRO do pass pois são comandos de desenho que afetam o color target atrelado.
-            ImGui_ImplSDLGPU3_RenderDrawData(dd, cmd_buffer, render_pass);
+            SDL_GPURenderPass* scene_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target, 1, &depth_target);
+            SDL_BindGPUGraphicsPipeline(scene_pass, pipeline);
 
-            SDL_EndGPURenderPass(render_pass);
+            SDL_GPUBufferBinding vb_bind = { vertex_buffer, 0 };
+            SDL_BindGPUVertexBuffers(scene_pass, 0, &vb_bind, 1);
+
+            SDL_GPUBufferBinding ib_bind = { index_buffer, 0 };
+            SDL_BindGPUIndexBuffer(scene_pass, &ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+            SDL_DrawGPUIndexedPrimitives(scene_pass, 6 + 36, 1, 0, 0, 0);
+            SDL_EndGPURenderPass(scene_pass);
+
+            // 3. PASS 2 (UI): Não pode sobrepor/zerar os pixels da Cena (LOADOP_LOAD), roda sem Depth Testing!
+            SDL_GPUColorTargetInfo ui_target = {};
+            ui_target.texture = swapchain_texture;
+            ui_target.load_op = SDL_GPU_LOADOP_LOAD;
+            ui_target.store_op = SDL_GPU_STOREOP_STORE;
+
+            SDL_GPURenderPass* ui_pass = SDL_BeginGPURenderPass(cmd_buffer, &ui_target, 1, nullptr);
+            ImGui_ImplSDLGPU3_RenderDrawData(dd, cmd_buffer, ui_pass);
+            SDL_EndGPURenderPass(ui_pass);
         }
 
         SDL_SubmitGPUCommandBuffer(cmd_buffer);
     }
-    // Espera a GPU terminar todo trabalho em voo antes de destruir os recursos do ImGui.
+
+    // Espera a GPU terminar todo trabalho em voo antes de destruir os recursos.
     SDL_WaitForGPUIdle(device);
 
-    // --- SHUTDOWN ---
-    // Encerra os contextos do ImGui e seus recursos na VRAM antes de deletar o render device base.
     ImGui_ImplSDLGPU3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 
     SDL_ReleaseWindowFromGPUDevice(device, window);
+
+    // Destrói recursos alocados na VRAM e pipelines específicos deste bloco.
+    SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+    SDL_ReleaseGPUBuffer(device, vertex_buffer);
+    SDL_ReleaseGPUBuffer(device, index_buffer);
+    SDL_ReleaseGPUTexture(device, depth_texture);
+    SDL_ReleaseGPUShader(device, vs);
+    SDL_ReleaseGPUShader(device, ps);
+
     SDL_DestroyGPUDevice(device);
     SDL_DestroyWindow(window);
     SDL_Quit();

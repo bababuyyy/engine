@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Busca do SDL3 mantida conforme a etapa anterior
+# Busca do SDL3
 FetchContent_Declare(
     SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
@@ -16,7 +16,15 @@ set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON  CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(SDL3)
 
-# Busca do repositório oficial do Dear ImGui via FetchContent
+# Busca do GLM (Math) header-only
+FetchContent_Declare(
+    glm
+    GIT_REPOSITORY https://github.com/g-truc/glm.git
+    GIT_TAG 1.0.1
+)
+FetchContent_MakeAvailable(glm)
+
+# Busca do ImGui
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -24,8 +32,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-# Cria a lib estática do ImGui manualmente contendo a core API e os backends solicitados.
-# Necessário pois o repositório original do Dear ImGui não provê um CMakeLists nativo.
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -35,17 +41,32 @@ add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdlgpu3.cpp
 )
-
-# Exporta os headers do ImGui para quem linkar esta biblioteca (a engine)
 target_include_directories(imgui_lib PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-
-# Linka o ImGui à versão estática do SDL3 para resolver as chamadas do backend
 target_link_libraries(imgui_lib PUBLIC SDL3::SDL3-static)
+
+# --- COMPILAÇÃO DE SHADERS (FXC) ---
+# Procura o compilador fxc.exe do SDK do Windows para transformar HLSL em headers DXBC
+find_program(FXC fxc HINTS 
+    "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
+    "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
+)
+
+# Adiciona um comando customizado para compilar o shader antes de buildar a engine
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h
+    COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h /Vn g_basic_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h /Vn g_basic_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
+)
 
 add_executable(engine src/main.cpp)
 
-# A engine agora linka com o SDL3 e o nosso target customizado do ImGui
-target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib)
+# Forçamos os headers gerados no target_sources para garantir que a engine dependa de sua criação
+target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
+
+# Inclui o diretório de build para que o main.cpp ache "basic_vs.h" e o glm
+target_include_directories(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm)
 
 if(MSVC)
     target_compile_options(engine PRIVATE /W4)
