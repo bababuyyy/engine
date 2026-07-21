@@ -212,7 +212,7 @@ int main(int argc, char* argv[]) {
     int sim_threads = max_hardware_threads;
 
     app_log.add("JobSystem ativado em pool com %d workers físicos disponíveis.", max_hardware_threads);
-    app_log.add("Mundo seed=%llu", (unsigned long long)world.seed); // Log inicial de criação do mundo
+    app_log.add("Mundo seed=%llu", (unsigned long long)world.seed);
 
     glm::vec3 cam_pos(0.0f, 35.0f, -70.0f);
     float cam_yaw = 0.0f;
@@ -221,7 +221,6 @@ int main(int argc, char* argv[]) {
 
     constexpr uint64_t SIM_HZ = 60;
     constexpr double DT = 1.0 / 60.0;
-    constexpr uint64_t HASH_PERIOD = 60; // 1 segundo de jogo
 
     uint64_t sim_tick = 0;
     double accumulator = 0.0;
@@ -240,11 +239,13 @@ int main(int argc, char* argv[]) {
 
     bool first_sync = true;
 
-    // Variáveis de controle de parada e auditoria de hash
     bool arm_stop = false;
     uint64_t stop_at_tick = 6000;
     uint64_t last_calculated_hash = 0;
     uint64_t last_hash_tick = 0;
+
+    // CORREÇÃO: Toggle que salva orçamento massivo da CPU mantendo o Hash apenas quando ativado pelo usuário
+    bool audit_hash = false;
 
     uint64_t last_displayed_second = ~0ULL;
     int64_t last_displayed_scale = -1;
@@ -349,7 +350,6 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
 
-        // Exibição da Velocidade Efetiva
         double effective_speed = frame_time > 0.0 ? (last_ticks_this_frame * DT) / frame_time : 0.0;
         ImGui::Text("Velocidade efetiva: %.1fx", effective_speed);
 
@@ -360,12 +360,18 @@ int main(int argc, char* argv[]) {
 
         ImGui::Separator();
         ImGui::Text("Determinismo:");
+
+        // CORREÇÃO: Renderiza a checkbox no painel linkada ao toggle
+        ImGui::Checkbox("Auditoria de hash", &audit_hash);
+
         ImGui::Text("Hash @ tick %llu: %016llX", (unsigned long long)last_hash_tick, (unsigned long long)last_calculated_hash);
 
         ImGui::InputScalar("Alvo", ImGuiDataType_U64, &stop_at_tick);
         if (stop_at_tick > sim_tick) {
             if (ImGui::Button("Rodar até e pausar")) {
                 arm_stop = true;
+                // CORREÇÃO: Disparar a trava liga implícita e compulsoriamente a auditoria do log
+                audit_hash = true;
                 app_log.add("Auditoria armada para o tick %llu.", (unsigned long long)stop_at_tick);
             }
         }
@@ -393,7 +399,7 @@ int main(int argc, char* argv[]) {
             accumulator -= DT;
             ticks_this_frame++;
 
-            // Disparo da Trava de Auditoria
+            // O hash imutável interno de auditoria de limite continua operando sem restrições do Toggle
             if (arm_stop && sim_tick == stop_at_tick) {
                 time_scale = 0;
                 arm_stop = false;
@@ -407,11 +413,9 @@ int main(int argc, char* argv[]) {
                 last_calculated_hash = exact_hash;
                 last_hash_tick = sim_tick;
 
-                // Quebra o loop in-frame para travar de fato a renderização no estado exato congelado
                 break;
             }
 
-            // Orçamento restrito a 100ms de custo de simulação real por frame (Prevenção de Espiral de Morte)
             uint64_t current_timer = SDL_GetPerformanceCounter();
             double elapsed_sim_ms = (double)(current_timer - sim_start_timer) * 1000.0 / frequency;
             if (elapsed_sim_ms >= 100.0) {
@@ -427,12 +431,17 @@ int main(int argc, char* argv[]) {
             double frame_sim_cost_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
             last_sim_ms_per_tick = frame_sim_cost_ms / last_ticks_this_frame;
 
-            // Hash iterativo gerado para controle passivo (Somente se não coincidir com a quebra exata acima)
-            if (last_hash_tick != sim_tick) {
-                uint64_t hash_start = SDL_GetPerformanceCounter();
-                last_calculated_hash = sim::state_hash(world, sim_tick);
-                last_hash_tick = sim_tick;
-                last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
+            // CORREÇÃO: Envelopamento do loop de iteração atrelado ao checkbox no painel "audit_hash"
+            if (audit_hash) {
+                if (last_hash_tick != sim_tick) {
+                    uint64_t hash_start = SDL_GetPerformanceCounter();
+                    last_calculated_hash = sim::state_hash(world, sim_tick);
+                    last_hash_tick = sim_tick;
+                    last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
+                }
+            }
+            else {
+                last_hash_ms = 0.0; // Põe o contador explícito de UI pra dormir se o hash for ignorado
             }
         }
 

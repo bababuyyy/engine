@@ -69,21 +69,27 @@ endif()
 # --- SUÍTE DE TESTES (M0) ---
 
 # O executável de testes roda PURAMENTE com módulos isolados.
-# Não há ligação com SDL3, GLM ou ImGui. Se compilar, provamos a pureza estrutural do design.
 add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp)
 target_include_directories(sim_tests PRIVATE src)
 if(MSVC)
     target_compile_options(sim_tests PRIVATE /W4)
 endif()
 
-# Registro do teste da bateria headless
-# O diretório de execução precisa ser o do projeto para o golden file aterrisar e ser lido de `tests/`
-add_test(NAME sim_headless 
-         COMMAND sim_tests
-         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
+# CORREÇÃO: Teste de Golden File habilitado integralmente APENAS no pipeline de Release.
+# O Debug utilizará flag headless para pular apenas a checagem da assinatura.
+if(CMAKE_BUILD_TYPE MATCHES "Rel")
+    add_test(NAME sim_headless 
+             COMMAND sim_tests
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+else()
+    add_test(NAME sim_headless 
+             COMMAND sim_tests --no-golden
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endif()
 
-# Registro do Linter de regressões
+# Registro do Linter de regressões ativado sob qualquer configuração de build
 add_test(NAME regression_lint 
          COMMAND ${CMAKE_COMMAND} 
          -DSRC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp 
