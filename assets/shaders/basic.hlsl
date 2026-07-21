@@ -5,25 +5,36 @@ cbuffer Constants : register(b0, space1)
     float4x4 mvp;
 };
 
+// As semantics POSITION e COLOR originais do D3D são invalidadas pelo SDL GPU.
+// O backend exige que todos os atributos entrem como TEXCOORD0..N.
 struct VSInput
 {
-    float3 pos : TEXCOORD0;
-    float3 color : TEXCOORD1;
+    float3 pos : TEXCOORD0; // Geometria base (local)
+    float3 color : TEXCOORD1; // Cor da geometria
+    float3 inst_pos : TEXCOORD2; // Translação da instância atual
+    float3 inst_color : TEXCOORD3; // Cor base da instância atual
 };
 
 struct PSInput
 {
     float4 pos : SV_Position;
-    float3 color : COLOR;
-    float3 worldPos : TEXCOORD0; // Repassamos a posição original de mundo para textura procedural
+    float3 color : TEXCOORD0;
+    float3 worldPos : TEXCOORD1;
 };
 
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    output.pos = mul(mvp, float4(input.pos, 1.0f));
-    output.color = input.color;
-    output.worldPos = input.pos;
+    
+    // Calcula a verdadeira posição de mundo deslocando os vértices do mesh com os dados instanciados
+    float3 final_pos = input.pos + input.inst_pos;
+    
+    output.pos = mul(mvp, float4(final_pos, 1.0f));
+    
+    // Mescla a cor individual do vértice com o matiz base da instância
+    output.color = input.color * input.inst_color;
+    output.worldPos = final_pos;
+    
     return output;
 }
 
