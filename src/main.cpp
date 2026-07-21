@@ -12,9 +12,9 @@
 #include <string>
 #include <cstdarg>
 
+#include "core/jobs.h"
 #include "sim/sim.h"
 
-// Define a tipagem ausente no C++ padrão exigida pelos binários DXBC gerados pelo fxc
 typedef unsigned char BYTE;
 #include "basic_vs.h"
 #include "basic_ps.h"
@@ -62,12 +62,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    SDL_GPUShaderFormat format_flags = SDL_GPU_SHADERFORMAT_DXBC | SDL_GPU_SHADERFORMAT_DXIL;
 #ifdef NDEBUG
-    const bool gpu_debug = false;  // Release: sem camada de validação
-#else 
-    const bool gpu_debug = true;   // Debug: validação D3D12 completa
+    const bool gpu_debug = false;
+#else
+    const bool gpu_debug = true;
 #endif
+
+    SDL_GPUShaderFormat format_flags = SDL_GPU_SHADERFORMAT_DXBC | SDL_GPU_SHADERFORMAT_DXIL;
     SDL_GPUDevice* device = SDL_CreateGPUDevice(format_flags, gpu_debug, nullptr);
     if (!device) {
         SDL_Log("Erro no SDL_CreateGPUDevice: %s", SDL_GetError());
@@ -107,11 +108,11 @@ int main(int argc, char* argv[]) {
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) { SDL_Log("Erro ao criar PS: %s", SDL_GetError()); return 1; }
 
-    // --- SETUP DO MUNDO SIMULADO NA CPU ---
+    core::JobSystem js;
+
     sim::World world;
     sim::init_world(world, 42, 100000);
 
-    // --- GEOMETRIA ---
     Vertex vertices[] = {
         { -100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f },
         {  100.0f, 0.0f,  100.0f,   0.35f, 0.35f, 0.35f },
@@ -144,7 +145,6 @@ int main(int argc, char* argv[]) {
     uint32_t ib_size = sizeof(indices);
     uint32_t neutral_size = sizeof(InstanceData);
 
-    // Usa um transfer provisório apenas para subir a geometria estática ao longo do INIT.
     SDL_GPUTransferBufferCreateInfo tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, vb_size + ib_size + neutral_size };
     SDL_GPUTransferBuffer* temp_transfer = SDL_CreateGPUTransferBuffer(device, &tb_info);
 
@@ -160,11 +160,9 @@ int main(int argc, char* argv[]) {
     SDL_GPUBufferCreateInfo ib_info = { SDL_GPU_BUFFERUSAGE_INDEX, ib_size };
     SDL_GPUBuffer* index_buffer = SDL_CreateGPUBuffer(device, &ib_info);
 
-    // Buffer separado (tamanho 1) para a instância estática do cenário para imuni-la de danos pelo comando cycle=true da API.
     SDL_GPUBufferCreateInfo n_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, neutral_size };
     SDL_GPUBuffer* neutral_instance_buffer = SDL_CreateGPUBuffer(device, &n_inst_info);
 
-    // Buffer da multidão vivo na GPU com 100.000 lotes instanciados à parte.
     SDL_GPUBufferCreateInfo c_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, (uint32_t)(world.count * sizeof(InstanceData)) };
     SDL_GPUBuffer* crowd_instance_buffer = SDL_CreateGPUBuffer(device, &c_inst_info);
 
@@ -187,11 +185,9 @@ int main(int argc, char* argv[]) {
     SDL_SubmitGPUCommandBuffer(copy_cmd);
     SDL_ReleaseGPUTransferBuffer(device, temp_transfer);
 
-    // Cria o Transfer Buffer PERSISTENTE da CPU que servirá de ponte rápida nos uploads cíclicos da multidão todo frame
     SDL_GPUTransferBufferCreateInfo dyn_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)(world.count * sizeof(InstanceData)) };
     SDL_GPUTransferBuffer* dyn_transfer_buf = SDL_CreateGPUTransferBuffer(device, &dyn_tb_info);
 
-    // --- DEPTH BUFFER ---
     SDL_GPUTextureCreateInfo depth_info = {};
     depth_info.type = SDL_GPU_TEXTURETYPE_2D;
     depth_info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
@@ -203,7 +199,6 @@ int main(int argc, char* argv[]) {
     depth_info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
     SDL_GPUTexture* depth_texture = SDL_CreateGPUTexture(device, &depth_info);
 
-    // --- PIPELINE COM INSTANCING ---
     SDL_GPUGraphicsPipelineCreateInfo pipe_info = {};
     pipe_info.vertex_shader = vs;
     pipe_info.fragment_shader = ps;
@@ -253,15 +248,17 @@ int main(int argc, char* argv[]) {
     ImGui_ImplSDLGPU3_Init(&imgui_info);
 
     AppLog app_log;
-    app_log.add("Multidao ativada via Agentes SoA isolados.");
+    int max_hardware_threads = (int)std::thread::hardware_concurrency();
+    if (max_hardware_threads < 1) max_hardware_threads = 1;
+    int sim_threads = max_hardware_threads;
 
-    // --- ESTADO CÂMERA ---
+    app_log.add("JobSystem ativado em pool com %d workers físicos disponíveis.", max_hardware_threads);
+
     glm::vec3 cam_pos(0.0f, 35.0f, -70.0f);
     float cam_yaw = 0.0f;
     float cam_pitch = -0.4f;
     bool rmb_down = false;
 
-    // --- VARIÁVEIS DE SIMULAÇÃO E MÉTRICAS ---
     constexpr uint64_t SIM_HZ = 60;
     constexpr double DT = 1.0 / 60.0;
     uint64_t sim_tick = 0;
@@ -274,9 +271,11 @@ int main(int argc, char* argv[]) {
     uint64_t frequency = SDL_GetPerformanceFrequency();
 
     double last_frame_ms = 0.0;
-    double last_sim_ms = 0.0;
     double last_sync_ms = 0.0;
+    double last_sim_ms_per_tick = 0.0;
     int last_ticks_this_frame = 0;
+
+    bool first_sync = true;
 
     uint64_t last_displayed_second = ~0ULL;
     int64_t last_displayed_scale = -1;
@@ -363,6 +362,12 @@ int main(int argc, char* argv[]) {
         ImGui::NewFrame();
 
         ImGui::Begin("Tempo");
+
+        // CORREÇÃO: Variável prev_sim_threads removida do bloco para manter compilação livre de warnings /W4
+        if (ImGui::SliderInt("Threads", &sim_threads, 1, max_hardware_threads)) {
+            app_log.add("Poder de processamento ajustado para %d threads.", sim_threads);
+        }
+
         if (ImGui::Button("Pausa")) set_scale(0, "Botão"); ImGui::SameLine();
         if (ImGui::Button("1x"))    set_scale(1, "Botão"); ImGui::SameLine();
         if (ImGui::Button("10x"))   set_scale(10, "Botão"); ImGui::SameLine();
@@ -372,11 +377,14 @@ int main(int argc, char* argv[]) {
         uint64_t game_seconds = sim_tick / SIM_HZ;
         ImGui::Text("Tick: %llu", (unsigned long long)sim_tick);
         ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)(game_seconds / 86400), (unsigned long long)((game_seconds / 3600) % 24), (unsigned long long)((game_seconds / 60) % 60));
+
+        // CORREÇÃO: Linha de totalização de instâncias reposta no painel
         ImGui::Text("Instancias: 100000");
+
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
-        ImGui::Text("Sim ms: %.3f", last_sim_ms);
+        ImGui::Text("Sim ms/tick: %.3f", last_sim_ms_per_tick);
         ImGui::Text("Sync ms: %.3f", last_sync_ms);
         ImGui::Text("Ticks no frame: %d", last_ticks_this_frame);
         ImGui::End();
@@ -392,8 +400,7 @@ int main(int argc, char* argv[]) {
         int ticks_this_frame = 0;
 
         while (accumulator >= DT) {
-            // Executamos estritamente a nova biblioteca desatrelada do motor de GPU
-            sim::step(world, sim_tick);
+            sim::step(world, sim_tick, js, sim_threads);
             sim_tick++;
             accumulator -= DT;
             ticks_this_frame++;
@@ -405,8 +412,12 @@ int main(int argc, char* argv[]) {
         }
 
         uint64_t sim_end_timer = SDL_GetPerformanceCounter();
-        last_sim_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
         last_ticks_this_frame = ticks_this_frame;
+
+        if (last_ticks_this_frame > 0) {
+            double frame_sim_cost_ms = (double)(sim_end_timer - sim_start_timer) * 1000.0 / frequency;
+            last_sim_ms_per_tick = frame_sim_cost_ms / last_ticks_this_frame;
+        }
 
         game_seconds = sim_tick / SIM_HZ;
         if (game_seconds != last_displayed_second || time_scale != last_displayed_scale) {
@@ -429,36 +440,38 @@ int main(int argc, char* argv[]) {
             SDL_SetWindowTitle(window, title_buffer);
         }
 
-        // --- RENDER & SINCRONIZAÇÃO CPU->GPU ---
         ImGui::Render();
         ImDrawData* dd = ImGui::GetDrawData();
 
         SDL_GPUCommandBuffer* cmd_buffer = SDL_AcquireGPUCommandBuffer(device);
         if (!cmd_buffer) continue;
 
-        // Cronometra o custo computacional em CPU+VRAM da transformação de arrays (SoA->AoS)
-        uint64_t sync_start_timer = SDL_GetPerformanceCounter();
+        if (last_ticks_this_frame > 0 || first_sync) {
+            uint64_t sync_start_timer = SDL_GetPerformanceCounter();
 
-        InstanceData* mapped_instances = (InstanceData*)SDL_MapGPUTransferBuffer(device, dyn_transfer_buf, true);
-        for (size_t i = 0; i < world.count; i++) {
-            mapped_instances[i].x = world.position[i].x;
-            mapped_instances[i].y = world.position[i].y;
-            mapped_instances[i].z = world.position[i].z;
-            mapped_instances[i].r = world.color[i].x;
-            mapped_instances[i].g = world.color[i].y;
-            mapped_instances[i].b = world.color[i].z;
+            InstanceData* mapped_instances = (InstanceData*)SDL_MapGPUTransferBuffer(device, dyn_transfer_buf, true);
+            for (size_t i = 0; i < world.count; i++) {
+                mapped_instances[i].x = world.position[i].x;
+                mapped_instances[i].y = world.position[i].y;
+                mapped_instances[i].z = world.position[i].z;
+                mapped_instances[i].r = world.color[i].x;
+                mapped_instances[i].g = world.color[i].y;
+                mapped_instances[i].b = world.color[i].z;
+            }
+            SDL_UnmapGPUTransferBuffer(device, dyn_transfer_buf);
+
+            SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
+            SDL_GPUTransferBufferLocation loc = { dyn_transfer_buf, 0 };
+            SDL_GPUBufferRegion reg = { crowd_instance_buffer, 0, (uint32_t)(world.count * sizeof(InstanceData)) };
+
+            SDL_UploadToGPUBuffer(copy_pass, &loc, &reg, true);
+            SDL_EndGPUCopyPass(copy_pass);
+
+            uint64_t sync_end_timer = SDL_GetPerformanceCounter();
+            last_sync_ms = (double)(sync_end_timer - sync_start_timer) * 1000.0 / frequency;
+
+            first_sync = false;
         }
-        SDL_UnmapGPUTransferBuffer(device, dyn_transfer_buf);
-
-        SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
-        SDL_GPUTransferBufferLocation loc = { dyn_transfer_buf, 0 };
-        SDL_GPUBufferRegion reg = { crowd_instance_buffer, 0, (uint32_t)(world.count * sizeof(InstanceData)) };
-        // Flag cycle=true descarta a ligação do buffer antigo para não travar a GPU processando frames parados na pipe
-        SDL_UploadToGPUBuffer(copy_pass, &loc, &reg, true);
-        SDL_EndGPUCopyPass(copy_pass);
-
-        uint64_t sync_end_timer = SDL_GetPerformanceCounter();
-        last_sync_ms = (double)(sync_end_timer - sync_start_timer) * 1000.0 / frequency;
 
         SDL_GPUTexture* swapchain_texture = nullptr;
         if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmd_buffer, window, &swapchain_texture, nullptr, nullptr)) {
@@ -499,12 +512,10 @@ int main(int argc, char* argv[]) {
             SDL_GPUBufferBinding ib_bind = { index_buffer, 0 };
             SDL_BindGPUIndexBuffer(scene_pass, &ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
-            // Draw #1: O Chão (Vinculado ao buffer restrito e estático da instância neutra)
             SDL_GPUBufferBinding inst_bind_floor = { neutral_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_floor, 1);
             SDL_DrawGPUIndexedPrimitives(scene_pass, 6, 1, 0, 0, 0);
 
-            // Draw #2: A Multidão (Vinculado ao buffer dinâmico sincronizado neste frame)
             SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);
             SDL_DrawGPUIndexedPrimitives(scene_pass, 36, 100000, 6, 0, 0);
@@ -536,7 +547,6 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUBuffer(device, vertex_buffer);
     SDL_ReleaseGPUBuffer(device, index_buffer);
 
-    // Liberação separada dos Buffers de instâncias estático e dinâmico 
     SDL_ReleaseGPUBuffer(device, neutral_instance_buffer);
     SDL_ReleaseGPUBuffer(device, crowd_instance_buffer);
     SDL_ReleaseGPUTransferBuffer(device, dyn_transfer_buf);

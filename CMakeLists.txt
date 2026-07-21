@@ -53,8 +53,8 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-# Adiciona o novo módulo sim isolado da Engine na compilação
-add_executable(engine src/main.cpp src/sim/sim.cpp)
+# Adicionamos os novos arquivos puristas no build (jobs.h é listado para fins de IDE)
+add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h)
 
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
 target_include_directories(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
