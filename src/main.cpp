@@ -42,7 +42,6 @@ namespace feel {
     int dash_ticks = 10;
     int dash_cooldown = 30;
 
-    // Derivadas Pittman
     float t_apex_s = 0.0f;
     float g = 0.0f;
     float v0 = 0.0f;
@@ -142,9 +141,8 @@ int main(int argc, char* argv[]) {
     phys::phys_create_static_box(305.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, -0.785398f);
     phys::phys_create_static_box(300.0f, 2.5f, 12.0f, 5.0f, 2.5f, 0.5f);
     phys::phys_create_static_box(300.0f, 0.0f, -10.0f, 2.0f, 0.1f, 3.0f, 0.0f, 0.785398f);
-    for (int i = 0; i < 8; i++) {
-        phys::phys_create_static_box(305.0f, 0.125f + i * 0.25f, -12.0f - i * 0.5f, 2.0f, 0.125f, 0.25f);
-    }
+    // M1-6b: Rampa invisível abraçando perfeitamente os 8 degraus (pitch calculado via atan)
+    phys::phys_create_static_box(305.0f, 1.0f, -13.75f, 2.0f, 0.125f, 2.236f, 0.0f, 0.4636f);
 
     uint32_t plat_id = phys::phys_create_kinematic_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f);
     phys::phys_create_character(0.0f, 2.0f, 0.0f);
@@ -215,6 +213,7 @@ int main(int argc, char* argv[]) {
         add_box(300.0f, 2.5f, 12.0f, 5.0f, 2.5f, 0.5f, 0.3f, 0.3f, 0.4f);
         add_box(300.0f, 0.0f, -10.0f, 2.0f, 0.1f, 3.0f, 0.4f, 0.4f, 0.3f, 0.0f, 0.785398f);
         for (int i = 0; i < 8; i++) {
+            // Visual preservado, física tratada inteiramente pela nova rampa invisível externa
             add_box(305.0f, 0.125f + i * 0.25f, -12.0f - i * 0.5f, 2.0f, 0.125f, 0.25f, 0.5f, 0.5f, 0.5f);
         }
         tortura_range = { tortura_start, (uint32_t)indices.size() - tortura_start };
@@ -257,7 +256,7 @@ int main(int argc, char* argv[]) {
         SDL_ReleaseGPUTransferBuffer(device, temp_transfer);
 
         phys::phys_teleport_character(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
-        phys::phys_refresh_contacts(); // Cura o travamento imediato do Jolt em Reload
+        phys::phys_refresh_contacts();
 
         active_phys_state = { lvl.spawn.x, lvl.spawn.y, lvl.spawn.z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false };
         current_player_pos = glm::vec3(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
@@ -374,8 +373,16 @@ int main(int argc, char* argv[]) {
     glm::vec3 cam_pos(0.0f, 35.0f, -70.0f);
     float cam_yaw = 0.0f;
     float cam_pitch = -0.4f;
-    bool rmb_down = false;
 
+    // M1-6b: Zoom Desacoplado da Histerese 
+    float wheel_target = 9.0f;
+    float zoom_arm = 9.0f;
+    float actual_arm_length = 9.0f;
+
+    bool exp_walk_stairs = true;
+    float exp_stick_step_down = 0.5f;
+
+    bool rmb_down = false;
     bool cam_follow = false;
     bool in_torture = false;
     bool is_crouched = false;
@@ -411,13 +418,19 @@ int main(int argc, char* argv[]) {
     int history_count = 0;
     int ticks_in_air = 0;
 
-    // Spike Instrumentacao Vectors
     std::vector<float> delta_pos_history(60, 0.0f);
     int dp_idx = 0;
     std::vector<float> delta_interp_history(60, 0.0f);
     int di_idx = 0;
     std::vector<bool> ground_history(60, false);
     int gh_idx = 0;
+
+    // Instrumentação de Stalls Lateral (Pesquisa Validada)
+    std::vector<bool> stall_history(60, false);
+    int sh_idx = 0;
+    glm::vec2 last_stall_req(0.0f);
+    glm::vec2 last_stall_got(0.0f);
+    bool last_stall_ground = false;
 
     phys::PhysState plat_state = { 0.0f, 0.0f, 0.0f, false };
     glm::vec3 current_plat_pos(0.0f);
@@ -469,8 +482,11 @@ int main(int argc, char* argv[]) {
                     float sens = 0.002f;
                     cam_yaw += event.motion.xrel * sens;
                     cam_pitch -= event.motion.yrel * sens;
-                    if (cam_pitch > 1.5f) cam_pitch = 1.5f;
-                    if (cam_pitch < -1.5f) cam_pitch = -1.5f;
+                    cam_pitch = std::clamp(cam_pitch, -1.047f, 0.436f);
+                }
+                else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                    wheel_target -= event.wheel.y;
+                    wheel_target = std::clamp(wheel_target, 3.0f, 14.0f);
                 }
             }
             else if (rmb_down) {
@@ -503,7 +519,7 @@ int main(int argc, char* argv[]) {
                         glm::vec3 target = in_torture ? glm::vec3(300.0f, 2.0f, 0.0f) : current_player_pos;
 
                         phys::phys_teleport_character(target.x, target.y, target.z);
-                        phys::phys_refresh_contacts(); // Trava evitada!
+                        phys::phys_refresh_contacts();
 
                         active_phys_state.x = target.x;
                         active_phys_state.y = target.y;
@@ -598,7 +614,6 @@ int main(int argc, char* argv[]) {
                 dash_dir = dir;
             }
 
-            // Captura de momentum base para a progressão
             glm::vec3 vel(active_phys_state.vx, active_phys_state.vy, active_phys_state.vz);
             glm::vec3 rel_vel = vel;
             if (active_phys_state.on_ground) {
@@ -617,7 +632,7 @@ int main(int argc, char* argv[]) {
                 }
                 rel_vel.x = current_h.x;
                 rel_vel.z = current_h.y;
-                rel_vel.y = 0.0f; // Jolt StickToFloor garante o aterramento, sem necessidade de força intrusiva.
+                rel_vel.y = 0.0f;
                 vel = rel_vel + glm::vec3(active_phys_state.gvx, active_phys_state.gvy, active_phys_state.gvz);
             }
             else {
@@ -644,7 +659,7 @@ int main(int argc, char* argv[]) {
             }
 
             if (space_released && vel.y > 0.0f && !active_phys_state.on_ground) {
-                vel.y *= 0.4f; // Pulo Variável Cortado Cirurgicamente
+                vel.y *= 0.4f;
             }
 
             if (active_phys_state.on_ground) {
@@ -667,7 +682,7 @@ int main(int argc, char* argv[]) {
                 vel.y = 0.0f;
             }
 
-            phys::PhysInput p_input = { vel.x, vel.y, vel.z, feel::g };
+            phys::PhysInput p_input = { vel.x, vel.y, vel.z, feel::g, exp_stick_step_down, exp_walk_stairs };
 
             active_phys_state = phys::phys_update_character(p_input);
             last_phys_ms = (double)(SDL_GetPerformanceCounter() - phys_start) * 1000.0 / frequency;
@@ -675,10 +690,20 @@ int main(int argc, char* argv[]) {
             current_player_pos = glm::vec3(active_phys_state.x, active_phys_state.y, active_phys_state.z);
             current_plat_pos = glm::vec3(plat_state.x, plat_state.y, plat_state.z);
 
-            // Coleta de dados (TICK) para a Instrumentação
             float dpos = glm::length(current_player_pos - prev_player_pos);
             delta_pos_history[dp_idx] = dpos;
             dp_idx = (dp_idx + 1) % 60;
+
+            float req_speed = glm::length(glm::vec2(p_input.vx, p_input.vz));
+            bool is_stall = (dpos < 0.001f && req_speed > 0.1f);
+            stall_history[sh_idx] = is_stall;
+            sh_idx = (sh_idx + 1) % 60;
+
+            if (is_stall) {
+                last_stall_req = glm::vec2(p_input.vx, p_input.vz);
+                last_stall_got = glm::vec2(active_phys_state.vx, active_phys_state.vz);
+                last_stall_ground = active_phys_state.on_ground;
+            }
 
             ground_history[gh_idx] = active_phys_state.on_ground;
             gh_idx = (gh_idx + 1) % 60;
@@ -742,7 +767,6 @@ int main(int argc, char* argv[]) {
         glm::vec3 interp_player = glm::mix(prev_player_pos, current_player_pos, alpha);
         glm::vec3 interp_plat = glm::mix(prev_plat_pos, current_plat_pos, alpha);
 
-        // Coleta de dados (FRAME) para a Instrumentação
         static glm::vec3 prev_interp_player = interp_player;
         float dinterp = glm::length(interp_player - prev_interp_player);
         delta_interp_history[di_idx] = dinterp;
@@ -754,12 +778,25 @@ int main(int argc, char* argv[]) {
         glm::vec3 up(0, 1, 0);
 
         if (cam_follow) {
-            glm::vec3 offset(0, 6, -10);
-            glm::mat4 rot = glm::rotate(glm::mat4(1.0f), cam_yaw, glm::vec3(0, 1, 0));
-            glm::vec3 rot_offset = glm::vec3(rot * glm::vec4(offset, 1.0f));
-            glm::vec3 target_cam = interp_player + rot_offset;
+            zoom_arm = glm::mix(zoom_arm, wheel_target, 8.0f * (float)frame_time);
 
-            cam_pos = glm::mix(cam_pos, target_cam, 10.0f * (float)frame_time);
+            glm::vec3 pivot = interp_player + glm::vec3(0.0f, 1.5f, 0.0f);
+            glm::vec3 dir = -front;
+
+            float fraction = phys::phys_camera_ray(pivot.x, pivot.y, pivot.z, dir.x, dir.y, dir.z, zoom_arm);
+
+            float hit_arm = fraction * zoom_arm;
+            if (fraction < 1.0f) hit_arm -= 0.3f;
+            hit_arm = std::max(0.8f, hit_arm);
+
+            if (hit_arm < actual_arm_length) {
+                actual_arm_length = hit_arm;
+            }
+            else {
+                actual_arm_length = glm::mix(actual_arm_length, hit_arm, 2.0f * (float)frame_time);
+            }
+
+            cam_pos = pivot - front * actual_arm_length;
         }
         else {
             if (!ImGui::GetIO().WantCaptureKeyboard) {
@@ -786,7 +823,6 @@ int main(int argc, char* argv[]) {
         }
         float std_dev = history_count > 1 ? std::sqrt(variance / (history_count - 1)) : 0.0f;
 
-        // Cálculos e processamentos de min, max e averages para Instrumentação
         float dpos_min = 999.0f, dpos_max = 0.0f, dpos_avg = 0.0f;
         for (int i = 0; i < 60; ++i) {
             float d = delta_pos_history[i];
@@ -812,6 +848,11 @@ int main(int argc, char* argv[]) {
             if (ground_history[idx1] != ground_history[idx2]) ground_transitions++;
         }
 
+        int stall_ticks = 0;
+        for (int i = 0; i < 60; ++i) {
+            if (stall_history[i]) stall_ticks++;
+        }
+
         ImGui_ImplSDLGPU3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
@@ -833,6 +874,17 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Level Info: N/A (%zu caixas)", level_box_count);
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
+
+        // CORREÇÃO: Métricas analíticas do pipeline devolvidas
+        ImGui::Text("Instancias: 100000");
+        ImGui::Text("Frame ms: %.3f", last_frame_ms);
+        double effective_speed = frame_time > 0.0 ? (last_ticks_this_frame * DT) / frame_time : 0.0;
+        ImGui::Text("Velocidade efetiva: %.1fx", effective_speed);
+        ImGui::Text("Sim ms/tick: %.3f", last_sim_ms_per_tick);
+        ImGui::Text("Phys ms: %.3f", last_phys_ms);
+        ImGui::Text("Sync ms: %.3f", last_sync_ms);
+        ImGui::Text("Hash ms: %.3f", last_hash_ms);
+        ImGui::Text("Ticks no frame: %d", last_ticks_this_frame);
 
         ImGui::Separator();
         ImGui::Text("Masmorra Procedural");
@@ -857,6 +909,10 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Delta Interp (frames): min=%.4f, max=%.4f, avg=%.4f", dinterp_min, dinterp_max, dinterp_avg);
         ImGui::Text("Jitter (StdDev 60t): %.6f", std_dev);
         ImGui::Text("Trocas de chao (60t): %d", ground_transitions);
+        ImGui::Text("Stall ticks (60t): %d", stall_ticks);
+        ImGui::Text("Ultimo stall: pediu=(%.2f,%.2f) obteve=(%.2f,%.2f) ground=%s",
+            last_stall_req.x, last_stall_req.y, last_stall_got.x, last_stall_got.y,
+            last_stall_ground ? "sim" : "nao");
         ImGui::Text("No chao: %s", active_phys_state.on_ground ? "sim" : "nao");
         ImGui::Text("Ticks no ar: %d", ticks_in_air);
 
@@ -900,6 +956,11 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Perdoes usados: Coyote=%d, Buffer=%d", coyote_usados, buffer_usados);
         const char* estado = dash_counter > 0 ? "DASH" : (active_phys_state.on_ground ? "CHAO" : (coyote_counter < feel::coyote_ticks ? "COYOTE" : "AR"));
         ImGui::Text("Estado: %s", estado);
+
+        ImGui::Separator();
+        ImGui::Text("Experimentos (Gate M1-6)");
+        ImGui::Checkbox("WalkStairs", &exp_walk_stairs);
+        ImGui::SliderFloat("StickToFloor StepDown", &exp_stick_step_down, 0.0f, 2.0f);
         ImGui::End();
 
         ImGui::Begin("Log");

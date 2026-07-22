@@ -11,6 +11,8 @@ namespace phys {
         float vy;
         float vz;
         float gravity_y; // Usado estritamente como vetor direcional do mundo para o ExtendedUpdate
+        float stick_step_down = 0.5f;
+        bool walk_stairs_on = true;
     };
 
     struct PhysState {
@@ -46,6 +48,9 @@ namespace phys {
 
     // Atualiza caches espaciais do Kernel para curar dead-stops logo após os teleportes/reloads
     void phys_refresh_contacts();
+
+    // Cast simples do NarrowPhaseQuery para testar visão da câmera de forma determinística e segura
+    float phys_camera_ray(float fx, float fy, float fz, float dx, float dy, float dz, float max_dist);
 
     // Chamada isolada por tick: Consome input, processa a atualização global e retorna estado atual
     PhysState phys_update_character(const PhysInput& input);

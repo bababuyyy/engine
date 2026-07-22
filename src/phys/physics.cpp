@@ -13,6 +13,9 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 
 JPH_SUPPRESS_WARNINGS
 
@@ -93,7 +96,7 @@ namespace phys {
         JPH::Trace = TraceImpl;
         JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = AssertFailedImpl;)
 
-        RegisterDefaultAllocator();
+            RegisterDefaultAllocator();
         Factory::sInstance = new Factory();
         RegisterTypes();
 
@@ -154,7 +157,6 @@ namespace phys {
 
     void phys_create_character(float px, float py, float pz) {
         float half_height = 0.5f;
-        // 19-b: Composição Externa na pilha, extraída do construtor anônimo
         RotatedTranslatedShapeSettings capsule_settings(
             Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
             new CapsuleShapeSettings(half_height, 0.4f)
@@ -183,7 +185,6 @@ namespace phys {
 
     bool phys_resize_character(bool agachado) {
         float half_height = agachado ? 0.15f : 0.5f;
-        // 19-b: Idem ao phys_create_character para o resize runtime
         RotatedTranslatedShapeSettings new_capsule_settings(
             Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
             new CapsuleShapeSettings(half_height, 0.4f)
@@ -199,14 +200,27 @@ namespace phys {
         return success;
     }
 
+    float phys_camera_ray(float fx, float fy, float fz, float dx, float dy, float dz, float max_dist) {
+        const NarrowPhaseQuery& npq = physics_system->GetNarrowPhaseQuery(); // CORREÇÃO: const devolvido
+        RRayCast ray{ RVec3(fx, fy, fz), Vec3(dx, dy, dz) * max_dist };
+        RayCastResult hit;
+
+        // M1-6b: Filtros removidos. Aceita default (tudo que for sólido interage com o raio visual).
+        if (npq.CastRay(ray, hit)) {
+            return hit.mFraction;
+        }
+        return 1.0f;
+    }
+
     PhysState phys_update_character(const PhysInput& input) {
         const float dt = 1.0f / 60.0f;
-        Vec3 gravity(0.0f, -input.gravity_y, 0.0f); // Direcional usado pelo StickToFloor
+        Vec3 gravity(0.0f, -input.gravity_y, 0.0f);
 
         character->SetLinearVelocity(Vec3(input.vx, input.vy, input.vz));
 
         CharacterVirtual::ExtendedUpdateSettings settings;
-        // Definições nativas do StickToFloor (0, -0.5, 0) e WalkStairs (0, 0.4, 0) aplicadas por default
+        settings.mStickToFloorStepDown = Vec3(0.0f, -input.stick_step_down, 0.0f);
+        settings.mWalkStairsStepUp = input.walk_stairs_on ? Vec3(0.0f, 0.4f, 0.0f) : Vec3::sZero();
 
         DefaultBroadPhaseLayerFilter bp_filter = physics_system->GetDefaultBroadPhaseLayerFilter(Layers::MOVING);
         DefaultObjectLayerFilter obj_filter = physics_system->GetDefaultLayerFilter(Layers::MOVING);
@@ -218,7 +232,7 @@ namespace phys {
 
         CharacterVirtual::EGroundState ground_state = character->GetGroundState();
         bool on_ground = (ground_state == CharacterVirtual::EGroundState::OnGround);
-        
+
         RVec3 pos = character->GetPosition();
         Vec3 vel = character->GetLinearVelocity();
         Vec3 g_vel = character->GetGroundVelocity();
