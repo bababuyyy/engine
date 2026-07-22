@@ -19,6 +19,7 @@
 #include "phys/physics.h"
 #include "level/level.h"
 #include "gen/gen.h"
+#include "assets/assets.h"
 
 typedef unsigned char BYTE;
 #include "basic_vs.h"
@@ -141,7 +142,6 @@ int main(int argc, char* argv[]) {
     phys::phys_create_static_box(305.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, -0.785398f);
     phys::phys_create_static_box(300.0f, 2.5f, 12.0f, 5.0f, 2.5f, 0.5f);
     phys::phys_create_static_box(300.0f, 0.0f, -10.0f, 2.0f, 0.1f, 3.0f, 0.0f, 0.785398f);
-    // M1-6b: Rampa invisível abraçando perfeitamente os 8 degraus (pitch calculado via atan)
     phys::phys_create_static_box(305.0f, 1.0f, -13.75f, 2.0f, 0.125f, 2.236f, 0.0f, 0.4636f);
 
     uint32_t plat_id = phys::phys_create_kinematic_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f);
@@ -149,7 +149,7 @@ int main(int argc, char* argv[]) {
 
     AppLog app_log;
 
-    MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma;
+    MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma, asset_range = { 0, 0 };
     size_t level_box_count = 0;
     std::vector<uint32_t> level_body_ids;
 
@@ -213,10 +213,39 @@ int main(int argc, char* argv[]) {
         add_box(300.0f, 2.5f, 12.0f, 5.0f, 2.5f, 0.5f, 0.3f, 0.3f, 0.4f);
         add_box(300.0f, 0.0f, -10.0f, 2.0f, 0.1f, 3.0f, 0.4f, 0.4f, 0.3f, 0.0f, 0.785398f);
         for (int i = 0; i < 8; i++) {
-            // Visual preservado, física tratada inteiramente pela nova rampa invisível externa
             add_box(305.0f, 0.125f + i * 0.25f, -12.0f - i * 0.5f, 2.0f, 0.125f, 0.25f, 0.5f, 0.5f, 0.5f);
         }
         tortura_range = { tortura_start, (uint32_t)indices.size() - tortura_start };
+
+        // Integração cgltf: O primeiro objeto de autoria humana
+        asset_range = { 0, 0 };
+        MeshData asset = assets_load_glb(ASSETS_DIR "models/teste.glb");
+        if (asset.ok) {
+            uint32_t base = (uint32_t)vertices.size();
+            uint32_t start_idx = (uint32_t)indices.size();
+
+            size_t vert_count = asset.pos_rgb.size() / 6;
+            for (size_t i = 0; i < vert_count; ++i) {
+                vertices.push_back({
+                    asset.pos_rgb[i * 6 + 0] + 6.0f,
+                    asset.pos_rgb[i * 6 + 1] + 0.0f,
+                    asset.pos_rgb[i * 6 + 2] - 3.0f,
+                    asset.pos_rgb[i * 6 + 3],
+                    asset.pos_rgb[i * 6 + 4],
+                    asset.pos_rgb[i * 6 + 5]
+                    });
+            }
+
+            for (size_t i = 0; i < asset.indices.size(); ++i) {
+                indices.push_back(base + asset.indices[i]);
+            }
+
+            asset_range = { start_idx, (uint32_t)asset.indices.size() };
+            app_log.add("Asset: teste.glb (%zu verts, %zu tris)", vert_count, asset.indices.size() / 3);
+        }
+        else {
+            app_log.add("Aviso: Falha ao carregar teste.glb (%s)", asset.error.c_str());
+        }
 
         cubo_multidao = add_box(0.0f, 0.15f, 0.0f, 0.15f, 0.15f, 0.15f, 1.0f, 1.0f, 1.0f);
         cubo_jogador = add_box(0.0f, 0.9f, 0.0f, 0.4f, 0.9f, 0.4f, 1.0f, 1.0f, 1.0f);
@@ -374,7 +403,6 @@ int main(int argc, char* argv[]) {
     float cam_yaw = 0.0f;
     float cam_pitch = -0.4f;
 
-    // M1-6b: Zoom Desacoplado da Histerese 
     float wheel_target = 9.0f;
     float zoom_arm = 9.0f;
     float actual_arm_length = 9.0f;
@@ -425,7 +453,6 @@ int main(int argc, char* argv[]) {
     std::vector<bool> ground_history(60, false);
     int gh_idx = 0;
 
-    // Instrumentação de Stalls Lateral (Pesquisa Validada)
     std::vector<bool> stall_history(60, false);
     int sh_idx = 0;
     glm::vec2 last_stall_req(0.0f);
@@ -875,7 +902,6 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
 
-        // CORREÇÃO: Métricas analíticas do pipeline devolvidas
         ImGui::Text("Instancias: 100000");
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
         double effective_speed = frame_time > 0.0 ? (last_ticks_this_frame * DT) / frame_time : 0.0;
@@ -1085,6 +1111,10 @@ int main(int argc, char* argv[]) {
             SDL_DrawGPUIndexedPrimitives(scene_pass, nivel_range.index_count, 1, nivel_range.first_index, 0, 0);
 
             SDL_DrawGPUIndexedPrimitives(scene_pass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
+
+            if (asset_range.index_count > 0) {
+                SDL_DrawGPUIndexedPrimitives(scene_pass, asset_range.index_count, 1, asset_range.first_index, 0, 0);
+            }
 
             SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);

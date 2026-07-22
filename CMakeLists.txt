@@ -41,6 +41,13 @@ set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
 set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(JoltPhysics)
 
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG v1.15
+)
+FetchContent_Populate(cgltf)
+
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -65,11 +72,14 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp)
+add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp)
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
-target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${cgltf_SOURCE_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
-target_compile_definitions(engine PRIVATE LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/")
+target_compile_definitions(engine PRIVATE 
+    LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/"
+    ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/"
+)
 
 if(MSVC)
     target_compile_options(engine PRIVATE /W4)
