@@ -65,20 +65,18 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-# Reflete a inclusão do source logic isolado para interpretação de level na compilação do engine
-add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp)
+add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp)
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
-target_include_directories(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
-
-# Caminho absoluto da pasta de níveis (dev build): F5 recarrega o arquivo-FONTE
 target_compile_definitions(engine PRIVATE LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/")
 
 if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 endif()
 
-add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp)
+# Incorporando lógica e teste da geração procedural
+add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp src/level/level.cpp src/gen/gen.cpp)
 target_include_directories(sim_tests PRIVATE src)
 if(MSVC)
     target_compile_options(sim_tests PRIVATE /W4)

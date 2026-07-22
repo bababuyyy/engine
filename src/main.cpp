@@ -17,6 +17,7 @@
 #include "sim/sim.h"
 #include "phys/physics.h"
 #include "level/level.h"
+#include "gen/gen.h"
 
 typedef unsigned char BYTE;
 #include "basic_vs.h"
@@ -98,7 +99,6 @@ int main(int argc, char* argv[]) {
 
     phys::phys_init();
 
-    // Cria a física permanente da cena de tortura apenas UMA VEZ
     phys::phys_create_static_box(300.0f, -0.5f, 0.0f, 15.0f, 0.5f, 15.0f);
     phys::phys_create_static_box(295.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, 0.785398f);
     phys::phys_create_static_box(305.0f, 1.0f, 5.0f, 5.0f, 1.0f, 0.5f, -0.785398f);
@@ -226,12 +226,12 @@ int main(int argc, char* argv[]) {
         prev_player_pos = current_player_pos;
 
         level_box_count = lvl.boxes.size();
-        app_log.add("Nivel recarregado: %zu caixas", level_box_count);
         };
 
     level::LevelData initial_lvl = level::load_level(LEVELS_DIR "arena.txt");
     if (initial_lvl.ok) {
         build_level(initial_lvl);
+        app_log.add("Nivel recarregado: arena.txt (%zu caixas)", level_box_count);
     }
     else {
         app_log.add("Aviso: Falha ao carregar arena.txt");
@@ -388,6 +388,11 @@ int main(int argc, char* argv[]) {
         }
         };
 
+    uint64_t gen_seed = 42;
+    uint64_t last_layout_hash = 0;
+    int last_room_count = 0;
+    int last_box_count = 0;
+
     bool running = true;
     while (running) {
         SDL_Event event;
@@ -432,12 +437,15 @@ int main(int argc, char* argv[]) {
                     else if (event.key.key == SDLK_F5) {
                         SDL_WaitForGPUIdle(device);
                         level::LevelData new_lvl = level::load_level(LEVELS_DIR "arena.txt");
-                        if (new_lvl.ok) build_level(new_lvl);
+                        if (new_lvl.ok) {
+                            build_level(new_lvl);
+                            app_log.add("Nivel recarregado: arena.txt (%zu caixas)", level_box_count);
+                        }
                         else app_log.add("Erro: Falha ao recarregar arena.txt");
                     }
                     else if (event.key.key == SDLK_T) {
                         in_torture = !in_torture;
-                        glm::vec3 target = in_torture ? glm::vec3(300.0f, 2.0f, 0.0f) : glm::vec3(3.0f, 2.0f, -3.0f);
+                        glm::vec3 target = in_torture ? glm::vec3(300.0f, 2.0f, 0.0f) : current_player_pos;
 
                         phys::phys_teleport_character(target.x, target.y, target.z);
                         active_phys_state.x = target.x;
@@ -446,7 +454,7 @@ int main(int argc, char* argv[]) {
                         current_player_pos = target;
                         prev_player_pos = target;
 
-                        app_log.add("Teleporte: %s", in_torture ? "Cena de Tortura" : "Origem");
+                        app_log.add("Teleporte: %s", in_torture ? "Cena de Tortura" : "Volta a Masmorra/Arena");
                     }
                     else if (event.key.key == SDLK_C) {
                         is_crouched = !is_crouched;
@@ -639,22 +647,29 @@ int main(int argc, char* argv[]) {
         uint64_t game_seconds = sim_tick / SIM_HZ;
         ImGui::Text("Tick: %llu", (unsigned long long)sim_tick);
         ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)(game_seconds / 86400), (unsigned long long)((game_seconds / 3600) % 24), (unsigned long long)((game_seconds / 60) % 60));
-        ImGui::Text("Nivel: arena.txt (%zu caixas)", level_box_count);
-        ImGui::Text("Instancias: 100000");
+        ImGui::Text("Level Info: N/A (%zu caixas)", level_box_count);
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
-        ImGui::Text("Frame ms: %.3f", last_frame_ms);
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
 
-        double effective_speed = frame_time > 0.0 ? (last_ticks_this_frame * DT) / frame_time : 0.0;
-        ImGui::Text("Velocidade efetiva: %.1fx", effective_speed);
+        ImGui::Separator();
 
-        ImGui::Text("Sim ms/tick: %.3f", last_sim_ms_per_tick);
-        ImGui::Text("Phys ms: %.3f", last_phys_ms);
-        ImGui::Text("Sync ms: %.3f", last_sync_ms);
-        ImGui::Text("Hash ms: %.3f", last_hash_ms);
-        ImGui::Text("Ticks no frame: %d", last_ticks_this_frame);
+        // 1. Incorporação da interface de geração procedural
+        ImGui::Text("Masmorra Procedural");
+        ImGui::InputScalar("Seed", ImGuiDataType_U64, &gen_seed);
+        if (ImGui::Button("Gerar")) {
+            SDL_WaitForGPUIdle(device); // Limpeza de buffer crítico
+            gen::GenResult res = gen::gen_dungeon(gen_seed);
+            last_layout_hash = res.layout_hash;
+            last_room_count = res.room_count;
+            last_box_count = res.box_count;
+            build_level(res.level);
+            app_log.add("Masmorra gerada: Seed %llu | Salas %d | Caixas %d", (unsigned long long)gen_seed, last_room_count, last_box_count);
+        }
+        ImGui::Text("Layout hash: %016llX", (unsigned long long)last_layout_hash);
+        ImGui::Text("Salas: %d | Caixas procedurais: %d", last_room_count, last_box_count);
 
         ImGui::Separator();
+
         ImGui::Text("Spike / Instrumentacao");
         ImGui::Text("Pos Fis: %.4f, %.4f, %.4f", active_phys_state.x, active_phys_state.y, active_phys_state.z);
         ImGui::Text("Pos Vis: %.4f, %.4f, %.4f (alpha=%.2f)", interp_player.x, interp_player.y, interp_player.z, alpha);

@@ -53,14 +53,6 @@ namespace phys {
         virtual BroadPhaseLayer GetBroadPhaseLayer(ObjectLayer inLayer) const override {
             return mObjectToBroadPhase[inLayer];
         }
-
-#if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
-        virtual const char* GetBroadPhaseLayerName(BroadPhaseLayer inLayer) const override
-        {
-            return ((BroadPhaseLayer::Type)inLayer == 0) ? "NON_MOVING" : "MOVING";
-        }
-#endif
-
     private:
         BroadPhaseLayer mObjectToBroadPhase[Layers::NUM_LAYERS];
     };
@@ -113,7 +105,8 @@ namespace phys {
         obj_layer_pair_filter = new ObjectLayerPairFilterImpl();
 
         physics_system = new PhysicsSystem();
-        physics_system->Init(1024, 0, 1024, 1024, *bp_layer_interface, *obj_vs_bp_filter, *obj_layer_pair_filter);
+        // Aumentado a limitação do Jolt para acomodar os meshes gulosos procedurais de 1024 pra 8192
+        physics_system->Init(8192, 0, 8192, 8192, *bp_layer_interface, *obj_vs_bp_filter, *obj_layer_pair_filter);
     }
 
     void phys_shutdown() {
@@ -162,10 +155,12 @@ namespace phys {
 
     void phys_create_character(float px, float py, float pz) {
         float half_height = 0.5f;
-        Ref<Shape> capsule = RotatedTranslatedShapeSettings(
+        // 19-b: Composição Externa na pilha, extraída do construtor anônimo (Sem leaks/Corrupções de instâncias)
+        RotatedTranslatedShapeSettings capsule_settings(
             Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
             new CapsuleShapeSettings(half_height, 0.4f)
-        ).Create().Get();
+        );
+        ShapeRefC capsule = capsule_settings.Create().Get();
 
         CharacterVirtualSettings settings;
         settings.mShape = capsule;
@@ -180,10 +175,12 @@ namespace phys {
 
     bool phys_resize_character(bool agachado) {
         float half_height = agachado ? 0.15f : 0.5f;
-        ShapeRefC new_shape = RotatedTranslatedShapeSettings(
+        // 19-b: Idem ao phys_create_character para o resize runtime
+        RotatedTranslatedShapeSettings new_capsule_settings(
             Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
             new CapsuleShapeSettings(half_height, 0.4f)
-        ).Create().Get();
+        );
+        ShapeRefC new_shape = new_capsule_settings.Create().Get();
 
         bool success = character->SetShape(new_shape,
             1.5f * physics_system->GetPhysicsSettings().mPenetrationSlop,
