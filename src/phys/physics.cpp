@@ -93,7 +93,7 @@ namespace phys {
         JPH::Trace = TraceImpl;
         JPH_IF_ENABLE_ASSERTS(JPH::AssertFailed = AssertFailedImpl;)
 
-            RegisterDefaultAllocator();
+        RegisterDefaultAllocator();
         Factory::sInstance = new Factory();
         RegisterTypes();
 
@@ -105,7 +105,6 @@ namespace phys {
         obj_layer_pair_filter = new ObjectLayerPairFilterImpl();
 
         physics_system = new PhysicsSystem();
-        // Aumentado a limitação do Jolt para acomodar os meshes gulosos procedurais de 1024 pra 8192
         physics_system->Init(8192, 0, 8192, 8192, *bp_layer_interface, *obj_vs_bp_filter, *obj_layer_pair_filter);
     }
 
@@ -155,7 +154,7 @@ namespace phys {
 
     void phys_create_character(float px, float py, float pz) {
         float half_height = 0.5f;
-        // 19-b: Composição Externa na pilha, extraída do construtor anônimo (Sem leaks/Corrupções de instâncias)
+        // 19-b: Composição Externa na pilha, extraída do construtor anônimo
         RotatedTranslatedShapeSettings capsule_settings(
             Vec3(0.0f, half_height + 0.4f, 0.0f), Quat::sIdentity(),
             new CapsuleShapeSettings(half_height, 0.4f)
@@ -171,6 +170,15 @@ namespace phys {
 
     void phys_teleport_character(float px, float py, float pz) {
         character->SetPosition(RVec3(px, py, pz));
+    }
+
+    void phys_refresh_contacts() {
+        if (!character) return;
+        DefaultBroadPhaseLayerFilter bp_filter = physics_system->GetDefaultBroadPhaseLayerFilter(Layers::MOVING);
+        DefaultObjectLayerFilter obj_filter = physics_system->GetDefaultLayerFilter(Layers::MOVING);
+        BodyFilter body_filter;
+        ShapeFilter shape_filter;
+        character->RefreshContacts(bp_filter, obj_filter, body_filter, shape_filter, *temp_allocator);
     }
 
     bool phys_resize_character(bool agachado) {
@@ -193,36 +201,38 @@ namespace phys {
 
     PhysState phys_update_character(const PhysInput& input) {
         const float dt = 1.0f / 60.0f;
-        Vec3 gravity(0.0f, -20.0f, 0.0f);
+        Vec3 gravity(0.0f, -input.gravity_y, 0.0f); // Direcional usado pelo StickToFloor
 
-        CharacterVirtual::EGroundState ground_state = character->GetGroundState();
-        bool on_ground = (ground_state == CharacterVirtual::EGroundState::OnGround);
+        character->SetLinearVelocity(Vec3(input.vx, input.vy, input.vz));
 
-        Vec3 vel = character->GetLinearVelocity();
-        Vec3 ground_vel = character->GetGroundVelocity();
-
-        if (on_ground) {
-            vel = ground_vel + Vec3(input.move_x * 6.0f, input.jump ? 8.0f : 0.0f, input.move_z * 6.0f);
-        }
-        else {
-            vel.SetY(vel.GetY() + gravity.GetY() * dt);
-        }
-
-        character->SetLinearVelocity(vel);
+        CharacterVirtual::ExtendedUpdateSettings settings;
+        // Definições nativas do StickToFloor (0, -0.5, 0) e WalkStairs (0, 0.4, 0) aplicadas por default
 
         DefaultBroadPhaseLayerFilter bp_filter = physics_system->GetDefaultBroadPhaseLayerFilter(Layers::MOVING);
         DefaultObjectLayerFilter obj_filter = physics_system->GetDefaultLayerFilter(Layers::MOVING);
         BodyFilter body_filter;
         ShapeFilter shape_filter;
 
-        character->Update(dt, gravity, bp_filter, obj_filter, body_filter, shape_filter, *temp_allocator);
+        character->ExtendedUpdate(dt, gravity, settings, bp_filter, obj_filter, body_filter, shape_filter, *temp_allocator);
         physics_system->Update(dt, 1, temp_allocator, job_system);
 
+        CharacterVirtual::EGroundState ground_state = character->GetGroundState();
+        bool on_ground = (ground_state == CharacterVirtual::EGroundState::OnGround);
+        
         RVec3 pos = character->GetPosition();
+        Vec3 vel = character->GetLinearVelocity();
+        Vec3 g_vel = character->GetGroundVelocity();
+
         PhysState state;
         state.x = pos.GetX();
         state.y = pos.GetY();
         state.z = pos.GetZ();
+        state.vx = vel.GetX();
+        state.vy = vel.GetY();
+        state.vz = vel.GetZ();
+        state.gvx = g_vel.GetX();
+        state.gvy = g_vel.GetY();
+        state.gvz = g_vel.GetZ();
         state.on_ground = on_ground;
 
         return state;

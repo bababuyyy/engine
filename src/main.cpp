@@ -12,6 +12,7 @@
 #include <string>
 #include <cstdarg>
 #include <cmath>
+#include <algorithm>
 
 #include "core/jobs.h"
 #include "sim/sim.h"
@@ -22,6 +23,43 @@
 typedef unsigned char BYTE;
 #include "basic_vs.h"
 #include "basic_ps.h"
+
+// ============================================================================
+// SISTEMA DE FEEL / MÁQUINA DE ESTADO DO JOGADOR
+// ============================================================================
+namespace feel {
+    float jump_height = 2.2f;
+    int ticks_to_apex = 22;
+    float fall_gravity_mult = 1.8f;
+    float apex_gravity_mult = 0.5f;
+    int coyote_ticks = 6;
+    int buffer_ticks = 5;
+    float ground_accel = 60.0f;
+    float ground_decel = 80.0f;
+    float air_accel_mult = 0.4f;
+    float max_speed = 6.0f;
+    float dash_speed = 14.0f;
+    int dash_ticks = 10;
+    int dash_cooldown = 30;
+
+    // Derivadas Pittman
+    float t_apex_s = 0.0f;
+    float g = 0.0f;
+    float v0 = 0.0f;
+
+    void update_derived() {
+        t_apex_s = ticks_to_apex / 60.0f;
+        g = 2.0f * jump_height / (t_apex_s * t_apex_s);
+        v0 = 2.0f * jump_height / t_apex_s;
+    }
+}
+
+glm::vec2 move_towards(glm::vec2 current, glm::vec2 target, float max_delta) {
+    glm::vec2 diff = target - current;
+    float len = glm::length(diff);
+    if (len <= max_delta) return target;
+    return current + (diff / len) * max_delta;
+}
 
 struct AppLog {
     std::vector<std::string> lines;
@@ -122,7 +160,7 @@ int main(int argc, char* argv[]) {
 
     glm::vec3 current_player_pos(0.0f);
     glm::vec3 prev_player_pos(0.0f);
-    phys::PhysState active_phys_state = { 0.0f, 0.0f, 0.0f, false };
+    phys::PhysState active_phys_state = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false };
 
     auto build_level = [&](const level::LevelData& lvl) {
         for (uint32_t id : level_body_ids) phys::phys_destroy_body(id);
@@ -219,9 +257,9 @@ int main(int argc, char* argv[]) {
         SDL_ReleaseGPUTransferBuffer(device, temp_transfer);
 
         phys::phys_teleport_character(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
-        active_phys_state.x = lvl.spawn.x;
-        active_phys_state.y = lvl.spawn.y;
-        active_phys_state.z = lvl.spawn.z;
+        phys::phys_refresh_contacts(); // Cura o travamento imediato do Jolt em Reload
+
+        active_phys_state = { lvl.spawn.x, lvl.spawn.y, lvl.spawn.z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false };
         current_player_pos = glm::vec3(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
         prev_player_pos = current_player_pos;
 
@@ -373,6 +411,14 @@ int main(int argc, char* argv[]) {
     int history_count = 0;
     int ticks_in_air = 0;
 
+    // Spike Instrumentacao Vectors
+    std::vector<float> delta_pos_history(60, 0.0f);
+    int dp_idx = 0;
+    std::vector<float> delta_interp_history(60, 0.0f);
+    int di_idx = 0;
+    std::vector<bool> ground_history(60, false);
+    int gh_idx = 0;
+
     phys::PhysState plat_state = { 0.0f, 0.0f, 0.0f, false };
     glm::vec3 current_plat_pos(0.0f);
     glm::vec3 prev_plat_pos(0.0f);
@@ -392,6 +438,15 @@ int main(int argc, char* argv[]) {
     uint64_t last_layout_hash = 0;
     int last_room_count = 0;
     int last_box_count = 0;
+
+    int coyote_counter = 999;
+    int buffer_counter = 0;
+    int dash_counter = 0;
+    int dash_cooldown_counter = 0;
+    int coyote_usados = 0;
+    int buffer_usados = 0;
+    glm::vec3 dash_dir(0.0f);
+    bool prev_space = false;
 
     bool running = true;
     while (running) {
@@ -448,6 +503,8 @@ int main(int argc, char* argv[]) {
                         glm::vec3 target = in_torture ? glm::vec3(300.0f, 2.0f, 0.0f) : current_player_pos;
 
                         phys::phys_teleport_character(target.x, target.y, target.z);
+                        phys::phys_refresh_contacts(); // Trava evitada!
+
                         active_phys_state.x = target.x;
                         active_phys_state.y = target.y;
                         active_phys_state.z = target.z;
@@ -502,16 +559,28 @@ int main(int argc, char* argv[]) {
             plat_state.z = -5.0f + 3.0f * sine;
             phys::phys_move_kinematic(plat_id, plat_state.x, plat_state.y, plat_state.z);
 
-            phys::PhysInput p_input = {};
+            feel::update_derived();
 
+            if (buffer_counter > 0) buffer_counter--;
+            if (dash_counter > 0) dash_counter--;
+            if (dash_cooldown_counter > 0) dash_cooldown_counter--;
+            coyote_counter++;
+
+            bool space_down = keys[SDL_SCANCODE_SPACE];
+            bool space_pressed = space_down && !prev_space;
+            bool space_released = !space_down && prev_space;
+            prev_space = space_down;
+
+            if (space_pressed) buffer_counter = feel::buffer_ticks;
+
+            glm::vec3 front_loop(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
+            glm::vec3 front_xz(front_loop.x, 0.0f, front_loop.z);
+            if (glm::length(front_xz) > 0.0001f) front_xz = glm::normalize(front_xz);
+            else front_xz = glm::vec3(0, 0, 1);
+            glm::vec3 right_xz = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front_xz));
+
+            glm::vec3 dir(0.0f);
             if (cam_follow && !ImGui::GetIO().WantCaptureKeyboard) {
-                glm::vec3 front_loop(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
-                glm::vec3 front_xz(front_loop.x, 0.0f, front_loop.z);
-                if (glm::length(front_xz) > 0.0001f) front_xz = glm::normalize(front_xz);
-                else front_xz = glm::vec3(0, 0, 1);
-
-                glm::vec3 right_xz = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front_xz));
-
                 float w_s = 0.0f;
                 float d_a = 0.0f;
                 if (keys[SDL_SCANCODE_W]) w_s += 1.0f;
@@ -519,19 +588,100 @@ int main(int argc, char* argv[]) {
                 if (keys[SDL_SCANCODE_A]) d_a -= 1.0f;
                 if (keys[SDL_SCANCODE_D]) d_a += 1.0f;
 
-                glm::vec3 dir = front_xz * w_s + right_xz * d_a;
+                dir = front_xz * w_s + right_xz * d_a;
                 if (glm::length(dir) > 0.0001f) dir = glm::normalize(dir);
-
-                p_input.move_x = dir.x;
-                p_input.move_z = dir.z;
-                p_input.jump = keys[SDL_SCANCODE_SPACE];
             }
+
+            if (keys[SDL_SCANCODE_LSHIFT] && dash_cooldown_counter == 0 && dash_counter == 0 && glm::length(dir) > 0.0001f) {
+                dash_counter = feel::dash_ticks;
+                dash_cooldown_counter = feel::dash_cooldown;
+                dash_dir = dir;
+            }
+
+            // Captura de momentum base para a progressão
+            glm::vec3 vel(active_phys_state.vx, active_phys_state.vy, active_phys_state.vz);
+            glm::vec3 rel_vel = vel;
+            if (active_phys_state.on_ground) {
+                rel_vel -= glm::vec3(active_phys_state.gvx, active_phys_state.gvy, active_phys_state.gvz);
+            }
+
+            glm::vec2 target_h(dir.x * feel::max_speed, dir.z * feel::max_speed);
+            glm::vec2 current_h(rel_vel.x, rel_vel.z);
+
+            if (active_phys_state.on_ground) {
+                if (glm::length(dir) > 0.0001f) {
+                    current_h = move_towards(current_h, target_h, feel::ground_accel * DT);
+                }
+                else {
+                    current_h = move_towards(current_h, glm::vec2(0), feel::ground_decel * DT);
+                }
+                rel_vel.x = current_h.x;
+                rel_vel.z = current_h.y;
+                rel_vel.y = 0.0f; // Jolt StickToFloor garante o aterramento, sem necessidade de força intrusiva.
+                vel = rel_vel + glm::vec3(active_phys_state.gvx, active_phys_state.gvy, active_phys_state.gvz);
+            }
+            else {
+                if (glm::length(dir) > 0.0001f) {
+                    current_h += glm::vec2(dir.x, dir.z) * (feel::ground_accel * feel::air_accel_mult * (float)DT);
+                    float speed = glm::length(current_h);
+                    float max_allowed = std::max((float)glm::length(glm::vec2(rel_vel.x, rel_vel.z)), feel::max_speed);
+                    if (speed > max_allowed) current_h = (current_h / speed) * max_allowed;
+                }
+                vel.x = current_h.x;
+                vel.z = current_h.y;
+            }
+
+            float current_g = feel::g;
+            if (vel.y < 0.0f) {
+                current_g *= feel::fall_gravity_mult;
+            }
+            else if (std::abs(vel.y) < 1.0f && space_down) {
+                current_g *= feel::apex_gravity_mult;
+            }
+
+            if (!active_phys_state.on_ground) {
+                vel.y -= current_g * DT;
+            }
+
+            if (space_released && vel.y > 0.0f && !active_phys_state.on_ground) {
+                vel.y *= 0.4f; // Pulo Variável Cortado Cirurgicamente
+            }
+
+            if (active_phys_state.on_ground) {
+                coyote_counter = 0;
+            }
+
+            if (buffer_counter > 0 && coyote_counter < feel::coyote_ticks && dash_counter == 0) {
+                vel.y = feel::v0;
+                if (active_phys_state.on_ground) vel.y += active_phys_state.gvy;
+
+                if (coyote_counter > 0) coyote_usados++;
+                if (buffer_counter < feel::buffer_ticks) buffer_usados++;
+
+                coyote_counter = feel::coyote_ticks;
+                buffer_counter = 0;
+            }
+
+            if (dash_counter > 0) {
+                vel = dash_dir * feel::dash_speed;
+                vel.y = 0.0f;
+            }
+
+            phys::PhysInput p_input = { vel.x, vel.y, vel.z, feel::g };
 
             active_phys_state = phys::phys_update_character(p_input);
             last_phys_ms = (double)(SDL_GetPerformanceCounter() - phys_start) * 1000.0 / frequency;
 
             current_player_pos = glm::vec3(active_phys_state.x, active_phys_state.y, active_phys_state.z);
             current_plat_pos = glm::vec3(plat_state.x, plat_state.y, plat_state.z);
+
+            // Coleta de dados (TICK) para a Instrumentação
+            float dpos = glm::length(current_player_pos - prev_player_pos);
+            delta_pos_history[dp_idx] = dpos;
+            dp_idx = (dp_idx + 1) % 60;
+
+            ground_history[gh_idx] = active_phys_state.on_ground;
+            gh_idx = (gh_idx + 1) % 60;
 
             pos_history[history_idx] = current_player_pos;
             history_idx = (history_idx + 1) % 60;
@@ -592,6 +742,13 @@ int main(int argc, char* argv[]) {
         glm::vec3 interp_player = glm::mix(prev_player_pos, current_player_pos, alpha);
         glm::vec3 interp_plat = glm::mix(prev_plat_pos, current_plat_pos, alpha);
 
+        // Coleta de dados (FRAME) para a Instrumentação
+        static glm::vec3 prev_interp_player = interp_player;
+        float dinterp = glm::length(interp_player - prev_interp_player);
+        delta_interp_history[di_idx] = dinterp;
+        di_idx = (di_idx + 1) % 60;
+        prev_interp_player = interp_player;
+
         glm::vec3 front(sin(cam_yaw) * cos(cam_pitch), sin(cam_pitch), cos(cam_yaw) * cos(cam_pitch));
         glm::vec3 right = glm::normalize(glm::cross(glm::vec3(0, 1, 0), front));
         glm::vec3 up(0, 1, 0);
@@ -629,6 +786,32 @@ int main(int argc, char* argv[]) {
         }
         float std_dev = history_count > 1 ? std::sqrt(variance / (history_count - 1)) : 0.0f;
 
+        // Cálculos e processamentos de min, max e averages para Instrumentação
+        float dpos_min = 999.0f, dpos_max = 0.0f, dpos_avg = 0.0f;
+        for (int i = 0; i < 60; ++i) {
+            float d = delta_pos_history[i];
+            if (d < dpos_min) dpos_min = d;
+            if (d > dpos_max) dpos_max = d;
+            dpos_avg += d;
+        }
+        dpos_avg /= 60.0f;
+
+        float dinterp_min = 999.0f, dinterp_max = 0.0f, dinterp_avg = 0.0f;
+        for (int i = 0; i < 60; ++i) {
+            float d = delta_interp_history[i];
+            if (d < dinterp_min) dinterp_min = d;
+            if (d > dinterp_max) dinterp_max = d;
+            dinterp_avg += d;
+        }
+        dinterp_avg /= 60.0f;
+
+        int ground_transitions = 0;
+        for (int i = 0; i < 59; ++i) {
+            int idx1 = (gh_idx + i) % 60;
+            int idx2 = (gh_idx + i + 1) % 60;
+            if (ground_history[idx1] != ground_history[idx2]) ground_transitions++;
+        }
+
         ImGui_ImplSDLGPU3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
@@ -652,12 +835,10 @@ int main(int argc, char* argv[]) {
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
 
         ImGui::Separator();
-
-        // 1. Incorporação da interface de geração procedural
         ImGui::Text("Masmorra Procedural");
         ImGui::InputScalar("Seed", ImGuiDataType_U64, &gen_seed);
         if (ImGui::Button("Gerar")) {
-            SDL_WaitForGPUIdle(device); // Limpeza de buffer crítico
+            SDL_WaitForGPUIdle(device);
             gen::GenResult res = gen::gen_dungeon(gen_seed);
             last_layout_hash = res.layout_hash;
             last_room_count = res.room_count;
@@ -669,11 +850,13 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Salas: %d | Caixas procedurais: %d", last_room_count, last_box_count);
 
         ImGui::Separator();
-
         ImGui::Text("Spike / Instrumentacao");
         ImGui::Text("Pos Fis: %.4f, %.4f, %.4f", active_phys_state.x, active_phys_state.y, active_phys_state.z);
         ImGui::Text("Pos Vis: %.4f, %.4f, %.4f (alpha=%.2f)", interp_player.x, interp_player.y, interp_player.z, alpha);
+        ImGui::Text("Delta Pos (ticks): min=%.4f, max=%.4f, avg=%.4f", dpos_min, dpos_max, dpos_avg);
+        ImGui::Text("Delta Interp (frames): min=%.4f, max=%.4f, avg=%.4f", dinterp_min, dinterp_max, dinterp_avg);
         ImGui::Text("Jitter (StdDev 60t): %.6f", std_dev);
+        ImGui::Text("Trocas de chao (60t): %d", ground_transitions);
         ImGui::Text("No chao: %s", active_phys_state.on_ground ? "sim" : "nao");
         ImGui::Text("Ticks no ar: %d", ticks_in_air);
 
@@ -696,6 +879,27 @@ int main(int argc, char* argv[]) {
             ImGui::EndDisabled();
         }
 
+        ImGui::End();
+
+        ImGui::Begin("Feel (Parametros Vivos)");
+        ImGui::SliderFloat("Jump Height", &feel::jump_height, 0.5f, 5.0f);
+        ImGui::SliderInt("Ticks to Apex", &feel::ticks_to_apex, 10, 60);
+        ImGui::SliderFloat("Fall Grav Mult", &feel::fall_gravity_mult, 0.5f, 3.0f);
+        ImGui::SliderFloat("Apex Grav Mult", &feel::apex_gravity_mult, 0.1f, 1.0f);
+        ImGui::SliderInt("Coyote Ticks", &feel::coyote_ticks, 0, 20);
+        ImGui::SliderInt("Buffer Ticks", &feel::buffer_ticks, 0, 20);
+        ImGui::SliderFloat("Ground Accel", &feel::ground_accel, 10.0f, 150.0f);
+        ImGui::SliderFloat("Ground Decel", &feel::ground_decel, 10.0f, 150.0f);
+        ImGui::SliderFloat("Air Accel Mult", &feel::air_accel_mult, 0.0f, 1.0f);
+        ImGui::SliderFloat("Max Speed", &feel::max_speed, 1.0f, 20.0f);
+        ImGui::SliderFloat("Dash Speed", &feel::dash_speed, 5.0f, 30.0f);
+        ImGui::SliderInt("Dash Ticks", &feel::dash_ticks, 1, 30);
+        ImGui::SliderInt("Dash Cooldown", &feel::dash_cooldown, 0, 120);
+        ImGui::Separator();
+        ImGui::Text("Derivadas: g=%.2f, v0=%.2f", feel::g, feel::v0);
+        ImGui::Text("Perdoes usados: Coyote=%d, Buffer=%d", coyote_usados, buffer_usados);
+        const char* estado = dash_counter > 0 ? "DASH" : (active_phys_state.on_ground ? "CHAO" : (coyote_counter < feel::coyote_ticks ? "COYOTE" : "AR"));
+        ImGui::Text("Estado: %s", estado);
         ImGui::End();
 
         ImGui::Begin("Log");

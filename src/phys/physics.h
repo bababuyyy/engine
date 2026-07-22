@@ -7,15 +7,22 @@
 namespace phys {
 
     struct PhysInput {
-        float move_x;
-        float move_z;
-        bool jump;
+        float vx;
+        float vy;
+        float vz;
+        float gravity_y; // Usado estritamente como vetor direcional do mundo para o ExtendedUpdate
     };
 
     struct PhysState {
         float x;
         float y;
         float z;
+        float vx;
+        float vy;
+        float vz;
+        float gvx; // Componentes da velocidade relativa do chão (plataformas móveis)
+        float gvy;
+        float gvz;
         bool on_ground;
     };
 
@@ -36,6 +43,9 @@ namespace phys {
     // Controle e teleporte atrelado às chaves de dev-tool
     void phys_teleport_character(float px, float py, float pz);
     bool phys_resize_character(bool agachado);
+
+    // Atualiza caches espaciais do Kernel para curar dead-stops logo após os teleportes/reloads
+    void phys_refresh_contacts();
 
     // Chamada isolada por tick: Consome input, processa a atualização global e retorna estado atual
     PhysState phys_update_character(const PhysInput& input);
