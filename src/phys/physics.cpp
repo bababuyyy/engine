@@ -165,7 +165,9 @@ namespace phys {
 
         CharacterVirtualSettings settings;
         settings.mShape = capsule;
-        settings.mSupportingVolume = Plane(Vec3::sAxisY(), 0.0f);
+        // Aceita como suporte apenas contatos na esfera inferior da capsula
+        // (valor canonico do sample oficial CharacterVirtualTest.cpp, v5.6.0)
+        settings.mSupportingVolume = Plane(Vec3::sAxisY(), -0.4f);
 
         character = new CharacterVirtual(&settings, RVec3(px, py, pz), Quat::sIdentity(), physics_system);
     }
