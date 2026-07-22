@@ -75,7 +75,6 @@ if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 endif()
 
-# Incorporando lógica e teste da geração procedural
 add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp src/level/level.cpp src/gen/gen.cpp)
 target_include_directories(sim_tests PRIVATE src)
 if(MSVC)
@@ -94,9 +93,11 @@ else()
     )
 endif()
 
+# Passando o TESTS_FILE explícito para fechar a auditoria da Sentinela
 add_test(NAME regression_lint 
          COMMAND ${CMAKE_COMMAND} 
          -DSRC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp 
          -DJOBS_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/core/jobs.h
+         -DTESTS_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/sim_tests.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lint.cmake
 )
