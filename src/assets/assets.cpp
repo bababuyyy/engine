@@ -51,6 +51,7 @@ MeshData assets_load_glb(const char* path) {
 
     cgltf_accessor* pos_accessor = nullptr;
     cgltf_accessor* uv_accessor = nullptr;
+    cgltf_accessor* normal_accessor = nullptr;
 
     for (cgltf_size i = 0; i < primitive->attributes_count; ++i) {
         if (primitive->attributes[i].type == cgltf_attribute_type_position) {
@@ -58,6 +59,9 @@ MeshData assets_load_glb(const char* path) {
         }
         else if (primitive->attributes[i].type == cgltf_attribute_type_texcoord) {
             uv_accessor = primitive->attributes[i].data;
+        }
+        else if (primitive->attributes[i].type == cgltf_attribute_type_normal) {
+            normal_accessor = primitive->attributes[i].data;
         }
     }
 
@@ -79,7 +83,6 @@ MeshData assets_load_glb(const char* path) {
         g = primitive->material->pbr_metallic_roughness.base_color_factor[1];
         b = primitive->material->pbr_metallic_roughness.base_color_factor[2];
 
-        // Extrai a textura embutida na memória do .glb
         cgltf_texture_view& tex_view = primitive->material->pbr_metallic_roughness.base_color_texture;
         if (tex_view.texture && tex_view.texture->image) {
             cgltf_image* image = tex_view.texture->image;
@@ -97,7 +100,8 @@ MeshData assets_load_glb(const char* path) {
     }
 
     result.pos_rgb.resize(pos_accessor->count * 6);
-    result.uv.resize(pos_accessor->count * 2, 0.0f); // Preenche UVs vazias com zeros se não houver
+    result.uv.resize(pos_accessor->count * 2, 0.0f);
+    result.normals.resize(pos_accessor->count * 3, 0.0f);
 
     for (cgltf_size i = 0; i < pos_accessor->count; ++i) {
         cgltf_accessor_read_float(pos_accessor, i, &result.pos_rgb[i * 6], 3);
@@ -109,6 +113,20 @@ MeshData assets_load_glb(const char* path) {
     if (uv_accessor) {
         for (cgltf_size i = 0; i < uv_accessor->count && i < pos_accessor->count; ++i) {
             cgltf_accessor_read_float(uv_accessor, i, &result.uv[i * 2], 2);
+        }
+    }
+
+    // Extração da normal (com fallback para (0,1,0))
+    if (normal_accessor) {
+        for (cgltf_size i = 0; i < normal_accessor->count && i < pos_accessor->count; ++i) {
+            cgltf_accessor_read_float(normal_accessor, i, &result.normals[i * 3], 3);
+        }
+    }
+    else {
+        for (cgltf_size i = 0; i < pos_accessor->count; ++i) {
+            result.normals[i * 3 + 0] = 0.0f;
+            result.normals[i * 3 + 1] = 1.0f;
+            result.normals[i * 3 + 2] = 0.0f;
         }
     }
 

@@ -78,12 +78,20 @@ struct AppLog {
     }
 };
 
-struct Vertex { float x, y, z; float r, g, b; float u, v; };
+struct Vertex { float x, y, z; float r, g, b; float u, v; float nx, ny, nz; };
 struct InstanceData { float x, y, z; float r, g, b; };
 
 struct MeshRange {
     uint32_t first_index;
     uint32_t index_count;
+};
+
+// Estrutura do Uniform Fragment alinhada em blocos de 16-bytes
+struct SunParams {
+    float dir[3];
+    float ambient;
+    float color[3];
+    float pad;
 };
 
 int main(int argc, char* argv[]) {
@@ -127,7 +135,8 @@ int main(int argc, char* argv[]) {
     ps_info.entrypoint = "PSMain";
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    ps_info.num_samplers = 1; // ARMADILHA SDL3 EVITADA!
+    ps_info.num_samplers = 1;
+    ps_info.num_uniform_buffers = 1; // ARMADILHA SDL3: Uniforms de fragment precisam ser explicitados
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
 
@@ -161,7 +170,6 @@ int main(int argc, char* argv[]) {
     fallback_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
     SDL_GPUTexture* fallback_tex = SDL_CreateGPUTexture(device, &fallback_tex_info);
     if (!fallback_tex) SDL_Log("ERRO fallback_tex: %s", SDL_GetError());
-
 
     uint8_t white_pixel[4] = { 255, 255, 255, 255 };
     SDL_GPUTransferBufferCreateInfo fb_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, 4 };
@@ -218,7 +226,7 @@ int main(int argc, char* argv[]) {
         std::vector<Vertex> vertices;
         std::vector<uint16_t> indices;
 
-        // O novo add_box gera 24 vértices para garantir mapping perfeito de UV (0..1) em TODAS as 6 faces
+        // O novo add_box gera 24 vértices para garantir mapping de UV (0..1) e NORMAIS perfeitamente lisas por face
         auto add_box = [&](float cx, float cy, float cz, float hx, float hy, float hz, float r, float g, float b, float rot_yaw = 0.0f, float rot_pitch = 0.0f) {
             uint32_t base = (uint32_t)vertices.size();
             uint32_t start_idx = (uint32_t)indices.size();
@@ -227,6 +235,11 @@ int main(int argc, char* argv[]) {
             mat = glm::translate(mat, glm::vec3(cx, cy, cz));
             mat = glm::rotate(mat, rot_yaw, glm::vec3(0, 1, 0));
             mat = glm::rotate(mat, rot_pitch, glm::vec3(1, 0, 0));
+
+            glm::mat4 rot_only = glm::mat4(1.0f);
+            rot_only = glm::rotate(rot_only, rot_yaw, glm::vec3(0, 1, 0));
+            rot_only = glm::rotate(rot_only, rot_pitch, glm::vec3(1, 0, 0));
+
             mat = glm::scale(mat, glm::vec3(hx, hy, hz));
 
             const glm::vec3 pos[24] = {
@@ -237,11 +250,20 @@ int main(int argc, char* argv[]) {
                 {-1, 1,-1}, { 1, 1,-1}, { 1, 1, 1}, {-1, 1, 1}, // Top (+y)
                 {-1,-1, 1}, { 1,-1, 1}, { 1,-1,-1}, {-1,-1,-1}  // Bottom (-y)
             };
-            const glm::vec2 uvs[4] = { {0,1}, {1,1}, {1,0}, {0,0} }; // Bottom-left to Top-left
+            const glm::vec3 norms[24] = {
+                {0,0,-1}, {0,0,-1}, {0,0,-1}, {0,0,-1},
+                {0,0,1},  {0,0,1},  {0,0,1},  {0,0,1},
+                {-1,0,0}, {-1,0,0}, {-1,0,0}, {-1,0,0},
+                {1,0,0},  {1,0,0},  {1,0,0},  {1,0,0},
+                {0,1,0},  {0,1,0},  {0,1,0},  {0,1,0},
+                {0,-1,0}, {0,-1,0}, {0,-1,0}, {0,-1,0}
+            };
+            const glm::vec2 uvs[4] = { {0,1}, {1,1}, {1,0}, {0,0} };
 
             for (int i = 0; i < 24; ++i) {
                 glm::vec4 p = mat * glm::vec4(pos[i], 1.0f);
-                vertices.push_back({ p.x, p.y, p.z, r, g, b, uvs[i % 4].x, uvs[i % 4].y });
+                glm::vec4 n = rot_only * glm::vec4(norms[i], 0.0f);
+                vertices.push_back({ p.x, p.y, p.z, r, g, b, uvs[i % 4].x, uvs[i % 4].y, n.x, n.y, n.z });
             }
 
             const uint16_t inds[36] = {
@@ -272,7 +294,7 @@ int main(int argc, char* argv[]) {
         }
         tortura_range = { tortura_start, (uint32_t)indices.size() - tortura_start };
 
-        // Integração cgltf com o pipeline Textura
+        // Integração cgltf com o pipeline de Textura e Normais
         asset_range = { 0, 0 };
         MeshData asset = assets_load_glb(ASSETS_DIR "models/teste.glb");
         if (asset.ok) {
@@ -289,7 +311,10 @@ int main(int argc, char* argv[]) {
                     asset.pos_rgb[i * 6 + 4],
                     asset.pos_rgb[i * 6 + 5],
                     asset.uv[i * 2 + 0],
-                    asset.uv[i * 2 + 1]
+                    asset.uv[i * 2 + 1],
+                    asset.normals[i * 3 + 0],
+                    asset.normals[i * 3 + 1],
+                    asset.normals[i * 3 + 2]
                     });
             }
 
@@ -446,18 +471,19 @@ int main(int argc, char* argv[]) {
     pipe_info.depth_stencil_state.enable_depth_write = true;
     pipe_info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
 
-    SDL_GPUVertexAttribute attrs[5] = {};
+    SDL_GPUVertexAttribute attrs[6] = {};
     attrs[0].location = 0; attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[0].offset = 0;                 attrs[0].buffer_slot = 0;
     attrs[1].location = 1; attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[1].offset = 3 * sizeof(float); attrs[1].buffer_slot = 0;
     attrs[2].location = 2; attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[2].offset = 0;                 attrs[2].buffer_slot = 1;
     attrs[3].location = 3; attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[3].offset = 3 * sizeof(float); attrs[3].buffer_slot = 1;
-    attrs[4].location = 4; attrs[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2; attrs[4].offset = 6 * sizeof(float); attrs[4].buffer_slot = 0; // UV da nova interface
+    attrs[4].location = 4; attrs[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2; attrs[4].offset = 6 * sizeof(float); attrs[4].buffer_slot = 0; // UV
+    attrs[5].location = 5; attrs[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[5].offset = 8 * sizeof(float); attrs[5].buffer_slot = 0; // Normals
 
     SDL_GPUVertexBufferDescription vb_desc[2] = {};
     vb_desc[0].slot = 0; vb_desc[0].pitch = sizeof(Vertex);       vb_desc[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
     vb_desc[1].slot = 1; vb_desc[1].pitch = sizeof(InstanceData); vb_desc[1].input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
 
-    pipe_info.vertex_input_state.num_vertex_attributes = 5;
+    pipe_info.vertex_input_state.num_vertex_attributes = 6;
     pipe_info.vertex_input_state.vertex_attributes = attrs;
     pipe_info.vertex_input_state.num_vertex_buffers = 2;
     pipe_info.vertex_input_state.vertex_buffer_descriptions = vb_desc;
@@ -503,6 +529,13 @@ int main(int argc, char* argv[]) {
     bool cam_follow = false;
     bool in_torture = false;
     bool is_crouched = false;
+
+    // Estado do sol
+    float sun_yaw = 45.0f;
+    float sun_pitch = -45.0f;
+    float sun_ambient = 0.35f;
+    float sun_color_arr[3] = { 1.0f, 1.0f, 1.0f };
+    float sun_intensity = 1.0f;
 
     constexpr uint64_t SIM_HZ = 60;
     constexpr double DT = 1.0 / 60.0;
@@ -1078,6 +1111,15 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("StickToFloor StepDown", &exp_stick_step_down, 0.0f, 2.0f);
         ImGui::End();
 
+        ImGui::Begin("Sol");
+        ImGui::SliderFloat("Yaw", &sun_yaw, 0.0f, 360.0f);
+        ImGui::SliderFloat("Pitch", &sun_pitch, -89.0f, -10.0f);
+        ImGui::SliderFloat("Ambient", &sun_ambient, 0.0f, 1.0f);
+        ImGui::SliderFloat3("Color", sun_color_arr, 0.0f, 1.0f);
+        ImGui::SliderFloat("Intensity", &sun_intensity, 0.0f, 5.0f);
+        // ligar ao relógio do mundo (Dia/hora) no M2
+        ImGui::End();
+
         ImGui::Begin("Log");
         for (const std::string& line : app_log.lines) ImGui::TextUnformatted(line.c_str());
         if (app_log.auto_scroll) { ImGui::SetScrollHereY(1.0f); app_log.auto_scroll = false; }
@@ -1168,6 +1210,27 @@ int main(int argc, char* argv[]) {
             glm::mat4 mvp = proj * view;
 
             SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
+
+            // Preparação dos dados do Sol (SunParams)
+            float sy_rad = glm::radians(sun_yaw);
+            float sp_rad = glm::radians(sun_pitch);
+            glm::vec3 s_dir(
+                cos(sp_rad) * sin(sy_rad),
+                sin(sp_rad),
+                cos(sp_rad) * cos(sy_rad)
+            );
+            s_dir = glm::normalize(s_dir);
+
+            SunParams sun_params;
+            sun_params.dir[0] = s_dir.x;
+            sun_params.dir[1] = s_dir.y;
+            sun_params.dir[2] = s_dir.z;
+            sun_params.ambient = sun_ambient;
+            sun_params.color[0] = sun_color_arr[0] * sun_intensity;
+            sun_params.color[1] = sun_color_arr[1] * sun_intensity;
+            sun_params.color[2] = sun_color_arr[2] * sun_intensity;
+            sun_params.pad = 0.0f;
+
             ImGui_ImplSDLGPU3_PrepareDrawData(dd, cmd_buffer);
 
             SDL_GPUColorTargetInfo color_target = {};
@@ -1187,6 +1250,9 @@ int main(int argc, char* argv[]) {
 
             SDL_GPURenderPass* scene_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target, 1, &depth_target);
             SDL_BindGPUGraphicsPipeline(scene_pass, pipeline);
+
+            // Injeta parâmetros do sol no Fragment Shader (num_uniform_buffers = 1 no PS permite isso)
+            SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sun_params, sizeof(SunParams));
 
             SDL_GPUBufferBinding vb_bind = { vertex_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 0, &vb_bind, 1);
