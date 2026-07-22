@@ -264,7 +264,7 @@ int main(int argc, char* argv[]) {
     // [TESTE 5] SOCIAL
     // ==============================================================================
     bool t5_pass = true;
-    const char* dummy_sched = "0800 10 10 trabalhar\n# lixo\n1200 0 0 almocar\ninvalida 0 0 \n1400 10 10 trabalhar";
+    const char* dummy_sched = "comida 0 0\n0800 10 10 trabalhar\n# lixo\n1200 0 0 almocar\ninvalida 0 0 \n1400 10 10 trabalhar";
     social::Schedule tsched = social::parse_schedule(dummy_sched);
 
     if (!tsched.ok || tsched.entries.size() != 3) {
@@ -276,21 +276,36 @@ int main(int argc, char* argv[]) {
     social::init_npc(tnpc1, tsched);
     social::init_npc(tnpc2, tsched);
 
+    // Injeção de fome simulada para trigar o comportamento logo no Ato 2
+    tnpc1.fome = 0.35f;
+    tnpc2.fome = 0.35f;
+
     bool arrived_at_noon = false;
     bool deterministic = true;
     bool flee_worked = false;
     bool flee_resumed = false;
+    bool did_eat = false;
+    bool did_resume_from_eating = false;
 
-    // Teste comprimido: 120 ticks = 1 minuto de jogo -> 2 dias completos em 172800 ticks
     for (uint64_t t = 1; t <= 172800; ++t) {
         int minute = (int)((t / 120) % 1440);
         social::social_tick(tnpc1, tsched, minute);
         social::social_tick(tnpc2, tsched, minute);
 
-        // Determinismo: comparar apenas ANTES da injecao (depois divergem por design)
-        if (t < 780 * 120 && (tnpc1.x != tnpc2.x || tnpc1.z != tnpc2.z)) deterministic = false;
+        // Determinismo: comparar apenas ANTES da injecao de Fuga
+        if (t < 780 * 120 && (tnpc1.x != tnpc2.x || tnpc1.z != tnpc2.z || tnpc1.fome != tnpc2.fome || tnpc1.action != tnpc2.action)) deterministic = false;
 
-        // 12:05 do dia 1: ja chegou ao almoco (0,0)
+        // Ato 2: Avalia a rotina emergente de comer antes do almoço oficial
+        if (t < 725 * 120) {
+            if (tnpc1.action == 2 && std::sqrt(tnpc1.x * tnpc1.x + tnpc1.z * tnpc1.z) < 0.8f) {
+                did_eat = true;
+            }
+            if (did_eat && tnpc1.action == 0 && tnpc1.fome >= 0.95f) {
+                did_resume_from_eating = true;
+            }
+        }
+
+        // 12:05 do dia 1: ja chegou ao almoco (0,0) via agenda scriptada
         if (t == 725 * 120) {
             arrived_at_noon = (std::sqrt(tnpc1.x * tnpc1.x + tnpc1.z * tnpc1.z) <= 0.5f);
         }
@@ -302,7 +317,7 @@ int main(int argc, char* argv[]) {
             tnpc1.flee_z = 50.0f;
         }
 
-        // Entre 13:00 e 14:00: chegou em (50,50) e voltou a AGENDA
+        // Entre 13:00 e 14:00: chegou em (50,50) e voltou a AGENDA autonomamente
         if (t > 780 * 120 && t < 840 * 120) {
             if (tnpc1.action == 0 && std::sqrt(std::pow(tnpc1.x - 50.0f, 2) + std::pow(tnpc1.z - 50.0f, 2)) < 0.2f) flee_worked = true;
         }
@@ -313,12 +328,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (!deterministic) { std::cout << "[FAIL] SOCIAL: Movimentacao nao convergiu deterministicamente.\n"; t5_pass = false; }
-    if (!arrived_at_noon) { std::cout << "[FAIL] SOCIAL: O NPC nao obedeceu o relogio para chegar ao ponto 0, 0 (almocar).\n"; t5_pass = false; }
+    if (!deterministic) { std::cout << "[FAIL] SOCIAL: Movimentacao e vitais nao convergiram deterministicamente.\n"; t5_pass = false; }
+    if (!did_eat) { std::cout << "[FAIL] SOCIAL: O NPC nao interrompeu para comer no food spot ao cruzar a fome de 0.3.\n"; t5_pass = false; }
+    if (!did_resume_from_eating) { std::cout << "[FAIL] SOCIAL: O NPC nao retomou a agenda pos-refeicao.\n"; t5_pass = false; }
+    if (!arrived_at_noon) { std::cout << "[FAIL] SOCIAL: O NPC nao obedeceu o relogio scriptado de almoço apos sua refeicao autonoma.\n"; t5_pass = false; }
     if (!flee_worked) { std::cout << "[FAIL] SOCIAL: O primitivo de fuga foi abortado ou nao atingiu ponto final.\n"; t5_pass = false; }
     if (!flee_resumed) { std::cout << "[FAIL] SOCIAL: O resumo de agenda pos-fuga nao acionou sua trajetoria correta.\n"; t5_pass = false; }
 
-    if (t5_pass) std::cout << "[PASS] SOCIAL: Parser resiliente, rotina deterministica e resume de fuga validados.\n";
+    if (t5_pass) std::cout << "[PASS] SOCIAL: Agenda, prioridades vitais estritas e fuga validados com sucesso.\n";
     else all_passed = false;
 
     return all_passed ? 0 : 1;

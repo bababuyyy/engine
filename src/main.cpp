@@ -436,7 +436,7 @@ int main(int argc, char* argv[]) {
             std::stringstream buffer;
             buffer << f.rdbuf();
             npc_scheds[i] = social::parse_schedule(buffer.str().c_str());
-            app_log.add("Agenda social carregada: npc%d.txt (%zu steps)", i, npc_scheds[i].entries.size());
+            app_log.add("Agenda social carregada: npc%d.txt (%zu steps, food: %.1f,%.1f)", i, npc_scheds[i].entries.size(), npc_scheds[i].food_x, npc_scheds[i].food_z);
         }
         social::init_npc(npcs[i], npc_scheds[i]);
         prev_npcs[i] = npcs[i];
@@ -551,9 +551,9 @@ int main(int argc, char* argv[]) {
     if (max_hardware_threads < 1) max_hardware_threads = 1;
     int sim_threads = max_hardware_threads;
 
-    app_log.add("JobSystem ativado em pool com %d workers físicos disponíveis.", max_hardware_threads);
+    app_log.add("JobSystem ativado em pool com %d workers físicos.", max_hardware_threads);
     app_log.add("Mundo seed=%llu", (unsigned long long)world.seed);
-    app_log.add("AVISO: F6 para o novo Palco Social. F5 recarrega a Arena.");
+    app_log.add("AVISO: F6 para o Palco Social. F5 recarrega a Arena.");
 
     glm::vec3 cam_pos(0.0f, 35.0f, -70.0f);
     float cam_yaw = 0.0f;
@@ -1179,7 +1179,12 @@ int main(int argc, char* argv[]) {
             if (npc_scheds[i].ok && !npc_scheds[i].entries.empty()) {
                 ativ = npc_scheds[i].entries[npcs[i].entry_atual].atividade;
             }
-            ImGui::Text("%s: %s (%.1f, %.1f) %s", npc_names[i], ativ, npcs[i].x, npcs[i].z, npcs[i].action == 1 ? "[FUGA]" : "");
+            const char* act_str = "";
+            if (npcs[i].action == 1) act_str = "[FUGA]";
+            else if (npcs[i].action == 2) act_str = "[COMER]";
+
+            ImGui::Text("%s: %s (%.1f, %.1f) %s", npc_names[i], ativ, npcs[i].x, npcs[i].z, act_str);
+            ImGui::ProgressBar(npcs[i].fome, ImVec2(80, 0));
         }
         ImGui::End();
 

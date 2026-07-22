@@ -1,4 +1,5 @@
 # Bruno - ferreiro
+comida 10 0
 0600 -15 -5 dormir
 0630 15 2 trabalhar
 1230 0 -5 almocar

@@ -1,4 +1,5 @@
 # Eva - taberneira
+comida 10 0
 0900 10 -5 dormir
 1000 10 0 limpar
 1200 10 0 servir
