@@ -78,7 +78,7 @@ struct AppLog {
     }
 };
 
-struct Vertex { float x, y, z; float r, g, b; };
+struct Vertex { float x, y, z; float r, g, b; float u, v; };
 struct InstanceData { float x, y, z; float r, g, b; };
 
 struct MeshRange {
@@ -127,6 +127,7 @@ int main(int argc, char* argv[]) {
     ps_info.entrypoint = "PSMain";
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    ps_info.num_samplers = 1; // ARMADILHA SDL3 EVITADA!
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
 
@@ -147,6 +148,48 @@ int main(int argc, char* argv[]) {
     uint32_t plat_id = phys::phys_create_kinematic_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f);
     phys::phys_create_character(0.0f, 2.0f, 0.0f);
 
+    // ============================================================================
+    // PIPELINE DE TEXTURA: Inicialização do Fallback White 1x1
+    // ============================================================================
+    SDL_GPUTextureCreateInfo fallback_tex_info = {};
+    fallback_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+    fallback_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    fallback_tex_info.width = 1;
+    fallback_tex_info.height = 1;
+    fallback_tex_info.layer_count_or_depth = 1;
+    fallback_tex_info.num_levels = 1;
+    fallback_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* fallback_tex = SDL_CreateGPUTexture(device, &fallback_tex_info);
+    if (!fallback_tex) SDL_Log("ERRO fallback_tex: %s", SDL_GetError());
+
+
+    uint8_t white_pixel[4] = { 255, 255, 255, 255 };
+    SDL_GPUTransferBufferCreateInfo fb_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, 4 };
+    SDL_GPUTransferBuffer* fallback_tb = SDL_CreateGPUTransferBuffer(device, &fb_tb_info);
+    void* fb_map = SDL_MapGPUTransferBuffer(device, fallback_tb, false);
+    memcpy(fb_map, white_pixel, 4);
+    SDL_UnmapGPUTransferBuffer(device, fallback_tb);
+
+    SDL_GPUSamplerCreateInfo samp_info = {};
+    samp_info.min_filter = SDL_GPU_FILTER_LINEAR;
+    samp_info.mag_filter = SDL_GPU_FILTER_LINEAR;
+    samp_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    samp_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    samp_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    SDL_GPUSampler* sampler = SDL_CreateGPUSampler(device, &samp_info);
+    if (!sampler) SDL_Log("ERRO sampler: %s", SDL_GetError());
+
+    SDL_GPUCommandBuffer* init_cmd = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass* init_pass = SDL_BeginGPUCopyPass(init_cmd);
+    SDL_GPUTextureTransferInfo fb_tex_loc = { fallback_tb, 0, 0, 0 };
+    SDL_GPUTextureRegion fb_tex_reg = { fallback_tex, 0, 0, 0, 0, 0, 1, 1, 1 };
+    SDL_UploadToGPUTexture(init_pass, &fb_tex_loc, &fb_tex_reg, false);
+    SDL_EndGPUCopyPass(init_pass);
+    SDL_SubmitGPUCommandBuffer(init_cmd);
+    SDL_ReleaseGPUTransferBuffer(device, fallback_tb);
+    // ============================================================================
+
     AppLog app_log;
 
     MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma, asset_range = { 0, 0 };
@@ -155,6 +198,7 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUBuffer* vertex_buffer = nullptr;
     SDL_GPUBuffer* index_buffer = nullptr;
+    SDL_GPUTexture* asset_tex = nullptr;
 
     glm::vec3 current_player_pos(0.0f);
     glm::vec3 prev_player_pos(0.0f);
@@ -166,10 +210,15 @@ int main(int argc, char* argv[]) {
 
         if (vertex_buffer) SDL_ReleaseGPUBuffer(device, vertex_buffer);
         if (index_buffer) SDL_ReleaseGPUBuffer(device, index_buffer);
+        if (asset_tex) {
+            SDL_ReleaseGPUTexture(device, asset_tex);
+            asset_tex = nullptr;
+        }
 
         std::vector<Vertex> vertices;
         std::vector<uint16_t> indices;
 
+        // O novo add_box gera 24 vértices para garantir mapping perfeito de UV (0..1) em TODAS as 6 faces
         auto add_box = [&](float cx, float cy, float cz, float hx, float hy, float hz, float r, float g, float b, float rot_yaw = 0.0f, float rot_pitch = 0.0f) {
             uint32_t base = (uint32_t)vertices.size();
             uint32_t start_idx = (uint32_t)indices.size();
@@ -180,20 +229,26 @@ int main(int argc, char* argv[]) {
             mat = glm::rotate(mat, rot_pitch, glm::vec3(1, 0, 0));
             mat = glm::scale(mat, glm::vec3(hx, hy, hz));
 
-            glm::vec3 corners[8] = {
-                {-1, -1,  1}, { 1, -1,  1}, { 1,  1,  1}, {-1,  1,  1},
-                {-1, -1, -1}, { 1, -1, -1}, { 1,  1, -1}, {-1,  1, -1}
+            const glm::vec3 pos[24] = {
+                {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1}, // Front (-z)
+                { 1,-1, 1}, {-1,-1, 1}, {-1, 1, 1}, { 1, 1, 1}, // Back (+z)
+                {-1,-1, 1}, {-1,-1,-1}, {-1, 1,-1}, {-1, 1, 1}, // Left (-x)
+                { 1,-1,-1}, { 1,-1, 1}, { 1, 1, 1}, { 1, 1,-1}, // Right (+x)
+                {-1, 1,-1}, { 1, 1,-1}, { 1, 1, 1}, {-1, 1, 1}, // Top (+y)
+                {-1,-1, 1}, { 1,-1, 1}, { 1,-1,-1}, {-1,-1,-1}  // Bottom (-y)
             };
-            for (int i = 0; i < 8; ++i) {
-                glm::vec4 p = mat * glm::vec4(corners[i], 1.0f);
-                vertices.push_back({ p.x, p.y, p.z, r, g, b });
+            const glm::vec2 uvs[4] = { {0,1}, {1,1}, {1,0}, {0,0} }; // Bottom-left to Top-left
+
+            for (int i = 0; i < 24; ++i) {
+                glm::vec4 p = mat * glm::vec4(pos[i], 1.0f);
+                vertices.push_back({ p.x, p.y, p.z, r, g, b, uvs[i % 4].x, uvs[i % 4].y });
             }
 
-            uint16_t local_inds[36] = {
-                0,1,2, 0,2,3,  1,5,6, 1,6,2,  5,4,7, 5,7,6,
-                4,0,3, 4,3,7,  3,2,6, 3,6,7,  4,5,1, 4,1,0
+            const uint16_t inds[36] = {
+                0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
+                12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23
             };
-            for (int i = 0; i < 36; ++i) indices.push_back(base + local_inds[i]);
+            for (int i = 0; i < 36; ++i) indices.push_back(base + inds[i]);
 
             return MeshRange{ start_idx, 36 };
             };
@@ -217,7 +272,7 @@ int main(int argc, char* argv[]) {
         }
         tortura_range = { tortura_start, (uint32_t)indices.size() - tortura_start };
 
-        // Integração cgltf: O primeiro objeto de autoria humana
+        // Integração cgltf com o pipeline Textura
         asset_range = { 0, 0 };
         MeshData asset = assets_load_glb(ASSETS_DIR "models/teste.glb");
         if (asset.ok) {
@@ -232,7 +287,9 @@ int main(int argc, char* argv[]) {
                     asset.pos_rgb[i * 6 + 2] - 3.0f,
                     asset.pos_rgb[i * 6 + 3],
                     asset.pos_rgb[i * 6 + 4],
-                    asset.pos_rgb[i * 6 + 5]
+                    asset.pos_rgb[i * 6 + 5],
+                    asset.uv[i * 2 + 0],
+                    asset.uv[i * 2 + 1]
                     });
             }
 
@@ -280,9 +337,40 @@ int main(int argc, char* argv[]) {
         SDL_GPUBufferRegion ib_reg = { index_buffer, 0, ib_size };
         SDL_UploadToGPUBuffer(copy_pass, &ib_loc, &ib_reg, false);
 
+        // Upload da Imagem do Asset (se houver)
+        SDL_GPUTransferBuffer* asset_tb = nullptr;
+        if (asset.ok && asset.tex_w > 0 && asset.tex_h > 0 && !asset.tex_rgba.empty()) {
+            SDL_GPUTextureCreateInfo asset_tex_info = {};
+            asset_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+            asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            asset_tex_info.width = asset.tex_w;
+            asset_tex_info.height = asset.tex_h;
+            asset_tex_info.layer_count_or_depth = 1;
+            asset_tex_info.num_levels = 1;
+            asset_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+            asset_tex = SDL_CreateGPUTexture(device, &asset_tex_info);
+            if (!asset_tex) SDL_Log("ERRO asset_tex: %s", SDL_GetError());
+
+            uint32_t tex_size = asset.tex_w * asset.tex_h * 4;
+            SDL_GPUTransferBufferCreateInfo a_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, tex_size };
+            asset_tb = SDL_CreateGPUTransferBuffer(device, &a_tb_info);
+
+            void* a_map = SDL_MapGPUTransferBuffer(device, asset_tb, false);
+            memcpy(a_map, asset.tex_rgba.data(), tex_size);
+            SDL_UnmapGPUTransferBuffer(device, asset_tb);
+
+            SDL_GPUTextureTransferInfo a_tex_loc = { asset_tb, 0, 0, 0 };
+            SDL_GPUTextureRegion a_tex_reg = { asset_tex, 0, 0, 0, 0, 0, (uint32_t)asset.tex_w, (uint32_t)asset.tex_h, 1 };
+            SDL_UploadToGPUTexture(copy_pass, &a_tex_loc, &a_tex_reg, false);
+        }
+
         SDL_EndGPUCopyPass(copy_pass);
         SDL_SubmitGPUCommandBuffer(copy_cmd);
+
         SDL_ReleaseGPUTransferBuffer(device, temp_transfer);
+        if (asset_tb) {
+            SDL_ReleaseGPUTransferBuffer(device, asset_tb);
+        }
 
         phys::phys_teleport_character(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
         phys::phys_refresh_contacts();
@@ -358,17 +446,18 @@ int main(int argc, char* argv[]) {
     pipe_info.depth_stencil_state.enable_depth_write = true;
     pipe_info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
 
-    SDL_GPUVertexAttribute attrs[4] = {};
+    SDL_GPUVertexAttribute attrs[5] = {};
     attrs[0].location = 0; attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[0].offset = 0;                 attrs[0].buffer_slot = 0;
     attrs[1].location = 1; attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[1].offset = 3 * sizeof(float); attrs[1].buffer_slot = 0;
     attrs[2].location = 2; attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[2].offset = 0;                 attrs[2].buffer_slot = 1;
     attrs[3].location = 3; attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[3].offset = 3 * sizeof(float); attrs[3].buffer_slot = 1;
+    attrs[4].location = 4; attrs[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2; attrs[4].offset = 6 * sizeof(float); attrs[4].buffer_slot = 0; // UV da nova interface
 
     SDL_GPUVertexBufferDescription vb_desc[2] = {};
     vb_desc[0].slot = 0; vb_desc[0].pitch = sizeof(Vertex);       vb_desc[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
     vb_desc[1].slot = 1; vb_desc[1].pitch = sizeof(InstanceData); vb_desc[1].input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
 
-    pipe_info.vertex_input_state.num_vertex_attributes = 4;
+    pipe_info.vertex_input_state.num_vertex_attributes = 5;
     pipe_info.vertex_input_state.vertex_attributes = attrs;
     pipe_info.vertex_input_state.num_vertex_buffers = 2;
     pipe_info.vertex_input_state.vertex_buffer_descriptions = vb_desc;
@@ -1108,13 +1197,23 @@ int main(int argc, char* argv[]) {
             SDL_GPUBufferBinding inst_bind_floor = { neutral_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_floor, 1);
 
-            SDL_DrawGPUIndexedPrimitives(scene_pass, nivel_range.index_count, 1, nivel_range.first_index, 0, 0);
+            // Binda Fallback para o cenário por padrão
+            SDL_GPUTextureSamplerBinding samp_bind = { fallback_tex, sampler };
+            SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
+            SDL_DrawGPUIndexedPrimitives(scene_pass, nivel_range.index_count, 1, nivel_range.first_index, 0, 0);
             SDL_DrawGPUIndexedPrimitives(scene_pass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
 
             if (asset_range.index_count > 0) {
+                // Binda a Textura do Asset se houver
+                SDL_GPUTextureSamplerBinding asset_samp_bind = { asset_tex ? asset_tex : fallback_tex, sampler };
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, &asset_samp_bind, 1);
+
                 SDL_DrawGPUIndexedPrimitives(scene_pass, asset_range.index_count, 1, asset_range.first_index, 0, 0);
             }
+
+            // Volta para o Fallback para multidão e jogador visual (Cubos)
+            SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
             SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);
@@ -1157,6 +1256,11 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUBuffer(device, neutral_instance_buffer);
     SDL_ReleaseGPUBuffer(device, crowd_instance_buffer);
     SDL_ReleaseGPUBuffer(device, char_instance_buffer);
+
+    // Destruindo Texturas + Sampler
+    if (asset_tex) SDL_ReleaseGPUTexture(device, asset_tex);
+    if (fallback_tex) SDL_ReleaseGPUTexture(device, fallback_tex);
+    if (sampler) SDL_ReleaseGPUSampler(device, sampler);
 
     SDL_ReleaseGPUTransferBuffer(device, dyn_transfer_buf);
     SDL_ReleaseGPUTransferBuffer(device, char_transfer_buf);

@@ -4,8 +4,13 @@
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
+
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
@@ -45,10 +50,14 @@ MeshData assets_load_glb(const char* path) {
     }
 
     cgltf_accessor* pos_accessor = nullptr;
+    cgltf_accessor* uv_accessor = nullptr;
+
     for (cgltf_size i = 0; i < primitive->attributes_count; ++i) {
         if (primitive->attributes[i].type == cgltf_attribute_type_position) {
             pos_accessor = primitive->attributes[i].data;
-            break;
+        }
+        else if (primitive->attributes[i].type == cgltf_attribute_type_texcoord) {
+            uv_accessor = primitive->attributes[i].data;
         }
     }
 
@@ -59,7 +68,7 @@ MeshData assets_load_glb(const char* path) {
     }
 
     if (pos_accessor->count > 65535) {
-        result.ok = false; "Limite de 65535 vertices excedido (index buffer v1 limit)";
+        result.error = "Limite de 65535 vertices excedido (index buffer v1 limit)";
         cgltf_free(data);
         return result;
     }
@@ -69,14 +78,38 @@ MeshData assets_load_glb(const char* path) {
         r = primitive->material->pbr_metallic_roughness.base_color_factor[0];
         g = primitive->material->pbr_metallic_roughness.base_color_factor[1];
         b = primitive->material->pbr_metallic_roughness.base_color_factor[2];
+
+        // Extrai a textura embutida na memória do .glb
+        cgltf_texture_view& tex_view = primitive->material->pbr_metallic_roughness.base_color_texture;
+        if (tex_view.texture && tex_view.texture->image) {
+            cgltf_image* image = tex_view.texture->image;
+            if (image->buffer_view && image->buffer_view->buffer->data) {
+                const uint8_t* img_data = static_cast<const uint8_t*>(image->buffer_view->buffer->data) + image->buffer_view->offset;
+                int comp;
+
+                unsigned char* pixels = stbi_load_from_memory(img_data, static_cast<int>(image->buffer_view->size), &result.tex_w, &result.tex_h, &comp, 4);
+                if (pixels) {
+                    result.tex_rgba.assign(pixels, pixels + (result.tex_w * result.tex_h * 4));
+                    stbi_image_free(pixels);
+                }
+            }
+        }
     }
 
     result.pos_rgb.resize(pos_accessor->count * 6);
+    result.uv.resize(pos_accessor->count * 2, 0.0f); // Preenche UVs vazias com zeros se não houver
+
     for (cgltf_size i = 0; i < pos_accessor->count; ++i) {
         cgltf_accessor_read_float(pos_accessor, i, &result.pos_rgb[i * 6], 3);
         result.pos_rgb[i * 6 + 3] = r;
         result.pos_rgb[i * 6 + 4] = g;
         result.pos_rgb[i * 6 + 5] = b;
+    }
+
+    if (uv_accessor) {
+        for (cgltf_size i = 0; i < uv_accessor->count && i < pos_accessor->count; ++i) {
+            cgltf_accessor_read_float(uv_accessor, i, &result.uv[i * 2], 2);
+        }
     }
 
     if (primitive->indices && primitive->indices->count > 0) {

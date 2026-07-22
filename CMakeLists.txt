@@ -48,6 +48,13 @@ FetchContent_Declare(
 )
 FetchContent_Populate(cgltf)
 
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG 31c1ad374564
+)
+FetchContent_Populate(stb)
+
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -74,7 +81,7 @@ add_custom_command(
 
 add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp)
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
-target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${cgltf_SOURCE_DIR})
+target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${cgltf_SOURCE_DIR} ${stb_SOURCE_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
 target_compile_definitions(engine PRIVATE 
     LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/"
