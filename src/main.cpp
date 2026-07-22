@@ -86,12 +86,16 @@ struct MeshRange {
     uint32_t index_count;
 };
 
-// Estrutura do Uniform Fragment alinhada em blocos de 16-bytes
 struct SunParams {
     float dir[3];
     float ambient;
     float color[3];
     float pad;
+};
+
+struct LoadedAsset {
+    MeshRange range;
+    SDL_GPUTexture* tex;
 };
 
 int main(int argc, char* argv[]) {
@@ -136,7 +140,7 @@ int main(int argc, char* argv[]) {
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
     ps_info.num_samplers = 1;
-    ps_info.num_uniform_buffers = 1; // ARMADILHA SDL3: Uniforms de fragment precisam ser explicitados
+    ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
 
@@ -157,9 +161,6 @@ int main(int argc, char* argv[]) {
     uint32_t plat_id = phys::phys_create_kinematic_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f);
     phys::phys_create_character(0.0f, 2.0f, 0.0f);
 
-    // ============================================================================
-    // PIPELINE DE TEXTURA: Inicialização do Fallback White 1x1
-    // ============================================================================
     SDL_GPUTextureCreateInfo fallback_tex_info = {};
     fallback_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
     fallback_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -169,7 +170,6 @@ int main(int argc, char* argv[]) {
     fallback_tex_info.num_levels = 1;
     fallback_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
     SDL_GPUTexture* fallback_tex = SDL_CreateGPUTexture(device, &fallback_tex_info);
-    if (!fallback_tex) SDL_Log("ERRO fallback_tex: %s", SDL_GetError());
 
     uint8_t white_pixel[4] = { 255, 255, 255, 255 };
     SDL_GPUTransferBufferCreateInfo fb_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, 4 };
@@ -186,7 +186,6 @@ int main(int argc, char* argv[]) {
     samp_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
     samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
     SDL_GPUSampler* sampler = SDL_CreateGPUSampler(device, &samp_info);
-    if (!sampler) SDL_Log("ERRO sampler: %s", SDL_GetError());
 
     SDL_GPUCommandBuffer* init_cmd = SDL_AcquireGPUCommandBuffer(device);
     SDL_GPUCopyPass* init_pass = SDL_BeginGPUCopyPass(init_cmd);
@@ -196,37 +195,38 @@ int main(int argc, char* argv[]) {
     SDL_EndGPUCopyPass(init_pass);
     SDL_SubmitGPUCommandBuffer(init_cmd);
     SDL_ReleaseGPUTransferBuffer(device, fallback_tb);
-    // ============================================================================
 
     AppLog app_log;
 
-    MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma, asset_range = { 0, 0 };
+    MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma;
     size_t level_box_count = 0;
     std::vector<uint32_t> level_body_ids;
+    std::vector<LoadedAsset> level_assets;
 
     SDL_GPUBuffer* vertex_buffer = nullptr;
     SDL_GPUBuffer* index_buffer = nullptr;
-    SDL_GPUTexture* asset_tex = nullptr;
 
     glm::vec3 current_player_pos(0.0f);
     glm::vec3 prev_player_pos(0.0f);
     phys::PhysState active_phys_state = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false };
 
     auto build_level = [&](const level::LevelData& lvl) {
+        SDL_WaitForGPUIdle(device); // O consumidor protege a si mesmo: NENHUM produtor libera GPU em voo
+
         for (uint32_t id : level_body_ids) phys::phys_destroy_body(id);
         level_body_ids.clear();
 
         if (vertex_buffer) SDL_ReleaseGPUBuffer(device, vertex_buffer);
         if (index_buffer) SDL_ReleaseGPUBuffer(device, index_buffer);
-        if (asset_tex) {
-            SDL_ReleaseGPUTexture(device, asset_tex);
-            asset_tex = nullptr;
+
+        for (auto& a : level_assets) {
+            if (a.tex) SDL_ReleaseGPUTexture(device, a.tex);
         }
+        level_assets.clear();
 
         std::vector<Vertex> vertices;
         std::vector<uint16_t> indices;
 
-        // O novo add_box gera 24 vértices para garantir mapping de UV (0..1) e NORMAIS perfeitamente lisas por face
         auto add_box = [&](float cx, float cy, float cz, float hx, float hy, float hz, float r, float g, float b, float rot_yaw = 0.0f, float rot_pitch = 0.0f) {
             uint32_t base = (uint32_t)vertices.size();
             uint32_t start_idx = (uint32_t)indices.size();
@@ -294,39 +294,61 @@ int main(int argc, char* argv[]) {
         }
         tortura_range = { tortura_start, (uint32_t)indices.size() - tortura_start };
 
-        // Integração cgltf com o pipeline de Textura e Normais
-        asset_range = { 0, 0 };
-        MeshData asset = assets_load_glb(ASSETS_DIR "models/teste.glb");
-        if (asset.ok) {
-            uint32_t base = (uint32_t)vertices.size();
-            uint32_t start_idx = (uint32_t)indices.size();
+        struct PendingTex { SDL_GPUTexture* tex; uint32_t w, h; std::vector<unsigned char> data; };
+        std::vector<PendingTex> pending_texs;
 
-            size_t vert_count = asset.pos_rgb.size() / 6;
-            for (size_t i = 0; i < vert_count; ++i) {
-                vertices.push_back({
-                    asset.pos_rgb[i * 6 + 0] + 6.0f,
-                    asset.pos_rgb[i * 6 + 1] + 0.0f,
-                    asset.pos_rgb[i * 6 + 2] - 3.0f,
-                    asset.pos_rgb[i * 6 + 3],
-                    asset.pos_rgb[i * 6 + 4],
-                    asset.pos_rgb[i * 6 + 5],
-                    asset.uv[i * 2 + 0],
-                    asset.uv[i * 2 + 1],
-                    asset.normals[i * 3 + 0],
-                    asset.normals[i * 3 + 1],
-                    asset.normals[i * 3 + 2]
-                    });
+        for (const auto& m : lvl.meshes) {
+            std::string full_path = std::string(ASSETS_DIR) + m.path;
+            MeshData asset = assets_load_glb(full_path.c_str());
+            if (asset.ok) {
+                uint32_t base = (uint32_t)vertices.size();
+                uint32_t start_idx = (uint32_t)indices.size();
+
+                size_t vert_count = asset.pos_rgb.size() / 6;
+                for (size_t i = 0; i < vert_count; ++i) {
+                    vertices.push_back({
+                        asset.pos_rgb[i * 6 + 0] + m.x,
+                        asset.pos_rgb[i * 6 + 1] + m.y,
+                        asset.pos_rgb[i * 6 + 2] + m.z,
+                        asset.pos_rgb[i * 6 + 3],
+                        asset.pos_rgb[i * 6 + 4],
+                        asset.pos_rgb[i * 6 + 5],
+                        asset.uv[i * 2 + 0],
+                        asset.uv[i * 2 + 1],
+                        asset.normals[i * 3 + 0],
+                        asset.normals[i * 3 + 1],
+                        asset.normals[i * 3 + 2]
+                        });
+                }
+
+                for (size_t i = 0; i < asset.indices.size(); ++i) {
+                    indices.push_back(base + asset.indices[i]);
+                }
+
+                LoadedAsset la;
+                la.range = { start_idx, (uint32_t)asset.indices.size() };
+                la.tex = nullptr;
+
+                if (asset.tex_w > 0 && asset.tex_h > 0 && !asset.tex_rgba.empty()) {
+                    SDL_GPUTextureCreateInfo asset_tex_info = {};
+                    asset_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+                    asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+                    asset_tex_info.width = asset.tex_w;
+                    asset_tex_info.height = asset.tex_h;
+                    asset_tex_info.layer_count_or_depth = 1;
+                    asset_tex_info.num_levels = 1;
+                    asset_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+                    la.tex = SDL_CreateGPUTexture(device, &asset_tex_info);
+
+                    pending_texs.push_back({ la.tex, (uint32_t)asset.tex_w, (uint32_t)asset.tex_h, std::move(asset.tex_rgba) });
+                }
+
+                level_assets.push_back(la);
+                app_log.add("Asset: %s (%zu verts, %zu tris)", m.path.c_str(), vert_count, asset.indices.size() / 3);
             }
-
-            for (size_t i = 0; i < asset.indices.size(); ++i) {
-                indices.push_back(base + asset.indices[i]);
+            else {
+                app_log.add("Aviso: Falha ao carregar %s (%s)", m.path.c_str(), asset.error.c_str());
             }
-
-            asset_range = { start_idx, (uint32_t)asset.indices.size() };
-            app_log.add("Asset: teste.glb (%zu verts, %zu tris)", vert_count, asset.indices.size() / 3);
-        }
-        else {
-            app_log.add("Aviso: Falha ao carregar teste.glb (%s)", asset.error.c_str());
         }
 
         cubo_multidao = add_box(0.0f, 0.15f, 0.0f, 0.15f, 0.15f, 0.15f, 1.0f, 1.0f, 1.0f);
@@ -362,39 +384,29 @@ int main(int argc, char* argv[]) {
         SDL_GPUBufferRegion ib_reg = { index_buffer, 0, ib_size };
         SDL_UploadToGPUBuffer(copy_pass, &ib_loc, &ib_reg, false);
 
-        // Upload da Imagem do Asset (se houver)
-        SDL_GPUTransferBuffer* asset_tb = nullptr;
-        if (asset.ok && asset.tex_w > 0 && asset.tex_h > 0 && !asset.tex_rgba.empty()) {
-            SDL_GPUTextureCreateInfo asset_tex_info = {};
-            asset_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
-            asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-            asset_tex_info.width = asset.tex_w;
-            asset_tex_info.height = asset.tex_h;
-            asset_tex_info.layer_count_or_depth = 1;
-            asset_tex_info.num_levels = 1;
-            asset_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-            asset_tex = SDL_CreateGPUTexture(device, &asset_tex_info);
-            if (!asset_tex) SDL_Log("ERRO asset_tex: %s", SDL_GetError());
-
-            uint32_t tex_size = asset.tex_w * asset.tex_h * 4;
+        std::vector<SDL_GPUTransferBuffer*> tbs;
+        for (auto& pt : pending_texs) {
+            uint32_t tex_size = pt.w * pt.h * 4;
             SDL_GPUTransferBufferCreateInfo a_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, tex_size };
-            asset_tb = SDL_CreateGPUTransferBuffer(device, &a_tb_info);
+            SDL_GPUTransferBuffer* asset_tb = SDL_CreateGPUTransferBuffer(device, &a_tb_info);
 
             void* a_map = SDL_MapGPUTransferBuffer(device, asset_tb, false);
-            memcpy(a_map, asset.tex_rgba.data(), tex_size);
+            memcpy(a_map, pt.data.data(), tex_size);
             SDL_UnmapGPUTransferBuffer(device, asset_tb);
 
             SDL_GPUTextureTransferInfo a_tex_loc = { asset_tb, 0, 0, 0 };
-            SDL_GPUTextureRegion a_tex_reg = { asset_tex, 0, 0, 0, 0, 0, (uint32_t)asset.tex_w, (uint32_t)asset.tex_h, 1 };
+            SDL_GPUTextureRegion a_tex_reg = { pt.tex, 0, 0, 0, 0, 0, pt.w, pt.h, 1 };
             SDL_UploadToGPUTexture(copy_pass, &a_tex_loc, &a_tex_reg, false);
+
+            tbs.push_back(asset_tb);
         }
 
         SDL_EndGPUCopyPass(copy_pass);
         SDL_SubmitGPUCommandBuffer(copy_cmd);
 
         SDL_ReleaseGPUTransferBuffer(device, temp_transfer);
-        if (asset_tb) {
-            SDL_ReleaseGPUTransferBuffer(device, asset_tb);
+        for (auto tb : tbs) {
+            SDL_ReleaseGPUTransferBuffer(device, tb);
         }
 
         phys::phys_teleport_character(lvl.spawn.x, lvl.spawn.y, lvl.spawn.z);
@@ -410,7 +422,7 @@ int main(int argc, char* argv[]) {
     level::LevelData initial_lvl = level::load_level(LEVELS_DIR "arena.txt");
     if (initial_lvl.ok) {
         build_level(initial_lvl);
-        app_log.add("Nivel recarregado: arena.txt (%zu caixas)", level_box_count);
+        app_log.add("Nivel recarregado: arena.txt (%zu caixas, %zu meshes)", level_box_count, level_assets.size());
     }
     else {
         app_log.add("Aviso: Falha ao carregar arena.txt");
@@ -530,7 +542,6 @@ int main(int argc, char* argv[]) {
     bool in_torture = false;
     bool is_crouched = false;
 
-    // Estado do sol
     float sun_yaw = 45.0f;
     float sun_pitch = -45.0f;
     float sun_ambient = 0.35f;
@@ -659,7 +670,7 @@ int main(int argc, char* argv[]) {
                         level::LevelData new_lvl = level::load_level(LEVELS_DIR "arena.txt");
                         if (new_lvl.ok) {
                             build_level(new_lvl);
-                            app_log.add("Nivel recarregado: arena.txt (%zu caixas)", level_box_count);
+                            app_log.add("Nivel recarregado: arena.txt (%zu caixas, %zu meshes)", level_box_count, level_assets.size());
                         }
                         else app_log.add("Erro: Falha ao recarregar arena.txt");
                     }
@@ -1038,7 +1049,6 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Masmorra Procedural");
         ImGui::InputScalar("Seed", ImGuiDataType_U64, &gen_seed);
         if (ImGui::Button("Gerar")) {
-            SDL_WaitForGPUIdle(device);
             gen::GenResult res = gen::gen_dungeon(gen_seed);
             last_layout_hash = res.layout_hash;
             last_room_count = res.room_count;
@@ -1117,7 +1127,6 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Ambient", &sun_ambient, 0.0f, 1.0f);
         ImGui::SliderFloat3("Color", sun_color_arr, 0.0f, 1.0f);
         ImGui::SliderFloat("Intensity", &sun_intensity, 0.0f, 5.0f);
-        // ligar ao relógio do mundo (Dia/hora) no M2
         ImGui::End();
 
         ImGui::Begin("Log");
@@ -1211,7 +1220,6 @@ int main(int argc, char* argv[]) {
 
             SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
 
-            // Preparação dos dados do Sol (SunParams)
             float sy_rad = glm::radians(sun_yaw);
             float sp_rad = glm::radians(sun_pitch);
             glm::vec3 s_dir(
@@ -1251,7 +1259,6 @@ int main(int argc, char* argv[]) {
             SDL_GPURenderPass* scene_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target, 1, &depth_target);
             SDL_BindGPUGraphicsPipeline(scene_pass, pipeline);
 
-            // Injeta parâmetros do sol no Fragment Shader (num_uniform_buffers = 1 no PS permite isso)
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sun_params, sizeof(SunParams));
 
             SDL_GPUBufferBinding vb_bind = { vertex_buffer, 0 };
@@ -1263,22 +1270,18 @@ int main(int argc, char* argv[]) {
             SDL_GPUBufferBinding inst_bind_floor = { neutral_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_floor, 1);
 
-            // Binda Fallback para o cenário por padrão
             SDL_GPUTextureSamplerBinding samp_bind = { fallback_tex, sampler };
             SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
             SDL_DrawGPUIndexedPrimitives(scene_pass, nivel_range.index_count, 1, nivel_range.first_index, 0, 0);
             SDL_DrawGPUIndexedPrimitives(scene_pass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
 
-            if (asset_range.index_count > 0) {
-                // Binda a Textura do Asset se houver
-                SDL_GPUTextureSamplerBinding asset_samp_bind = { asset_tex ? asset_tex : fallback_tex, sampler };
+            for (const auto& a : level_assets) {
+                SDL_GPUTextureSamplerBinding asset_samp_bind = { a.tex ? a.tex : fallback_tex, sampler };
                 SDL_BindGPUFragmentSamplers(scene_pass, 0, &asset_samp_bind, 1);
-
-                SDL_DrawGPUIndexedPrimitives(scene_pass, asset_range.index_count, 1, asset_range.first_index, 0, 0);
+                SDL_DrawGPUIndexedPrimitives(scene_pass, a.range.index_count, 1, a.range.first_index, 0, 0);
             }
 
-            // Volta para o Fallback para multidão e jogador visual (Cubos)
             SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
             SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
@@ -1323,8 +1326,9 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUBuffer(device, crowd_instance_buffer);
     SDL_ReleaseGPUBuffer(device, char_instance_buffer);
 
-    // Destruindo Texturas + Sampler
-    if (asset_tex) SDL_ReleaseGPUTexture(device, asset_tex);
+    for (auto& a : level_assets) {
+        if (a.tex) SDL_ReleaseGPUTexture(device, a.tex);
+    }
     if (fallback_tex) SDL_ReleaseGPUTexture(device, fallback_tex);
     if (sampler) SDL_ReleaseGPUSampler(device, sampler);
 

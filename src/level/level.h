@@ -1,24 +1,30 @@
 #pragma once
 #include <vector>
-
-// Header 100% puro C++ (Sem contaminação de SDL, Jolt, ou Math libs)
+#include <string>
 
 namespace level {
-    struct LevelBox {
+    struct BoxDef {
         float cx, cy, cz;
         float hx, hy, hz;
         float r, g, b;
     };
 
-    struct SpawnPoint {
+    struct SpawnDef {
+        float x, y, z;
+    };
+
+    // T-A4: O novo componente Data-Driven de Níveis
+    struct LevelMesh {
+        std::string path;
         float x, y, z;
     };
 
     struct LevelData {
-        std::vector<LevelBox> boxes;
-        SpawnPoint spawn;
+        std::vector<BoxDef> boxes;
+        std::vector<LevelMesh> meshes;
+        SpawnDef spawn;
         bool ok;
     };
 
-    LevelData load_level(const char* path);
+    LevelData load_level(const char* filepath);
 }

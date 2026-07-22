@@ -2,44 +2,53 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
-#include <cstdio>
 
 namespace level {
-    LevelData load_level(const char* path) {
+    LevelData load_level(const char* filepath) {
         LevelData data;
         data.ok = false;
-        data.spawn = { 0.0f, 0.0f, 0.0f };
+        data.spawn = { 0.0f, 2.0f, 0.0f };
 
-        std::ifstream file(path);
-        if (!file.is_open()) return data;
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            return data;
+        }
 
         std::string line;
         int line_num = 0;
         while (std::getline(file, line)) {
             line_num++;
-            // Ignora linhas vazias e comentários
             if (line.empty() || line[0] == '#') continue;
 
-            std::istringstream iss(line);
+            std::istringstream ss(line);
             std::string type;
-            if (!(iss >> type)) continue;
+            ss >> type;
 
             if (type == "box") {
-                LevelBox b;
-                if (iss >> b.cx >> b.cy >> b.cz >> b.hx >> b.hy >> b.hz >> b.r >> b.g >> b.b) {
+                BoxDef b;
+                if (ss >> b.cx >> b.cy >> b.cz >> b.hx >> b.hy >> b.hz >> b.r >> b.g >> b.b) {
                     data.boxes.push_back(b);
                 }
                 else {
-                    printf("Erro parsing 'box': sintaxe invalida na linha %d\n", line_num);
+                    std::cerr << "Linha " << line_num << ": Formato de box invalido\n";
                 }
             }
             else if (type == "spawn") {
-                if (!(iss >> data.spawn.x >> data.spawn.y >> data.spawn.z)) {
-                    printf("Erro parsing 'spawn': sintaxe invalida na linha %d\n", line_num);
+                if (!(ss >> data.spawn.x >> data.spawn.y >> data.spawn.z)) {
+                    std::cerr << "Linha " << line_num << ": Formato de spawn invalido\n";
+                }
+            }
+            else if (type == "mesh") {
+                LevelMesh m;
+                if (ss >> m.path >> m.x >> m.y >> m.z) {
+                    data.meshes.push_back(m);
+                }
+                else {
+                    std::cerr << "Linha " << line_num << ": Formato de mesh invalido\n";
                 }
             }
             else {
-                printf("Comando level ignorado: tipo '%s' desconhecido na linha %d\n", type.c_str(), line_num);
+                std::cerr << "Linha " << line_num << ": Tipo desconhecido '" << type << "'\n";
             }
         }
 

@@ -184,7 +184,7 @@ namespace gen {
                         float min_z = (z - 48) * 2.0f - 1.0f;
                         float max_z = (z - 48) * 2.0f + 1.0f;
 
-                        level::LevelBox box;
+                        level::BoxDef box;
                         box.cx = (min_x + max_x) * 0.5f;
                         box.cy = cy;
                         box.cz = (min_z + max_z) * 0.5f;
