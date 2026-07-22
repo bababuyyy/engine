@@ -1,0 +1,6 @@
+# Eva - taberneira
+0900 10 -5 dormir
+1000 10 0 limpar
+1200 10 0 servir
+1800 10 0 servir_jantar
+0200 10 -5 dormir

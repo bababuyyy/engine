@@ -1,0 +1,7 @@
+# Cora - guarda
+0000 0 0 patrulha_praca
+0600 10 10 patrulha_norte
+1200 10 0 taverna
+1300 -10 10 patrulha_sul
+1800 0 0 patrulha_praca
+2000 -5 -10 dormir

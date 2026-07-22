@@ -13,6 +13,8 @@
 #include <cstdarg>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 
 #include "core/jobs.h"
 #include "sim/sim.h"
@@ -20,6 +22,7 @@
 #include "level/level.h"
 #include "gen/gen.h"
 #include "assets/assets.h"
+#include "social/social.h"
 
 typedef unsigned char BYTE;
 #include "basic_vs.h"
@@ -198,7 +201,7 @@ int main(int argc, char* argv[]) {
 
     AppLog app_log;
 
-    MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma;
+    MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma, cubo_npc;
     size_t level_box_count = 0;
     std::vector<uint32_t> level_body_ids;
     std::vector<LoadedAsset> level_assets;
@@ -211,7 +214,7 @@ int main(int argc, char* argv[]) {
     phys::PhysState active_phys_state = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false };
 
     auto build_level = [&](const level::LevelData& lvl) {
-        SDL_WaitForGPUIdle(device); // O consumidor protege a si mesmo: NENHUM produtor libera GPU em voo
+        SDL_WaitForGPUIdle(device);
 
         for (uint32_t id : level_body_ids) phys::phys_destroy_body(id);
         level_body_ids.clear();
@@ -355,6 +358,7 @@ int main(int argc, char* argv[]) {
         cubo_jogador = add_box(0.0f, 0.9f, 0.0f, 0.4f, 0.9f, 0.4f, 1.0f, 1.0f, 1.0f);
         cubo_jogador_agachado = add_box(0.0f, 0.45f, 0.0f, 0.4f, 0.45f, 0.4f, 1.0f, 1.0f, 1.0f);
         cubo_plataforma = add_box(0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 2.0f, 1.0f, 1.0f, 1.0f);
+        cubo_npc = add_box(0.0f, 0.0f, 0.0f, 0.25f, 0.85f, 0.25f, 1.0f, 1.0f, 1.0f);
 
         uint32_t vb_size = (uint32_t)(vertices.size() * sizeof(Vertex));
         uint32_t ib_size = (uint32_t)(indices.size() * sizeof(uint16_t));
@@ -419,6 +423,25 @@ int main(int argc, char* argv[]) {
         level_box_count = lvl.boxes.size();
         };
 
+    const char* npc_names[5] = { "Ana", "Bruno", "Cora", "Davi", "Eva" };
+    float npc_colors[5][3] = { {1.0f, 0.3f, 0.3f}, {0.3f, 1.0f, 0.3f}, {0.3f, 0.3f, 1.0f}, {1.0f, 1.0f, 0.3f}, {1.0f, 0.3f, 1.0f} };
+    social::Schedule npc_scheds[5];
+    social::NpcState npcs[5];
+    social::NpcState prev_npcs[5];
+
+    for (int i = 0; i < 5; ++i) {
+        std::string path = std::string(SCHEDULES_DIR) + "npc" + std::to_string(i) + ".txt";
+        std::ifstream f(path);
+        if (f) {
+            std::stringstream buffer;
+            buffer << f.rdbuf();
+            npc_scheds[i] = social::parse_schedule(buffer.str().c_str());
+            app_log.add("Agenda social carregada: npc%d.txt (%zu steps)", i, npc_scheds[i].entries.size());
+        }
+        social::init_npc(npcs[i], npc_scheds[i]);
+        prev_npcs[i] = npcs[i];
+    }
+
     level::LevelData initial_lvl = level::load_level(LEVELS_DIR "arena.txt");
     if (initial_lvl.ok) {
         build_level(initial_lvl);
@@ -455,11 +478,17 @@ int main(int argc, char* argv[]) {
     SDL_GPUBufferCreateInfo char_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, 2 * sizeof(InstanceData) };
     SDL_GPUBuffer* char_instance_buffer = SDL_CreateGPUBuffer(device, &char_inst_info);
 
+    SDL_GPUBufferCreateInfo npc_inst_info = { SDL_GPU_BUFFERUSAGE_VERTEX, 5 * sizeof(InstanceData) };
+    SDL_GPUBuffer* npc_instance_buffer = SDL_CreateGPUBuffer(device, &npc_inst_info);
+
     SDL_GPUTransferBufferCreateInfo dyn_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)(world.count * sizeof(InstanceData)) };
     SDL_GPUTransferBuffer* dyn_transfer_buf = SDL_CreateGPUTransferBuffer(device, &dyn_tb_info);
 
     SDL_GPUTransferBufferCreateInfo char_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, 2 * sizeof(InstanceData) };
     SDL_GPUTransferBuffer* char_transfer_buf = SDL_CreateGPUTransferBuffer(device, &char_tb_info);
+
+    SDL_GPUTransferBufferCreateInfo npc_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, 5 * sizeof(InstanceData) };
+    SDL_GPUTransferBuffer* npc_transfer_buf = SDL_CreateGPUTransferBuffer(device, &npc_tb_info);
 
     SDL_GPUTextureCreateInfo depth_info = {};
     depth_info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -488,8 +517,8 @@ int main(int argc, char* argv[]) {
     attrs[1].location = 1; attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[1].offset = 3 * sizeof(float); attrs[1].buffer_slot = 0;
     attrs[2].location = 2; attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[2].offset = 0;                 attrs[2].buffer_slot = 1;
     attrs[3].location = 3; attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[3].offset = 3 * sizeof(float); attrs[3].buffer_slot = 1;
-    attrs[4].location = 4; attrs[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2; attrs[4].offset = 6 * sizeof(float); attrs[4].buffer_slot = 0; // UV
-    attrs[5].location = 5; attrs[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[5].offset = 8 * sizeof(float); attrs[5].buffer_slot = 0; // Normals
+    attrs[4].location = 4; attrs[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2; attrs[4].offset = 6 * sizeof(float); attrs[4].buffer_slot = 0;
+    attrs[5].location = 5; attrs[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3; attrs[5].offset = 8 * sizeof(float); attrs[5].buffer_slot = 0;
 
     SDL_GPUVertexBufferDescription vb_desc[2] = {};
     vb_desc[0].slot = 0; vb_desc[0].pitch = sizeof(Vertex);       vb_desc[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
@@ -524,7 +553,7 @@ int main(int argc, char* argv[]) {
 
     app_log.add("JobSystem ativado em pool com %d workers físicos disponíveis.", max_hardware_threads);
     app_log.add("Mundo seed=%llu", (unsigned long long)world.seed);
-    app_log.add("AVISO: Pause e un-pause realocados para a tecla [P]. Espaco configurado p/ pulos.");
+    app_log.add("AVISO: F6 para o novo Palco Social. F5 recarrega a Arena.");
 
     glm::vec3 cam_pos(0.0f, 35.0f, -70.0f);
     float cam_yaw = 0.0f;
@@ -541,6 +570,8 @@ int main(int argc, char* argv[]) {
     bool cam_follow = false;
     bool in_torture = false;
     bool is_crouched = false;
+    bool draw_crowd = true;
+    bool manual_sun = false;
 
     float sun_yaw = 45.0f;
     float sun_pitch = -45.0f;
@@ -666,13 +697,20 @@ int main(int argc, char* argv[]) {
                         app_log.add("Camera: %s", cam_follow ? "FOLLOW" : "FLY");
                     }
                     else if (event.key.key == SDLK_F5) {
-                        SDL_WaitForGPUIdle(device);
                         level::LevelData new_lvl = level::load_level(LEVELS_DIR "arena.txt");
                         if (new_lvl.ok) {
                             build_level(new_lvl);
                             app_log.add("Nivel recarregado: arena.txt (%zu caixas, %zu meshes)", level_box_count, level_assets.size());
                         }
-                        else app_log.add("Erro: Falha ao recarregar arena.txt");
+                        else app_log.add("Erro: Falha ao carregar arena.txt");
+                    }
+                    else if (event.key.key == SDLK_F6) {
+                        level::LevelData new_lvl = level::load_level(LEVELS_DIR "palco.txt");
+                        if (new_lvl.ok) {
+                            build_level(new_lvl);
+                            app_log.add("Nivel carregado: palco.txt (%zu caixas, %zu meshes)", level_box_count, level_assets.size());
+                        }
+                        else app_log.add("Erro: Falha ao carregar palco.txt");
                     }
                     else if (event.key.key == SDLK_T) {
                         in_torture = !in_torture;
@@ -722,6 +760,13 @@ int main(int argc, char* argv[]) {
 
         while (accumulator >= DT) {
             sim::step(world, sim_tick, js, sim_threads);
+
+            // Integração Social Coreografada
+            int current_minute = (int)((sim_tick / 120) % 1440);
+            for (int i = 0; i < 5; ++i) {
+                prev_npcs[i] = npcs[i];
+                social::social_tick(npcs[i], npc_scheds[i], current_minute);
+            }
 
             uint64_t phys_start = SDL_GetPerformanceCounter();
 
@@ -885,6 +930,7 @@ int main(int argc, char* argv[]) {
 
                 uint64_t hash_start = SDL_GetPerformanceCounter();
                 uint64_t exact_hash = sim::state_hash(world, sim_tick);
+                exact_hash = social::hash_npcs(exact_hash, npcs, 5);
                 last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
 
                 app_log.add("Parado no tick %llu | hash %016llX", (unsigned long long)sim_tick, (unsigned long long)exact_hash);
@@ -914,6 +960,7 @@ int main(int argc, char* argv[]) {
                 if (last_hash_tick != sim_tick) {
                     uint64_t hash_start = SDL_GetPerformanceCounter();
                     last_calculated_hash = sim::state_hash(world, sim_tick);
+                    last_calculated_hash = social::hash_npcs(last_calculated_hash, npcs, 5);
                     last_hash_tick = sim_tick;
                     last_hash_ms = (double)(SDL_GetPerformanceCounter() - hash_start) * 1000.0 / frequency;
                 }
@@ -1013,6 +1060,12 @@ int main(int argc, char* argv[]) {
             if (stall_history[i]) stall_ticks++;
         }
 
+        uint64_t game_seconds = sim_tick / SIM_HZ;
+        uint64_t game_minutes_total = sim_tick / 120;
+        uint64_t g_days = game_minutes_total / 1440;
+        uint64_t g_hours = (game_minutes_total / 60) % 24;
+        uint64_t g_minutes = game_minutes_total % 60;
+
         ImGui_ImplSDLGPU3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
@@ -1028,13 +1081,30 @@ int main(int argc, char* argv[]) {
         if (ImGui::Button("100x"))      set_scale(100, "Botão"); ImGui::SameLine();
         if (ImGui::Button("1000x"))     set_scale(1000, "Botão");
 
-        uint64_t game_seconds = sim_tick / SIM_HZ;
         ImGui::Text("Tick: %llu", (unsigned long long)sim_tick);
-        ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)(game_seconds / 86400), (unsigned long long)((game_seconds / 3600) % 24), (unsigned long long)((game_seconds / 60) % 60));
+        ImGui::Text("Mundo: Dia %llu %02llu:%02llu", (unsigned long long)g_days, (unsigned long long)g_hours, (unsigned long long)g_minutes);
+
+        static int stop_hh = 12, stop_mm = 0;
+        ImGui::PushItemWidth(40);
+        ImGui::InputInt("##HH", &stop_hh, 0); ImGui::SameLine(); ImGui::Text(":"); ImGui::SameLine();
+        ImGui::InputInt("##MM", &stop_mm, 0); ImGui::SameLine();
+        ImGui::PopItemWidth();
+        if (ImGui::Button("Pausar nesta hora")) {
+            uint64_t curr_min = sim_tick / 120;
+            uint64_t curr_day = curr_min / 1440;
+            uint64_t target_min = curr_day * 1440 + (uint64_t)stop_hh * 60 + (uint64_t)stop_mm;
+            if (target_min <= curr_min) target_min += 1440;
+            stop_at_tick = target_min * 120;
+            arm_stop = true;
+            audit_hash = true;
+            app_log.add("Auditoria/pausa armada para Dia %llu %02d:%02d (tick %llu).", (unsigned long long)(target_min / 1440), stop_hh, stop_mm, (unsigned long long)stop_at_tick);
+        }
+
         ImGui::Text("Level Info: N/A (%zu caixas)", level_box_count);
         ImGui::Text("Camera Pos: %.2f, %.2f, %.2f", cam_pos.x, cam_pos.y, cam_pos.z);
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
 
+        ImGui::Checkbox("Multidao", &draw_crowd);
         ImGui::Text("Instancias: 100000");
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
         double effective_speed = frame_time > 0.0 ? (last_ticks_this_frame * DT) / frame_time : 0.0;
@@ -1081,7 +1151,7 @@ int main(int argc, char* argv[]) {
 
         ImGui::InputScalar("Alvo", ImGuiDataType_U64, &stop_at_tick);
         if (stop_at_tick > sim_tick) {
-            if (ImGui::Button("Rodar até e pausar")) {
+            if (ImGui::Button("Rodar até e pausar via Tick Absoluto")) {
                 arm_stop = true;
                 audit_hash = true;
                 app_log.add("Auditoria armada para o tick %llu.", (unsigned long long)stop_at_tick);
@@ -1089,10 +1159,28 @@ int main(int argc, char* argv[]) {
         }
         else {
             ImGui::BeginDisabled();
-            ImGui::Button("Rodar até e pausar");
+            ImGui::Button("Rodar até e pausar via Tick Absoluto");
             ImGui::EndDisabled();
         }
 
+        ImGui::End();
+
+        ImGui::Begin("Social");
+        ImGui::Text("Relogio: Dia %llu %02llu:%02llu", (unsigned long long)g_days, (unsigned long long)g_hours, (unsigned long long)g_minutes);
+        if (ImGui::Button("Alarme de teste")) {
+            npcs[0].action = 1;
+            npcs[0].flee_x = 0.0f;
+            npcs[0].flee_z = 0.0f;
+            app_log.add("Alarme! %s esta em FUGA para (0,0)", npc_names[0]);
+        }
+        ImGui::Separator();
+        for (int i = 0; i < 5; ++i) {
+            const char* ativ = "Nenhuma";
+            if (npc_scheds[i].ok && !npc_scheds[i].entries.empty()) {
+                ativ = npc_scheds[i].entries[npcs[i].entry_atual].atividade;
+            }
+            ImGui::Text("%s: %s (%.1f, %.1f) %s", npc_names[i], ativ, npcs[i].x, npcs[i].z, npcs[i].action == 1 ? "[FUGA]" : "");
+        }
         ImGui::End();
 
         ImGui::Begin("Feel (Parametros Vivos)");
@@ -1122,9 +1210,12 @@ int main(int argc, char* argv[]) {
         ImGui::End();
 
         ImGui::Begin("Sol");
+        ImGui::Checkbox("Sol manual", &manual_sun);
+        ImGui::BeginDisabled(!manual_sun);
         ImGui::SliderFloat("Yaw", &sun_yaw, 0.0f, 360.0f);
         ImGui::SliderFloat("Pitch", &sun_pitch, -89.0f, -10.0f);
         ImGui::SliderFloat("Ambient", &sun_ambient, 0.0f, 1.0f);
+        ImGui::EndDisabled();
         ImGui::SliderFloat3("Color", sun_color_arr, 0.0f, 1.0f);
         ImGui::SliderFloat("Intensity", &sun_intensity, 0.0f, 5.0f);
         ImGui::End();
@@ -1134,23 +1225,18 @@ int main(int argc, char* argv[]) {
         if (app_log.auto_scroll) { ImGui::SetScrollHereY(1.0f); app_log.auto_scroll = false; }
         ImGui::End();
 
-        game_seconds = sim_tick / SIM_HZ;
         if (game_seconds != last_displayed_second || time_scale != last_displayed_scale) {
             last_displayed_second = game_seconds;
             last_displayed_scale = time_scale;
 
-            uint64_t days = game_seconds / 86400;
-            uint64_t hours = (game_seconds / 3600) % 24;
-            uint64_t minutes = (game_seconds / 60) % 60;
-
             char title_buffer[256];
             if (time_scale == 0) {
                 snprintf(title_buffer, sizeof(title_buffer), "Minha Engine | dia %llu %02llu:%02llu | tick %llu | pausado",
-                    (unsigned long long)days, (unsigned long long)hours, (unsigned long long)minutes, (unsigned long long)sim_tick);
+                    (unsigned long long)g_days, (unsigned long long)g_hours, (unsigned long long)g_minutes, (unsigned long long)sim_tick);
             }
             else {
                 snprintf(title_buffer, sizeof(title_buffer), "Minha Engine | dia %llu %02llu:%02llu | tick %llu | %lldx",
-                    (unsigned long long)days, (unsigned long long)hours, (unsigned long long)minutes, (unsigned long long)sim_tick, (long long)time_scale);
+                    (unsigned long long)g_days, (unsigned long long)g_hours, (unsigned long long)g_minutes, (unsigned long long)sim_tick, (long long)time_scale);
             }
             SDL_SetWindowTitle(window, title_buffer);
         }
@@ -1189,15 +1275,29 @@ int main(int argc, char* argv[]) {
 
             SDL_UnmapGPUTransferBuffer(device, char_transfer_buf);
 
+            InstanceData* mapped_npc = (InstanceData*)SDL_MapGPUTransferBuffer(device, npc_transfer_buf, true);
+            for (int i = 0; i < 5; ++i) {
+                float ix = glm::mix(prev_npcs[i].x, npcs[i].x, alpha);
+                float iz = glm::mix(prev_npcs[i].z, npcs[i].z, alpha);
+                mapped_npc[i] = { ix, 0.85f, iz, npc_colors[i][0], npc_colors[i][1], npc_colors[i][2] };
+            }
+            SDL_UnmapGPUTransferBuffer(device, npc_transfer_buf);
+
             SDL_GPUCopyPass* char_copy_pass = SDL_BeginGPUCopyPass(cmd_buffer);
 
-            SDL_GPUTransferBufferLocation loc = { dyn_transfer_buf, 0 };
-            SDL_GPUBufferRegion reg = { crowd_instance_buffer, 0, (uint32_t)(world.count * sizeof(InstanceData)) };
-            SDL_UploadToGPUBuffer(char_copy_pass, &loc, &reg, true);
+            if (draw_crowd) {
+                SDL_GPUTransferBufferLocation loc = { dyn_transfer_buf, 0 };
+                SDL_GPUBufferRegion reg = { crowd_instance_buffer, 0, (uint32_t)(world.count * sizeof(InstanceData)) };
+                SDL_UploadToGPUBuffer(char_copy_pass, &loc, &reg, true);
+            }
 
             SDL_GPUTransferBufferLocation char_loc = { char_transfer_buf, 0 };
             SDL_GPUBufferRegion char_reg = { char_instance_buffer, 0, 2 * sizeof(InstanceData) };
             SDL_UploadToGPUBuffer(char_copy_pass, &char_loc, &char_reg, true);
+
+            SDL_GPUTransferBufferLocation npc_loc = { npc_transfer_buf, 0 };
+            SDL_GPUBufferRegion npc_reg = { npc_instance_buffer, 0, 5 * sizeof(InstanceData) };
+            SDL_UploadToGPUBuffer(char_copy_pass, &npc_loc, &npc_reg, true);
 
             SDL_EndGPUCopyPass(char_copy_pass);
 
@@ -1219,6 +1319,20 @@ int main(int argc, char* argv[]) {
             glm::mat4 mvp = proj * view;
 
             SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
+
+            if (!manual_sun) {
+                float t_h = g_hours + g_minutes / 60.0f;
+                sun_yaw = t_h * 15.0f;
+                if (t_h >= 6.0f && t_h <= 18.0f) {
+                    float sun_t = (t_h - 6.0f) / 12.0f;
+                    sun_pitch = -90.0f * std::sin(sun_t * 3.14159265f); // 0 (horizon) -> -90 (zenith) -> 0
+                    sun_ambient = 0.35f;
+                }
+                else {
+                    sun_pitch = -10.0f;
+                    sun_ambient = 0.05f;
+                }
+            }
 
             float sy_rad = glm::radians(sun_yaw);
             float sp_rad = glm::radians(sun_pitch);
@@ -1284,17 +1398,22 @@ int main(int argc, char* argv[]) {
 
             SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
-            SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
-            SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);
-            SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_multidao.index_count, 100000, cubo_multidao.first_index, 0, 0);
+            if (draw_crowd) {
+                SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
+                SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);
+                SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_multidao.index_count, 100000, cubo_multidao.first_index, 0, 0);
+            }
 
             SDL_GPUBufferBinding inst_bind_char = { char_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_char, 1);
 
             MeshRange range_active_player = is_crouched ? cubo_jogador_agachado : cubo_jogador;
             SDL_DrawGPUIndexedPrimitives(scene_pass, range_active_player.index_count, 1, range_active_player.first_index, 0, 0);
-
             SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_plataforma.index_count, 1, cubo_plataforma.first_index, 0, 1);
+
+            SDL_GPUBufferBinding inst_bind_npc = { npc_instance_buffer, 0 };
+            SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_npc, 1);
+            SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_npc.index_count, 5, cubo_npc.first_index, 0, 0);
 
             SDL_EndGPURenderPass(scene_pass);
 
@@ -1325,6 +1444,7 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUBuffer(device, neutral_instance_buffer);
     SDL_ReleaseGPUBuffer(device, crowd_instance_buffer);
     SDL_ReleaseGPUBuffer(device, char_instance_buffer);
+    SDL_ReleaseGPUBuffer(device, npc_instance_buffer);
 
     for (auto& a : level_assets) {
         if (a.tex) SDL_ReleaseGPUTexture(device, a.tex);
@@ -1334,6 +1454,7 @@ int main(int argc, char* argv[]) {
 
     SDL_ReleaseGPUTransferBuffer(device, dyn_transfer_buf);
     SDL_ReleaseGPUTransferBuffer(device, char_transfer_buf);
+    SDL_ReleaseGPUTransferBuffer(device, npc_transfer_buf);
 
     SDL_ReleaseGPUTexture(device, depth_texture);
     SDL_ReleaseGPUShader(device, vs);

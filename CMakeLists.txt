@@ -79,20 +79,24 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
 )
 
-add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp)
+# Adicionado social.cpp
+add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp src/social/social.cpp)
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
 target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${cgltf_SOURCE_DIR} ${stb_SOURCE_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
+# SCHEDULES_DIR exportado para a build principal
 target_compile_definitions(engine PRIVATE 
     LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/"
     ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/"
+    SCHEDULES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/schedules/"
 )
 
 if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 endif()
 
-add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp src/level/level.cpp src/gen/gen.cpp)
+# Adicionado social.cpp à build de testes (Sentinela)
+add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp src/level/level.cpp src/gen/gen.cpp src/social/social.cpp)
 target_include_directories(sim_tests PRIVATE src)
 if(MSVC)
     target_compile_options(sim_tests PRIVATE /W4)
@@ -110,7 +114,6 @@ else()
     )
 endif()
 
-# Passando o TESTS_FILE explícito para fechar a auditoria da Sentinela
 add_test(NAME regression_lint 
          COMMAND ${CMAKE_COMMAND} 
          -DSRC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp 
