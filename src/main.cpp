@@ -24,6 +24,10 @@
 #include "assets/assets.h"
 #include "social/social.h"
 
+#ifndef SOCIAL_DIR
+#define SOCIAL_DIR "data/social/"
+#endif
+
 typedef unsigned char BYTE;
 #include "basic_vs.h"
 #include "basic_ps.h"
@@ -101,7 +105,6 @@ struct LoadedAsset {
     SDL_GPUTexture* tex;
 };
 
-// M2: Estrutura para os meshes dos NPCs
 struct NpcVisual {
     MeshRange range;
     SDL_GPUTexture* tex;
@@ -208,12 +211,29 @@ int main(int argc, char* argv[]) {
 
     AppLog app_log;
 
+    social::Relations rels;
+    {
+        std::ifstream f(std::string(SOCIAL_DIR) + "relacoes.txt");
+        if (f) {
+            std::stringstream buffer; buffer << f.rdbuf();
+            rels = social::parse_relations(buffer.str().c_str());
+        }
+    }
+    social::Barks barks;
+    {
+        std::ifstream f(std::string(SOCIAL_DIR) + "barks.txt");
+        if (f) {
+            std::stringstream buffer; buffer << f.rdbuf();
+            barks = social::parse_barks(buffer.str().c_str());
+        }
+    }
+    app_log.add("Carregado %zu relacoes e barks (A:%zu N:%zu F:%zu)", rels.entries.size(), barks.amistoso.size(), barks.neutro.size(), barks.frio.size());
+
     MeshRange nivel_range, tortura_range, cubo_multidao, cubo_jogador, cubo_jogador_agachado, cubo_plataforma, cubo_npc;
     size_t level_box_count = 0;
     std::vector<uint32_t> level_body_ids;
     std::vector<LoadedAsset> level_assets;
 
-    // M2: Estado de renderização das malhas dos NPCs
     NpcVisual npc_visuals[5] = {};
 
     SDL_GPUBuffer* vertex_buffer = nullptr;
@@ -237,7 +257,6 @@ int main(int argc, char* argv[]) {
         }
         level_assets.clear();
 
-        // M2: Purga sincronizada e rigorosa das texturas antigas de NPCs
         for (int i = 0; i < 5; ++i) {
             if (npc_visuals[i].tex) {
                 SDL_ReleaseGPUTexture(device, npc_visuals[i].tex);
@@ -373,7 +392,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // M2: Carregamento do payload geométrico dos NPCs (0..4) sem offset posicional
         for (int i = 0; i < 5; ++i) {
             std::string npc_path = std::string(ASSETS_DIR) + "models/npc" + std::to_string(i) + ".glb";
             MeshData asset = assets_load_glb(npc_path.c_str());
@@ -384,7 +402,6 @@ int main(int argc, char* argv[]) {
 
                 size_t vert_count = asset.pos_rgb.size() / 6;
                 for (size_t v = 0; v < vert_count; ++v) {
-                    // Sem offset - a matriz da instância fará o posicionamento em mundo
                     vertices.push_back({
                         asset.pos_rgb[v * 6 + 0],
                         asset.pos_rgb[v * 6 + 1],
@@ -512,7 +529,7 @@ int main(int argc, char* argv[]) {
             std::stringstream buffer;
             buffer << f.rdbuf();
             npc_scheds[i] = social::parse_schedule(buffer.str().c_str());
-            app_log.add("Agenda social carregada: npc%d.txt (%zu steps, food: %.1f,%.1f)", i, npc_scheds[i].entries.size(), npc_scheds[i].food_x, npc_scheds[i].food_z);
+            app_log.add("Agenda social carregada: npc%d.txt [%s]", i, npc_scheds[i].categoria);
         }
         social::init_npc(npcs[i], npc_scheds[i]);
         prev_npcs[i] = npcs[i];
@@ -837,11 +854,28 @@ int main(int argc, char* argv[]) {
         while (accumulator >= DT) {
             sim::step(world, sim_tick, js, sim_threads);
 
-            // Integração Social Coreografada
+            // Integração Social Coreografada + Conversas
             int current_minute = (int)((sim_tick / 120) % 1440);
+            int64_t current_abs_min = sim_tick / 120;
+
             for (int i = 0; i < 5; ++i) {
                 prev_npcs[i] = npcs[i];
                 social::social_tick(npcs[i], npc_scheds[i], current_minute);
+            }
+
+            auto enc_events = social::social_encounters(npcs, npc_scheds, 5, rels, current_abs_min);
+            for (auto& ev : enc_events) {
+                const std::vector<std::string>* pool = &barks.neutro;
+                if (ev.tier == 1) pool = &barks.amistoso;
+                else if (ev.tier == -1) pool = &barks.frio;
+
+                std::string bark_text = "...";
+                if (!pool->empty()) {
+                    // /W4 seguro via casts explícitos
+                    int idx = (int)(((int64_t)ev.npc_a * 7 + ev.npc_b + current_abs_min) % (int64_t)pool->size());
+                    bark_text = (*pool)[idx];
+                }
+                app_log.add("%s & %s conversam: '%s'", npc_names[ev.npc_a], npc_names[ev.npc_b], bark_text.c_str());
             }
 
             uint64_t phys_start = SDL_GetPerformanceCounter();
@@ -1255,9 +1289,15 @@ int main(int argc, char* argv[]) {
             if (npc_scheds[i].ok && !npc_scheds[i].entries.empty()) {
                 ativ = npc_scheds[i].entries[npcs[i].entry_atual].atividade;
             }
+
             const char* act_str = "";
             if (npcs[i].action == 1) act_str = "[FUGA]";
             else if (npcs[i].action == 2) act_str = "[COMER]";
+            else if (npcs[i].action == 3) {
+                static char buf[32];
+                snprintf(buf, sizeof(buf), "[CONVERSA c/ %s]", npc_names[npcs[i].partner]);
+                act_str = buf;
+            }
 
             ImGui::Text("%s: %s (%.1f, %.1f) %s", npc_names[i], ativ, npcs[i].x, npcs[i].z, act_str);
             ImGui::ProgressBar(npcs[i].fome, ImVec2(80, 0));
@@ -1361,7 +1401,6 @@ int main(int argc, char* argv[]) {
                 float ix = glm::mix(prev_npcs[i].x, npcs[i].x, alpha);
                 float iz = glm::mix(prev_npcs[i].z, npcs[i].z, alpha);
 
-                // M2: Ajuste posicional e neutralização de cor para NPCs que possuem malha
                 if (npc_visuals[i].has_mesh) {
                     mapped_npc[i] = { ix, 0.0f, iz, 1.0f, 1.0f, 1.0f };
                 }
@@ -1413,7 +1452,7 @@ int main(int argc, char* argv[]) {
                 sun_yaw = t_h * 15.0f;
                 if (t_h >= 6.0f && t_h <= 18.0f) {
                     float sun_t = (t_h - 6.0f) / 12.0f;
-                    sun_pitch = -90.0f * std::sin(sun_t * 3.14159265f); // 0 (horizon) -> -90 (zenith) -> 0
+                    sun_pitch = -90.0f * std::sin(sun_t * 3.14159265f);
                     sun_ambient = 0.35f;
                 }
                 else {
@@ -1499,7 +1538,6 @@ int main(int argc, char* argv[]) {
             SDL_DrawGPUIndexedPrimitives(scene_pass, range_active_player.index_count, 1, range_active_player.first_index, 0, 0);
             SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_plataforma.index_count, 1, cubo_plataforma.first_index, 0, 1);
 
-            // M2: Render individual de cada NPC buscando assets do disco ou retornando a caixa de instancing
             SDL_GPUBufferBinding inst_bind_npc = { npc_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_npc, 1);
 
@@ -1551,7 +1589,6 @@ int main(int argc, char* argv[]) {
         if (a.tex) SDL_ReleaseGPUTexture(device, a.tex);
     }
 
-    // M2: Liberacao rigorosa ao termino do programa
     for (int i = 0; i < 5; ++i) {
         if (npc_visuals[i].tex) SDL_ReleaseGPUTexture(device, npc_visuals[i].tex);
     }

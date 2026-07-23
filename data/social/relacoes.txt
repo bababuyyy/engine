@@ -1,0 +1,7 @@
+guarda mercador 0.5
+guarda artesao 0.2
+guarda taberneira 0.4
+mercador taberneira 0.6
+artesao mercador 0.3
+artesao taberneira 0.5
+artesao artesao 0.4

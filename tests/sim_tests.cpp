@@ -12,6 +12,10 @@
 #include "level/level.h"
 #include "social/social.h"
 
+#ifndef SOCIAL_DIR
+#define SOCIAL_DIR "data/social/"
+#endif
+
 int main(int argc, char* argv[]) {
     std::cout << "Binario compilado em: " << __DATE__ << " " << __TIME__
         << " | WANDER_SPEED=" << sim::WANDER_SPEED << "\n";
@@ -47,6 +51,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    social::Relations real_rels;
+    {
+        std::ifstream rel_file(std::string(SOCIAL_DIR) + "relacoes.txt");
+        if (rel_file) {
+            std::stringstream buffer; buffer << rel_file.rdbuf();
+            real_rels = social::parse_relations(buffer.str().c_str());
+        }
+    }
+
     social::NpcState npcsA[5], npcsB[5];
     for (int i = 0; i < 5; ++i) {
         social::init_npc(npcsA[i], real_scheds[i]);
@@ -61,7 +74,10 @@ int main(int argc, char* argv[]) {
         sim::step(worldA, t - 1, js, 1);
 
         int minute = (int)(((t - 1) / 120) % 1440);
+        int64_t abs_min = (t - 1) / 120;
+
         for (int i = 0; i < 5; ++i) social::social_tick(npcsA[i], real_scheds[i], minute);
+        social::social_encounters(npcsA, real_scheds, 5, real_rels, abs_min);
 
         if (t % CHECK_INTERVAL == 0) {
             uint64_t base_h = sim::state_hash(worldA, t);
@@ -82,7 +98,10 @@ int main(int argc, char* argv[]) {
         sim::step(worldB, t - 1, js, hw_threads);
 
         int minute = (int)(((t - 1) / 120) % 1440);
+        int64_t abs_min = (t - 1) / 120;
+
         for (int i = 0; i < 5; ++i) social::social_tick(npcsB[i], real_scheds[i], minute);
+        social::social_encounters(npcsB, real_scheds, 5, real_rels, abs_min);
 
         if (t % CHECK_INTERVAL == 0) {
             uint64_t base_h = sim::state_hash(worldB, t);
@@ -276,7 +295,6 @@ int main(int argc, char* argv[]) {
     social::init_npc(tnpc1, tsched);
     social::init_npc(tnpc2, tsched);
 
-    // Injeção de fome simulada para trigar o comportamento logo no Ato 2
     tnpc1.fome = 0.35f;
     tnpc2.fome = 0.35f;
 
@@ -292,10 +310,8 @@ int main(int argc, char* argv[]) {
         social::social_tick(tnpc1, tsched, minute);
         social::social_tick(tnpc2, tsched, minute);
 
-        // Determinismo: comparar apenas ANTES da injecao de Fuga
         if (t < 780 * 120 && (tnpc1.x != tnpc2.x || tnpc1.z != tnpc2.z || tnpc1.fome != tnpc2.fome || tnpc1.action != tnpc2.action)) deterministic = false;
 
-        // Ato 2: Avalia a rotina emergente de comer antes do almoço oficial
         if (t < 725 * 120) {
             if (tnpc1.action == 2 && std::sqrt(tnpc1.x * tnpc1.x + tnpc1.z * tnpc1.z) < 0.8f) {
                 did_eat = true;
@@ -305,24 +321,18 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // 12:05 do dia 1: ja chegou ao almoco (0,0) via agenda scriptada
-        if (t == 725 * 120) {
-            arrived_at_noon = (std::sqrt(tnpc1.x * tnpc1.x + tnpc1.z * tnpc1.z) <= 0.5f);
-        }
+        if (t == 725 * 120) arrived_at_noon = (std::sqrt(tnpc1.x * tnpc1.x + tnpc1.z * tnpc1.z) <= 0.5f);
 
-        // 13:00: injeta fuga para (50,50)
         if (t == 780 * 120) {
             tnpc1.action = 1;
             tnpc1.flee_x = 50.0f;
             tnpc1.flee_z = 50.0f;
         }
 
-        // Entre 13:00 e 14:00: chegou em (50,50) e voltou a AGENDA autonomamente
         if (t > 780 * 120 && t < 840 * 120) {
             if (tnpc1.action == 0 && std::sqrt(std::pow(tnpc1.x - 50.0f, 2) + std::pow(tnpc1.z - 50.0f, 2)) < 0.2f) flee_worked = true;
         }
 
-        // 15:00: retomou a agenda e esta no trabalho (10,10)
         if (t == 900 * 120) {
             if (std::sqrt(std::pow(tnpc1.x - 10.0f, 2) + std::pow(tnpc1.z - 10.0f, 2)) < 0.5f) flee_resumed = true;
         }
@@ -336,6 +346,74 @@ int main(int argc, char* argv[]) {
     if (!flee_resumed) { std::cout << "[FAIL] SOCIAL: O resumo de agenda pos-fuga nao acionou sua trajetoria correta.\n"; t5_pass = false; }
 
     if (t5_pass) std::cout << "[PASS] SOCIAL: Agenda, prioridades vitais estritas e fuga validados com sucesso.\n";
+    else all_passed = false;
+
+    // ==============================================================================
+    // [TESTE 6] SOCIAL-RELACOES
+    // ==============================================================================
+    bool t6_pass = true;
+    const char* d_sched1 = "categoria artesao\n0800 5 0 ponto_a\n";
+    const char* d_sched2 = "categoria guarda\n0800 -5 0 ponto_b\n";
+    const char* d_rels = "artesao guarda 0.8\n";
+
+    social::Schedule s1 = social::parse_schedule(d_sched1);
+    social::Schedule s2 = social::parse_schedule(d_sched2);
+
+    if (std::string(s1.categoria) != "artesao" || std::string(s2.categoria) != "guarda") {
+        std::cout << "[FAIL] SOCIAL-REL: Parse de categoria falhou.\n"; t6_pass = false;
+    }
+
+    social::Relations d_r = social::parse_relations(d_rels);
+    if (social::get_relation(d_r, "artesao", "guarda") < 0.7f) {
+        std::cout << "[FAIL] SOCIAL-REL: Relacao nao lida corretamente.\n"; t6_pass = false;
+    }
+
+    social::NpcState nA[2], nB[2];
+    social::Schedule sArr[2] = { s1, s2 };
+    social::init_npc(nA[0], s1); nA[0].x = -10.0f; nA[0].tx = 5.0f; nA[0].z = 0.0f; nA[0].tz = 0.0f;
+    social::init_npc(nA[1], s2); nA[1].x = 10.0f; nA[1].tx = -5.0f; nA[1].z = 0.0f; nA[1].tz = 0.0f;
+    nB[0] = nA[0]; nB[1] = nA[1];
+
+    int conv_count = 0;
+    int ticks_parado = 0;
+    bool determinism_t6 = true;
+    bool flee_vence = false;
+    bool injected = false;
+
+    for (uint64_t t = 1; t <= 10000; ++t) {
+        int minute = (int)((t / 120) % 1440);
+        int64_t abs_min = t / 120;
+
+        social::social_tick(nA[0], sArr[0], minute);
+        social::social_tick(nA[1], sArr[1], minute);
+        auto evsA = social::social_encounters(nA, sArr, 2, d_r, abs_min);
+        if (!evsA.empty()) conv_count++;
+
+        social::social_tick(nB[0], sArr[0], minute);
+        social::social_tick(nB[1], sArr[1], minute);
+        social::social_encounters(nB, sArr, 2, d_r, abs_min);
+
+        if (!injected && (nA[0].x != nB[0].x || nA[0].action != nB[0].action)) determinism_t6 = false;
+
+        if (nB[0].action == 3) ticks_parado++;
+
+        // Injeção de FUGA na cópia A durante conversa para provar blindagem da prioridade
+        if (nA[0].action == 3 && !injected) {
+            injected = true;
+            nA[0].action = 1;
+            nA[0].flee_x = 0; nA[0].flee_z = 0;
+        }
+        if (injected && nA[0].action == 1 && nB[0].action == 3) {
+            flee_vence = true;
+        }
+    }
+
+    if (conv_count != 1) { std::cout << "[FAIL] SOCIAL-REL: Encontro disparou quantidade incorreta de vezes: " << conv_count << "\n"; t6_pass = false; }
+    if (ticks_parado != 240) { std::cout << "[FAIL] SOCIAL-REL: Tempo parado incorreto: " << ticks_parado << "\n"; t6_pass = false; }
+    if (!determinism_t6) { std::cout << "[FAIL] SOCIAL-REL: Determinismo falhou no encontro.\n"; t6_pass = false; }
+    if (!flee_vence) { std::cout << "[FAIL] SOCIAL-REL: FUGA injetada nao sobrescreveu a conversa em andamento.\n"; t6_pass = false; }
+
+    if (t6_pass) std::cout << "[PASS] SOCIAL-REL: Categorias, relacoes, barks, cooldown e interrupcao validados.\n";
     else all_passed = false;
 
     return all_passed ? 0 : 1;

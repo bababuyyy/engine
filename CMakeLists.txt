@@ -89,6 +89,7 @@ target_compile_definitions(engine PRIVATE
     LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/"
     ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/"
     SCHEDULES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/schedules/"
+    SOCIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/social/"
 )
 
 if(MSVC)
@@ -98,6 +99,10 @@ endif()
 # Adicionado social.cpp à build de testes (Sentinela)
 add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp src/level/level.cpp src/gen/gen.cpp src/social/social.cpp)
 target_include_directories(sim_tests PRIVATE src)
+target_compile_definitions(sim_tests PRIVATE 
+    SCHEDULES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/schedules/"
+    SOCIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/social/"
+)
 if(MSVC)
     target_compile_options(sim_tests PRIVATE /W4)
 endif()

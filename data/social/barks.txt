@@ -1,0 +1,9 @@
+amistoso Bom dia! Como vai a familia?
+amistoso Passa na loja depois!
+amistoso Que bom te ver por aqui.
+neutro Bom dia.
+neutro Dia corrido, ne?
+neutro Ate logo.
+frio Hm.
+frio Sem tempo hoje.
+frio ...

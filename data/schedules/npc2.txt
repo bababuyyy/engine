@@ -1,5 +1,6 @@
 # Cora - guarda
 comida 10 0
+categoria guarda
 0000 0 0 patrulha_praca
 0600 10 10 patrulha_norte
 1200 10 0 taverna

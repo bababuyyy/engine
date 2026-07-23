@@ -1,5 +1,6 @@
 # Ana - padeira
 comida 0 -5
+categoria artesao
 0500 -10 -5 dormir->acordar
 0530 10 -2 trabalhar
 1200 0 -5 almocar
