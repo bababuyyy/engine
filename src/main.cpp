@@ -101,6 +101,13 @@ struct LoadedAsset {
     SDL_GPUTexture* tex;
 };
 
+// M2: Estrutura para os meshes dos NPCs
+struct NpcVisual {
+    MeshRange range;
+    SDL_GPUTexture* tex;
+    bool has_mesh;
+};
+
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
@@ -206,6 +213,9 @@ int main(int argc, char* argv[]) {
     std::vector<uint32_t> level_body_ids;
     std::vector<LoadedAsset> level_assets;
 
+    // M2: Estado de renderização das malhas dos NPCs
+    NpcVisual npc_visuals[5] = {};
+
     SDL_GPUBuffer* vertex_buffer = nullptr;
     SDL_GPUBuffer* index_buffer = nullptr;
 
@@ -226,6 +236,15 @@ int main(int argc, char* argv[]) {
             if (a.tex) SDL_ReleaseGPUTexture(device, a.tex);
         }
         level_assets.clear();
+
+        // M2: Purga sincronizada e rigorosa das texturas antigas de NPCs
+        for (int i = 0; i < 5; ++i) {
+            if (npc_visuals[i].tex) {
+                SDL_ReleaseGPUTexture(device, npc_visuals[i].tex);
+                npc_visuals[i].tex = nullptr;
+            }
+            npc_visuals[i].has_mesh = false;
+        }
 
         std::vector<Vertex> vertices;
         std::vector<uint16_t> indices;
@@ -351,6 +370,63 @@ int main(int argc, char* argv[]) {
             }
             else {
                 app_log.add("Aviso: Falha ao carregar %s (%s)", m.path.c_str(), asset.error.c_str());
+            }
+        }
+
+        // M2: Carregamento do payload geométrico dos NPCs (0..4) sem offset posicional
+        for (int i = 0; i < 5; ++i) {
+            std::string npc_path = std::string(ASSETS_DIR) + "models/npc" + std::to_string(i) + ".glb";
+            MeshData asset = assets_load_glb(npc_path.c_str());
+
+            if (asset.ok) {
+                uint32_t base = (uint32_t)vertices.size();
+                uint32_t start_idx = (uint32_t)indices.size();
+
+                size_t vert_count = asset.pos_rgb.size() / 6;
+                for (size_t v = 0; v < vert_count; ++v) {
+                    // Sem offset - a matriz da instância fará o posicionamento em mundo
+                    vertices.push_back({
+                        asset.pos_rgb[v * 6 + 0],
+                        asset.pos_rgb[v * 6 + 1],
+                        asset.pos_rgb[v * 6 + 2],
+                        asset.pos_rgb[v * 6 + 3],
+                        asset.pos_rgb[v * 6 + 4],
+                        asset.pos_rgb[v * 6 + 5],
+                        asset.uv[v * 2 + 0],
+                        asset.uv[v * 2 + 1],
+                        asset.normals[v * 3 + 0],
+                        asset.normals[v * 3 + 1],
+                        asset.normals[v * 3 + 2]
+                        });
+                }
+
+                for (size_t idx = 0; idx < asset.indices.size(); ++idx) {
+                    indices.push_back(base + asset.indices[idx]);
+                }
+
+                npc_visuals[i].range = { start_idx, (uint32_t)asset.indices.size() };
+                npc_visuals[i].has_mesh = true;
+                npc_visuals[i].tex = nullptr;
+
+                if (asset.tex_w > 0 && asset.tex_h > 0 && !asset.tex_rgba.empty()) {
+                    SDL_GPUTextureCreateInfo asset_tex_info = {};
+                    asset_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+                    asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+                    asset_tex_info.width = asset.tex_w;
+                    asset_tex_info.height = asset.tex_h;
+                    asset_tex_info.layer_count_or_depth = 1;
+                    asset_tex_info.num_levels = 1;
+                    asset_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+                    npc_visuals[i].tex = SDL_CreateGPUTexture(device, &asset_tex_info);
+
+                    pending_texs.push_back({ npc_visuals[i].tex, (uint32_t)asset.tex_w, (uint32_t)asset.tex_h, std::move(asset.tex_rgba) });
+                }
+
+                app_log.add("NPC %d: malha carregada (%zu verts)", i, vert_count);
+            }
+            else {
+                npc_visuals[i].has_mesh = false;
+                app_log.add("NPC %d: caixa fallback", i);
             }
         }
 
@@ -1284,7 +1360,14 @@ int main(int argc, char* argv[]) {
             for (int i = 0; i < 5; ++i) {
                 float ix = glm::mix(prev_npcs[i].x, npcs[i].x, alpha);
                 float iz = glm::mix(prev_npcs[i].z, npcs[i].z, alpha);
-                mapped_npc[i] = { ix, 0.85f, iz, npc_colors[i][0], npc_colors[i][1], npc_colors[i][2] };
+
+                // M2: Ajuste posicional e neutralização de cor para NPCs que possuem malha
+                if (npc_visuals[i].has_mesh) {
+                    mapped_npc[i] = { ix, 0.0f, iz, 1.0f, 1.0f, 1.0f };
+                }
+                else {
+                    mapped_npc[i] = { ix, 0.85f, iz, npc_colors[i][0], npc_colors[i][1], npc_colors[i][2] };
+                }
             }
             SDL_UnmapGPUTransferBuffer(device, npc_transfer_buf);
 
@@ -1416,9 +1499,22 @@ int main(int argc, char* argv[]) {
             SDL_DrawGPUIndexedPrimitives(scene_pass, range_active_player.index_count, 1, range_active_player.first_index, 0, 0);
             SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_plataforma.index_count, 1, cubo_plataforma.first_index, 0, 1);
 
+            // M2: Render individual de cada NPC buscando assets do disco ou retornando a caixa de instancing
             SDL_GPUBufferBinding inst_bind_npc = { npc_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_npc, 1);
-            SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_npc.index_count, 5, cubo_npc.first_index, 0, 0);
+
+            for (int i = 0; i < 5; ++i) {
+                if (npc_visuals[i].has_mesh) {
+                    SDL_GPUTextureSamplerBinding npc_samp_bind = { npc_visuals[i].tex ? npc_visuals[i].tex : fallback_tex, sampler };
+                    SDL_BindGPUFragmentSamplers(scene_pass, 0, &npc_samp_bind, 1);
+                    SDL_DrawGPUIndexedPrimitives(scene_pass, npc_visuals[i].range.index_count, 1, npc_visuals[i].range.first_index, 0, i);
+                }
+                else {
+                    SDL_GPUTextureSamplerBinding npc_samp_bind = { fallback_tex, sampler };
+                    SDL_BindGPUFragmentSamplers(scene_pass, 0, &npc_samp_bind, 1);
+                    SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_npc.index_count, 1, cubo_npc.first_index, 0, i);
+                }
+            }
 
             SDL_EndGPURenderPass(scene_pass);
 
@@ -1454,6 +1550,12 @@ int main(int argc, char* argv[]) {
     for (auto& a : level_assets) {
         if (a.tex) SDL_ReleaseGPUTexture(device, a.tex);
     }
+
+    // M2: Liberacao rigorosa ao termino do programa
+    for (int i = 0; i < 5; ++i) {
+        if (npc_visuals[i].tex) SDL_ReleaseGPUTexture(device, npc_visuals[i].tex);
+    }
+
     if (fallback_tex) SDL_ReleaseGPUTexture(device, fallback_tex);
     if (sampler) SDL_ReleaseGPUSampler(device, sampler);
 
