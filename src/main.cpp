@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 
 #include "core/jobs.h"
 #include "sim/sim.h"
@@ -117,7 +118,9 @@ int main(int argc, char* argv[]) {
 
     if (!SDL_Init(SDL_INIT_VIDEO)) return 1;
 
-    SDL_Window* window = SDL_CreateWindow("Minha Engine", 1280, 720, 0);
+    int win_w = 1600;
+    int win_h = 900;
+    SDL_Window* window = SDL_CreateWindow("Minha Engine", win_w, win_h, SDL_WINDOW_RESIZABLE);
     if (!window) return 1;
 
 #ifdef NDEBUG
@@ -535,7 +538,12 @@ int main(int argc, char* argv[]) {
         prev_npcs[i] = npcs[i];
     }
 
-    level::LevelData initial_lvl = level::load_level(LEVELS_DIR "arena.txt");
+    std::string active_level_path = std::string(LEVELS_DIR) + "arena.txt";
+    std::error_code fs_ec;
+    std::filesystem::file_time_type active_level_mtime = std::filesystem::last_write_time(active_level_path, fs_ec);
+    double watch_accum = 0.0;
+
+    level::LevelData initial_lvl = level::load_level(active_level_path.c_str());
     if (initial_lvl.ok) {
         build_level(initial_lvl);
         app_log.add("Nivel recarregado: arena.txt (%zu caixas, %zu meshes)", level_box_count, level_assets.size());
@@ -586,8 +594,8 @@ int main(int argc, char* argv[]) {
     SDL_GPUTextureCreateInfo depth_info = {};
     depth_info.type = SDL_GPU_TEXTURETYPE_2D;
     depth_info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
-    depth_info.width = 1280;
-    depth_info.height = 720;
+    depth_info.width = (uint32_t)win_w;
+    depth_info.height = (uint32_t)win_h;
     depth_info.layer_count_or_depth = 1;
     depth_info.num_levels = 1;
     depth_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
@@ -753,6 +761,20 @@ int main(int argc, char* argv[]) {
 
             if (event.type == SDL_EVENT_QUIT) running = false;
 
+            if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+                win_w = event.window.data1;
+                win_h = event.window.data2;
+                if (win_w > 0 && win_h > 0) {
+                    SDL_WaitForGPUIdle(device);
+                    if (depth_texture) {
+                        SDL_ReleaseGPUTexture(device, depth_texture);
+                    }
+                    depth_info.width = (uint32_t)win_w;
+                    depth_info.height = (uint32_t)win_h;
+                    depth_texture = SDL_CreateGPUTexture(device, &depth_info);
+                }
+            }
+
             if (!ImGui::GetIO().WantCaptureMouse) {
                 if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT) {
                     rmb_down = true;
@@ -790,17 +812,21 @@ int main(int argc, char* argv[]) {
                         app_log.add("Camera: %s", cam_follow ? "FOLLOW" : "FLY");
                     }
                     else if (event.key.key == SDLK_F5) {
-                        level::LevelData new_lvl = level::load_level(LEVELS_DIR "arena.txt");
+                        active_level_path = std::string(LEVELS_DIR) + "arena.txt";
+                        level::LevelData new_lvl = level::load_level(active_level_path.c_str());
                         if (new_lvl.ok) {
                             build_level(new_lvl);
+                            active_level_mtime = std::filesystem::last_write_time(active_level_path, fs_ec);
                             app_log.add("Nivel recarregado: arena.txt (%zu caixas, %zu meshes)", level_box_count, level_assets.size());
                         }
                         else app_log.add("Erro: Falha ao carregar arena.txt");
                     }
                     else if (event.key.key == SDLK_F6) {
-                        level::LevelData new_lvl = level::load_level(LEVELS_DIR "palco.txt");
+                        active_level_path = std::string(LEVELS_DIR) + "palco.txt";
+                        level::LevelData new_lvl = level::load_level(active_level_path.c_str());
                         if (new_lvl.ok) {
                             build_level(new_lvl);
+                            active_level_mtime = std::filesystem::last_write_time(active_level_path, fs_ec);
                             app_log.add("Nivel carregado: palco.txt (%zu caixas, %zu meshes)", level_box_count, level_assets.size());
                         }
                         else app_log.add("Erro: Falha ao carregar palco.txt");
@@ -846,6 +872,25 @@ int main(int argc, char* argv[]) {
 
         const bool* keys = SDL_GetKeyboardState(nullptr);
 
+        // --- SISTEMA HOT RELOAD FILE WATCHER (0.5s Check Interval) ---
+        watch_accum += frame_time;
+        if (watch_accum >= 0.5) {
+            watch_accum = 0.0;
+            std::error_code poll_ec;
+            auto current_mtime = std::filesystem::last_write_time(active_level_path, poll_ec);
+            if (!poll_ec && current_mtime != active_level_mtime) {
+                active_level_mtime = current_mtime;
+                level::LevelData new_lvl = level::load_level(active_level_path.c_str());
+                if (new_lvl.ok) {
+                    build_level(new_lvl);
+                    app_log.add("Hot reload: %s (%zu caixas, %zu meshes)", active_level_path.c_str(), level_box_count, level_assets.size());
+                }
+                else {
+                    app_log.add("Hot reload ignorado: parse falhou");
+                }
+            }
+        }
+
         accumulator += frame_time * time_scale;
 
         uint64_t sim_start_timer = SDL_GetPerformanceCounter();
@@ -854,7 +899,6 @@ int main(int argc, char* argv[]) {
         while (accumulator >= DT) {
             sim::step(world, sim_tick, js, sim_threads);
 
-            // Integração Social Coreografada + Conversas
             int current_minute = (int)((sim_tick / 120) % 1440);
             int64_t current_abs_min = sim_tick / 120;
 
@@ -871,7 +915,6 @@ int main(int argc, char* argv[]) {
 
                 std::string bark_text = "...";
                 if (!pool->empty()) {
-                    // /W4 seguro via casts explícitos
                     int idx = (int)(((int64_t)ev.npc_a * 7 + ev.npc_b + current_abs_min) % (int64_t)pool->size());
                     bark_text = (*pool)[idx];
                 }
@@ -1229,6 +1272,7 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Masmorra Procedural");
         ImGui::InputScalar("Seed", ImGuiDataType_U64, &gen_seed);
         if (ImGui::Button("Gerar")) {
+            SDL_WaitForGPUIdle(device);
             gen::GenResult res = gen::gen_dungeon(gen_seed);
             last_layout_hash = res.layout_hash;
             last_room_count = res.room_count;
@@ -1289,7 +1333,6 @@ int main(int argc, char* argv[]) {
             if (npc_scheds[i].ok && !npc_scheds[i].entries.empty()) {
                 ativ = npc_scheds[i].entries[npcs[i].entry_atual].atividade;
             }
-
             const char* act_str = "";
             if (npcs[i].action == 1) act_str = "[FUGA]";
             else if (npcs[i].action == 2) act_str = "[COMER]";
@@ -1440,8 +1483,9 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        if (swapchain_texture) {
-            glm::mat4 proj = glm::perspectiveLH_ZO(glm::radians(70.0f), 1280.0f / 720.0f, 0.1f, 500.0f);
+        if (swapchain_texture && win_w > 0 && win_h > 0) {
+            float aspect = (float)win_w / (float)win_h;
+            glm::mat4 proj = glm::perspectiveLH_ZO(glm::radians(70.0f), aspect, 0.1f, 500.0f);
             glm::mat4 view = glm::lookAtLH(cam_pos, cam_pos + front, glm::vec3(0, 1, 0));
             glm::mat4 mvp = proj * view;
 

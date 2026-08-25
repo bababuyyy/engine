@@ -1,18 +1,4 @@
-# Palco social: 5 casas, taverna, praca central com poco
-box 0 -0.5 0 40 0.5 40 0.35 0.4 0.35
-
-# 5 casas num arco ao norte
-box -10 1 -5 2 2 2 0.8 0.3 0.3
-box -15 1 -5 2 2 2 0.3 0.8 0.3
-box -5 1 -10 2 2 2 0.3 0.3 0.8
-box 5 1 -10 2 2 2 0.8 0.8 0.3
-box 10 1 -5 2 2 2 0.8 0.3 0.8
-
-# taverna a leste
-box 10 1.5 0 4 3 4 0.5 0.3 0.2
-
-# poco no centro
-box 0 0.5 0 1 1 1 0.6 0.6 0.6
-
-# Dica: linhas mesh funcionam aqui — vista o palco com seus modelos!
-spawn 0 2 -15
+# Exportado do Blender: hearthbell.blend
+# 1 caixas, 0 meshes
+box 1.907 -0.213 -1.467 31.652 0.386 31.652 0.500 0.500 0.500
+spawn 0.000 2.000 0.000
