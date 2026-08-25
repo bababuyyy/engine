@@ -1,9 +1,9 @@
 # Bruno - ferreiro
 comida 10 0
 categoria artesao
-0600 -15 -5 dormir
-0630 15 2 trabalhar
-1230 0 -5 almocar
-1330 15 2 trabalhar
-1830 10 0 taverna
-2200 -15 -5 dormir
+comida 0.6 0.4
+0615 -19.3 22.5 acordar
+0645 23.4 22.6 trabalhar
+1230 0.6 0.4 almocar
+1330 23.4 22.6 trabalhar
+2000 -19.3 22.5 dormir

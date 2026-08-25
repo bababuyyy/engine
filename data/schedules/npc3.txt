@@ -1,9 +1,9 @@
 # Davi - mercador
 comida 10 0
 categoria mercador
-0700 5 -10 dormir
-0800 0 0 mercado
-1300 10 0 taverna
-1400 0 0 mercado
-1900 0 5 passear
-2000 5 -10 dormir
+comida 17.2 -10.6
+0700 -19.2 0.8 acordar
+0730 13.3 8.6 vender
+1300 17.2 -10.6 almocar
+1345 13.3 8.6 vender
+1900 -19.2 0.8 dormir

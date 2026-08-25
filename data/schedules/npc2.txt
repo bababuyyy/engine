@@ -1,9 +1,9 @@
 # Cora - guarda
 comida 10 0
 categoria guarda
-0000 0 0 patrulha_praca
-0600 10 10 patrulha_norte
-1200 10 0 taverna
-1300 -10 10 patrulha_sul
-1800 0 0 patrulha_praca
-2000 -5 -10 dormir
+comida 16.0 -10.6
+0530 -19.0 -21.4 acordar
+0600 11.7 -26.0 patrulhar
+1200 16.0 -10.6 almocar
+1245 11.7 -26.0 patrulhar
+2200 -19.0 -21.4 dormir

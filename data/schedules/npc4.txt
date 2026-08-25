@@ -1,8 +1,9 @@
 # Eva - taberneira
 comida 10 0
 categoria taberneira
-0900 10 -5 dormir
-1000 10 0 limpar
-1200 10 0 servir
-1800 10 0 servir_jantar
-0200 10 -5 dormir
+comida 16.6 -12.2
+0800 -19.0 -10.7 acordar
+0830 16.6 -11.2 atender
+1500 16.6 -12.2 comer
+1530 16.6 -11.2 atender
+2300 -19.0 -10.7 dormir
