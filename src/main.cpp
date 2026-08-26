@@ -32,9 +32,15 @@
 typedef unsigned char BYTE;
 #include "basic_vs.h"
 #include "basic_ps.h"
+#include "fullscreen_vs.h"
+#include "fullscreen_ps.h"
+#include "outline_vs.h"
+#include "outline_ps.h"
+#include "sky_vs.h"
+#include "sky_ps.h"
 
 // ============================================================================
-// SISTEMA DE FEEL / MÁQUINA DE ESTADO DO JOGADOR
+// SISTEMA DE FEEL / MAQUINA DE ESTADO DO JOGADOR
 // ============================================================================
 namespace feel {
     float jump_height = 2.2f;
@@ -99,6 +105,47 @@ struct SunParams {
     float ambient;
     float color[3];
     float pad;
+    float cam_pos[3];
+    float pad2;
+    float toon_cuts;
+    float toon_soft;
+    float pad3[2];
+    float fog_color[3];
+    float fog_density;
+};
+
+// M2.5-13: Reducao Estrutural Exata - O Shader espelha esse padrao exato
+struct SkyParams {
+    float to_sun[3];
+    float pad0;
+    float zenith_color[3];
+    float pad1;
+    float horizon_color[3];
+    float pad2;
+    float sun_color[3];
+    float pad3;
+};
+
+struct ObjIdParams {
+    float id;
+    float pad[3];
+};
+
+struct FsParams {
+    float tex_size[2];
+    float pad[2];
+};
+
+struct OutlineParams {
+    float texel[2];
+    float z_cutoff;
+    float grazing_scale;
+    float crease_low;
+    float crease_high;
+    float line_darken;
+    float crease_brighten;
+    float cam_fwd[3];
+    float pad;
 };
 
 struct LoadedAsset {
@@ -156,9 +203,72 @@ int main(int argc, char* argv[]) {
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
     ps_info.num_samplers = 1;
-    ps_info.num_uniform_buffers = 1;
+    ps_info.num_uniform_buffers = 2;
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
+
+    SDL_GPUShaderCreateInfo fs_vs_info = {};
+    fs_vs_info.code = g_fullscreen_vs;
+    fs_vs_info.code_size = sizeof(g_fullscreen_vs);
+    fs_vs_info.entrypoint = "VSMain";
+    fs_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    fs_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    fs_vs_info.num_uniform_buffers = 0;
+    SDL_GPUShader* fs_vs = SDL_CreateGPUShader(device, &fs_vs_info);
+    if (!fs_vs) return 1;
+
+    SDL_GPUShaderCreateInfo fs_ps_info = {};
+    fs_ps_info.code = g_fullscreen_ps;
+    fs_ps_info.code_size = sizeof(g_fullscreen_ps);
+    fs_ps_info.entrypoint = "PSMain";
+    fs_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    fs_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    fs_ps_info.num_samplers = 1;
+    fs_ps_info.num_uniform_buffers = 1;
+    SDL_GPUShader* fs_ps = SDL_CreateGPUShader(device, &fs_ps_info);
+    if (!fs_ps) return 1;
+
+    SDL_GPUShaderCreateInfo out_vs_info = {};
+    out_vs_info.code = g_outline_vs;
+    out_vs_info.code_size = sizeof(g_outline_vs);
+    out_vs_info.entrypoint = "VSMain";
+    out_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    out_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    out_vs_info.num_uniform_buffers = 0;
+    SDL_GPUShader* out_vs = SDL_CreateGPUShader(device, &out_vs_info);
+    if (!out_vs) return 1;
+
+    SDL_GPUShaderCreateInfo out_ps_info = {};
+    out_ps_info.code = g_outline_ps;
+    out_ps_info.code_size = sizeof(g_outline_ps);
+    out_ps_info.entrypoint = "PSMain";
+    out_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    out_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    out_ps_info.num_samplers = 3;
+    out_ps_info.num_uniform_buffers = 1;
+    SDL_GPUShader* out_ps = SDL_CreateGPUShader(device, &out_ps_info);
+    if (!out_ps) return 1;
+
+    SDL_GPUShaderCreateInfo sky_vs_info = {};
+    sky_vs_info.code = g_sky_vs;
+    sky_vs_info.code_size = sizeof(g_sky_vs);
+    sky_vs_info.entrypoint = "VSMain";
+    sky_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    sky_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    sky_vs_info.num_uniform_buffers = 1; // Necessario para o MVP do Domo
+    SDL_GPUShader* sky_vs = SDL_CreateGPUShader(device, &sky_vs_info);
+    if (!sky_vs) return 1;
+
+    SDL_GPUShaderCreateInfo sky_ps_info = {};
+    sky_ps_info.code = g_sky_ps;
+    sky_ps_info.code_size = sizeof(g_sky_ps);
+    sky_ps_info.entrypoint = "PSMain";
+    sky_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    sky_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    sky_ps_info.num_samplers = 0;
+    sky_ps_info.num_uniform_buffers = 1;
+    SDL_GPUShader* sky_ps = SDL_CreateGPUShader(device, &sky_ps_info);
+    if (!sky_ps) return 1;
 
     core::JobSystem js;
 
@@ -212,7 +322,155 @@ int main(int argc, char* argv[]) {
     SDL_SubmitGPUCommandBuffer(init_cmd);
     SDL_ReleaseGPUTransferBuffer(device, fallback_tb);
 
+    // ============================================================================
+    // M2.5-13: Domo Celeste (Geometria Estatica Esférica Procedural)
+    // ============================================================================
+    std::vector<float> dome_vertices;
+    std::vector<uint16_t> dome_indices;
+    int d_seg = 24;
+    int d_rings = 12;
+    for (int r = 0; r <= d_rings; ++r) {
+        float v = (float)r / (float)d_rings;
+        float phi = v * 3.14159265f;
+        for (int s = 0; s <= d_seg; ++s) {
+            float u = (float)s / (float)d_seg;
+            float theta = u * 2.0f * 3.14159265f;
+            float x = std::cos(theta) * std::sin(phi);
+            float y = std::cos(phi);
+            float z = std::sin(theta) * std::sin(phi);
+            dome_vertices.push_back(x);
+            dome_vertices.push_back(y);
+            dome_vertices.push_back(z);
+        }
+    }
+    for (int r = 0; r < d_rings; ++r) {
+        for (int s = 0; s < d_seg; ++s) {
+            uint16_t i0 = r * (d_seg + 1) + s;
+            uint16_t i1 = i0 + 1;
+            uint16_t i2 = i0 + (d_seg + 1);
+            uint16_t i3 = i2 + 1;
+            dome_indices.push_back(i0);
+            dome_indices.push_back(i2);
+            dome_indices.push_back(i1);
+            dome_indices.push_back(i1);
+            dome_indices.push_back(i2);
+            dome_indices.push_back(i3);
+        }
+    }
+
+    uint32_t dome_vb_size = (uint32_t)(dome_vertices.size() * sizeof(float));
+    uint32_t dome_ib_size = (uint32_t)(dome_indices.size() * sizeof(uint16_t));
+
+    SDL_GPUTransferBufferCreateInfo d_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, dome_vb_size + dome_ib_size };
+    SDL_GPUTransferBuffer* dome_tb = SDL_CreateGPUTransferBuffer(device, &d_tb_info);
+
+    void* dome_map = SDL_MapGPUTransferBuffer(device, dome_tb, false);
+    memcpy(dome_map, dome_vertices.data(), dome_vb_size);
+    memcpy((uint8_t*)dome_map + dome_vb_size, dome_indices.data(), dome_ib_size);
+    SDL_UnmapGPUTransferBuffer(device, dome_tb);
+
+    SDL_GPUBufferCreateInfo dv_info = { SDL_GPU_BUFFERUSAGE_VERTEX, dome_vb_size };
+    SDL_GPUBuffer* dome_vertex_buffer = SDL_CreateGPUBuffer(device, &dv_info);
+
+    SDL_GPUBufferCreateInfo di_info = { SDL_GPU_BUFFERUSAGE_INDEX, dome_ib_size };
+    SDL_GPUBuffer* dome_index_buffer = SDL_CreateGPUBuffer(device, &di_info);
+
+    SDL_GPUCommandBuffer* d_cmd = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass* d_pass = SDL_BeginGPUCopyPass(d_cmd);
+
+    SDL_GPUTransferBufferLocation dv_loc = { dome_tb, 0 };
+    SDL_GPUBufferRegion dv_reg = { dome_vertex_buffer, 0, dome_vb_size };
+    SDL_UploadToGPUBuffer(d_pass, &dv_loc, &dv_reg, false);
+
+    SDL_GPUTransferBufferLocation di_loc = { dome_tb, dome_vb_size };
+    SDL_GPUBufferRegion di_reg = { dome_index_buffer, 0, dome_ib_size };
+    SDL_UploadToGPUBuffer(d_pass, &di_loc, &di_reg, false);
+
+    SDL_EndGPUCopyPass(d_pass);
+    SDL_SubmitGPUCommandBuffer(d_cmd);
+    SDL_ReleaseGPUTransferBuffer(device, dome_tb);
+
+
+    int pixel_mode = 1;
+    const int alturas[] = { 180, 240, 270, 360, 450 };
+    int altura_idx = 3;
+    int pixel_divisor = 4;
+    bool resize_needed = false;
+
+    int internal_w, internal_h;
+    if (pixel_mode == 0) {
+        internal_w = std::max(1, win_w / pixel_divisor);
+        internal_h = std::max(1, win_h / pixel_divisor);
+    }
+    else {
+        internal_h = alturas[altura_idx];
+        internal_w = std::max(2, (int)std::llround(internal_h * (double)win_w / (double)win_h)) & ~1;
+    }
+
+    SDL_GPUTextureCreateInfo scene_color_info = {};
+    scene_color_info.type = SDL_GPU_TEXTURETYPE_2D;
+    scene_color_info.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    scene_color_info.width = (uint32_t)internal_w;
+    scene_color_info.height = (uint32_t)internal_h;
+    scene_color_info.layer_count_or_depth = 1;
+    scene_color_info.num_levels = 1;
+    scene_color_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    scene_color_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* scene_color = SDL_CreateGPUTexture(device, &scene_color_info);
+
+    SDL_GPUTextureCreateInfo normal_id_info = {};
+    normal_id_info.type = SDL_GPU_TEXTURETYPE_2D;
+    normal_id_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    normal_id_info.width = (uint32_t)internal_w;
+    normal_id_info.height = (uint32_t)internal_h;
+    normal_id_info.layer_count_or_depth = 1;
+    normal_id_info.num_levels = 1;
+    normal_id_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    normal_id_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* normal_id = SDL_CreateGPUTexture(device, &normal_id_info);
+
+    SDL_GPUTextureCreateInfo comp_color_info = {};
+    comp_color_info.type = SDL_GPU_TEXTURETYPE_2D;
+    comp_color_info.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    comp_color_info.width = (uint32_t)internal_w;
+    comp_color_info.height = (uint32_t)internal_h;
+    comp_color_info.layer_count_or_depth = 1;
+    comp_color_info.num_levels = 1;
+    comp_color_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    comp_color_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* composite_color = SDL_CreateGPUTexture(device, &comp_color_info);
+
+    SDL_GPUTextureCreateInfo depth_info = {};
+    depth_info.type = SDL_GPU_TEXTURETYPE_2D;
+    depth_info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    depth_info.width = (uint32_t)internal_w;
+    depth_info.height = (uint32_t)internal_h;
+    depth_info.layer_count_or_depth = 1;
+    depth_info.num_levels = 1;
+    depth_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    depth_info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* depth_texture = SDL_CreateGPUTexture(device, &depth_info);
+
+    SDL_GPUSamplerCreateInfo upscale_samp_info = {};
+    upscale_samp_info.min_filter = SDL_GPU_FILTER_LINEAR;
+    upscale_samp_info.mag_filter = SDL_GPU_FILTER_LINEAR;
+    upscale_samp_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    upscale_samp_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    upscale_samp_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    upscale_samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    SDL_GPUSampler* upscale_sampler = SDL_CreateGPUSampler(device, &upscale_samp_info);
+
+    SDL_GPUSamplerCreateInfo point_samp_info = {};
+    point_samp_info.min_filter = SDL_GPU_FILTER_NEAREST;
+    point_samp_info.mag_filter = SDL_GPU_FILTER_NEAREST;
+    point_samp_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    point_samp_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    point_samp_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    point_samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    SDL_GPUSampler* point_sampler = SDL_CreateGPUSampler(device, &point_samp_info);
+
     AppLog app_log;
+    app_log.add("Res interna inicial: %dx%d", internal_w, internal_h);
 
     social::Relations rels;
     {
@@ -236,6 +494,7 @@ int main(int argc, char* argv[]) {
     size_t level_box_count = 0;
     std::vector<uint32_t> level_body_ids;
     std::vector<LoadedAsset> level_assets;
+    std::vector<MeshRange> box_ranges;
 
     NpcVisual npc_visuals[5] = {};
 
@@ -320,8 +579,10 @@ int main(int argc, char* argv[]) {
             };
 
         uint32_t lvl_start = indices.size();
+        box_ranges.clear();
         for (const auto& b : lvl.boxes) {
-            add_box(b.cx, b.cy, b.cz, b.hx, b.hy, b.hz, b.r, b.g, b.b);
+            MeshRange r = add_box(b.cx, b.cy, b.cz, b.hx, b.hy, b.hz, b.r, b.g, b.b);
+            box_ranges.push_back(r);
             uint32_t bid = phys::phys_create_static_box(b.cx, b.cy, b.cz, b.hx, b.hy, b.hz);
             level_body_ids.push_back(bid);
         }
@@ -591,17 +852,6 @@ int main(int argc, char* argv[]) {
     SDL_GPUTransferBufferCreateInfo npc_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, 5 * sizeof(InstanceData) };
     SDL_GPUTransferBuffer* npc_transfer_buf = SDL_CreateGPUTransferBuffer(device, &npc_tb_info);
 
-    SDL_GPUTextureCreateInfo depth_info = {};
-    depth_info.type = SDL_GPU_TEXTURETYPE_2D;
-    depth_info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
-    depth_info.width = (uint32_t)win_w;
-    depth_info.height = (uint32_t)win_h;
-    depth_info.layer_count_or_depth = 1;
-    depth_info.num_levels = 1;
-    depth_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    depth_info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-    SDL_GPUTexture* depth_texture = SDL_CreateGPUTexture(device, &depth_info);
-
     SDL_GPUGraphicsPipelineCreateInfo pipe_info = {};
     pipe_info.vertex_shader = vs;
     pipe_info.fragment_shader = ps;
@@ -630,15 +880,79 @@ int main(int argc, char* argv[]) {
     pipe_info.vertex_input_state.num_vertex_buffers = 2;
     pipe_info.vertex_input_state.vertex_buffer_descriptions = vb_desc;
 
-    SDL_GPUColorTargetDescription color_desc = {};
-    color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
-    pipe_info.target_info.num_color_targets = 1;
-    pipe_info.target_info.color_target_descriptions = &color_desc;
+    SDL_GPUColorTargetDescription color_descs[2] = {};
+    color_descs[0].format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    color_descs[1].format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    pipe_info.target_info.num_color_targets = 2;
+    pipe_info.target_info.color_target_descriptions = color_descs;
     pipe_info.target_info.has_depth_stencil_target = true;
     pipe_info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
 
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipe_info);
     if (!pipeline) return 1;
+
+    // M2.5-13: Pipeline de Render do Domo Celeste 
+    SDL_GPUVertexAttribute sky_attr[1] = {};
+    sky_attr[0].location = 0;
+    sky_attr[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+    sky_attr[0].offset = 0;
+    sky_attr[0].buffer_slot = 0;
+
+    SDL_GPUVertexBufferDescription sky_vb_desc[1] = {};
+    sky_vb_desc[0].slot = 0;
+    sky_vb_desc[0].pitch = 3 * sizeof(float);
+    sky_vb_desc[0].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+
+    SDL_GPUGraphicsPipelineCreateInfo sky_pipe_info = {};
+    sky_pipe_info.vertex_shader = sky_vs;
+    sky_pipe_info.fragment_shader = sky_ps;
+    sky_pipe_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    sky_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE; // Domo interno, nao descartar
+    sky_pipe_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    sky_pipe_info.target_info.num_color_targets = 2;
+    sky_pipe_info.target_info.color_target_descriptions = color_descs;
+    sky_pipe_info.target_info.has_depth_stencil_target = true;
+    sky_pipe_info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    sky_pipe_info.depth_stencil_state.enable_depth_test = false;  // Sobreposto pela geometria
+    sky_pipe_info.depth_stencil_state.enable_depth_write = false;
+
+    sky_pipe_info.vertex_input_state.num_vertex_attributes = 1;
+    sky_pipe_info.vertex_input_state.vertex_attributes = sky_attr;
+    sky_pipe_info.vertex_input_state.num_vertex_buffers = 1;
+    sky_pipe_info.vertex_input_state.vertex_buffer_descriptions = sky_vb_desc;
+
+    SDL_GPUGraphicsPipeline* sky_pipeline = SDL_CreateGPUGraphicsPipeline(device, &sky_pipe_info);
+    if (!sky_pipeline) return 1;
+
+    SDL_GPUColorTargetDescription out_color_desc = {};
+    out_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+
+    SDL_GPUGraphicsPipelineCreateInfo out_pipe_info = {};
+    out_pipe_info.vertex_shader = out_vs;
+    out_pipe_info.fragment_shader = out_ps;
+    out_pipe_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    out_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    out_pipe_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    out_pipe_info.target_info.num_color_targets = 1;
+    out_pipe_info.target_info.color_target_descriptions = &out_color_desc;
+
+    SDL_GPUGraphicsPipeline* out_pipeline = SDL_CreateGPUGraphicsPipeline(device, &out_pipe_info);
+    if (!out_pipeline) return 1;
+
+    SDL_GPUColorTargetDescription fs_color_desc = {};
+    fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+
+    SDL_GPUGraphicsPipelineCreateInfo fs_pipe_info = {};
+    fs_pipe_info.vertex_shader = fs_vs;
+    fs_pipe_info.fragment_shader = fs_ps;
+    fs_pipe_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    fs_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    fs_pipe_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    fs_pipe_info.target_info.num_color_targets = 1;
+    fs_pipe_info.target_info.color_target_descriptions = &fs_color_desc;
+
+    SDL_GPUGraphicsPipeline* fs_pipeline = SDL_CreateGPUGraphicsPipeline(device, &fs_pipe_info);
+    if (!fs_pipeline) return 1;
 
     ImGui::CreateContext();
     ImGui_ImplSDL3_InitForSDLGPU(window);
@@ -674,11 +988,29 @@ int main(int argc, char* argv[]) {
     bool draw_crowd = true;
     bool manual_sun = false;
 
+    bool sol_automatico = true;
+    float arco_inclinacao = 25.0f;
     float sun_yaw = 45.0f;
     float sun_pitch = -45.0f;
     float sun_ambient = 0.35f;
     float sun_color_arr[3] = { 1.0f, 1.0f, 1.0f };
     float sun_intensity = 1.0f;
+
+    bool draw_sky = true;
+    float fog_density = 0.006f;
+
+    int view_mode = 0;
+    const char* view_modes[] = { "Final", "Normais+ID", "Sem outline" };
+
+    int toon_cuts = 3;
+    float toon_soft = 1.0f;
+
+    float out_z_cutoff = 0.005f;
+    float out_grazing_scale = 4.0f;
+    float out_crease_low = 0.05f;
+    float out_crease_high = 0.3f;
+    float out_line_darken = 0.35f;
+    float out_crease_brighten = 1.25f;
 
     constexpr uint64_t SIM_HZ = 60;
     constexpr double DT = 1.0 / 60.0;
@@ -764,15 +1096,7 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
                 win_w = event.window.data1;
                 win_h = event.window.data2;
-                if (win_w > 0 && win_h > 0) {
-                    SDL_WaitForGPUIdle(device);
-                    if (depth_texture) {
-                        SDL_ReleaseGPUTexture(device, depth_texture);
-                    }
-                    depth_info.width = (uint32_t)win_w;
-                    depth_info.height = (uint32_t)win_h;
-                    depth_texture = SDL_CreateGPUTexture(device, &depth_info);
-                }
+                resize_needed = true;
             }
 
             if (!ImGui::GetIO().WantCaptureMouse) {
@@ -872,7 +1196,6 @@ int main(int argc, char* argv[]) {
 
         const bool* keys = SDL_GetKeyboardState(nullptr);
 
-        // --- SISTEMA HOT RELOAD FILE WATCHER (0.5s Check Interval) ---
         watch_accum += frame_time;
         if (watch_accum >= 0.5) {
             watch_accum = 0.0;
@@ -1258,6 +1581,25 @@ int main(int argc, char* argv[]) {
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
 
         ImGui::Checkbox("Multidao", &draw_crowd);
+
+        const char* modos_pixel[] = { "Divisor", "Altura fixa" };
+        if (ImGui::Combo("Modo pixel", &pixel_mode, modos_pixel, 2)) {
+            resize_needed = true;
+        }
+        if (pixel_mode == 0) {
+            if (ImGui::SliderInt("Pixel divisor", &pixel_divisor, 1, 8)) {
+                resize_needed = true;
+            }
+        }
+        else {
+            const char* alturas_str[] = { "180", "240", "270", "360", "450" };
+            if (ImGui::Combo("Altura interna", &altura_idx, alturas_str, 5)) {
+                resize_needed = true;
+            }
+        }
+
+        ImGui::Combo("Vista", &view_mode, view_modes, 3);
+
         ImGui::Text("Instancias: 100000");
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
         double effective_speed = frame_time > 0.0 ? (last_ticks_this_frame * DT) / frame_time : 0.0;
@@ -1371,17 +1713,35 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Experimentos (Gate M1-6)");
         ImGui::Checkbox("WalkStairs", &exp_walk_stairs);
         ImGui::SliderFloat("StickToFloor StepDown", &exp_stick_step_down, 0.0f, 2.0f);
+
+        ImGui::Separator();
+        ImGui::Text("Outline Pass (M2.5-8)");
+        ImGui::SliderFloat("Z Cutoff", &out_z_cutoff, 0.0001f, 0.02f, "%.4f");
+        ImGui::SliderFloat("Grazing Scale", &out_grazing_scale, 0.0f, 8.0f);
+        ImGui::SliderFloat("Crease Low", &out_crease_low, 0.0f, 0.5f);
+        ImGui::SliderFloat("Crease High", &out_crease_high, 0.0f, 1.0f);
+        ImGui::SliderFloat("Line Darken", &out_line_darken, 0.0f, 1.0f);
+        ImGui::SliderFloat("Crease Brighten", &out_crease_brighten, 1.0f, 2.0f);
         ImGui::End();
 
         ImGui::Begin("Sol");
-        ImGui::Checkbox("Sol manual", &manual_sun);
-        ImGui::BeginDisabled(!manual_sun);
+        ImGui::Checkbox("Ceu (Processual)", &draw_sky);
+        ImGui::SliderFloat("Densidade do Fog", &fog_density, 0.0f, 0.02f, "%.4f");
+        ImGui::Separator();
+        ImGui::Checkbox("Sol automatico", &sol_automatico);
+        if (sol_automatico) {
+            ImGui::SliderFloat("Inclinacao do arco", &arco_inclinacao, 0.0f, 45.0f);
+        }
+        ImGui::BeginDisabled(sol_automatico);
         ImGui::SliderFloat("Yaw", &sun_yaw, 0.0f, 360.0f);
         ImGui::SliderFloat("Pitch", &sun_pitch, -89.0f, -10.0f);
-        ImGui::SliderFloat("Ambient", &sun_ambient, 0.0f, 1.0f);
         ImGui::EndDisabled();
+        ImGui::SliderFloat("Ambient (Dia)", &sun_ambient, 0.0f, 1.0f);
         ImGui::SliderFloat3("Color", sun_color_arr, 0.0f, 1.0f);
         ImGui::SliderFloat("Intensity", &sun_intensity, 0.0f, 5.0f);
+        ImGui::Separator();
+        ImGui::SliderInt("Cortes", &toon_cuts, 2, 5);
+        ImGui::SliderFloat("Suavidade", &toon_soft, 0.5f, 3.0f);
         ImGui::End();
 
         ImGui::Begin("Log");
@@ -1403,6 +1763,43 @@ int main(int argc, char* argv[]) {
                     (unsigned long long)g_days, (unsigned long long)g_hours, (unsigned long long)g_minutes, (unsigned long long)sim_tick, (long long)time_scale);
             }
             SDL_SetWindowTitle(window, title_buffer);
+        }
+
+        if (resize_needed && win_w > 0 && win_h > 0) {
+            SDL_WaitForGPUIdle(device);
+            if (depth_texture) SDL_ReleaseGPUTexture(device, depth_texture);
+            if (scene_color) SDL_ReleaseGPUTexture(device, scene_color);
+            if (normal_id) SDL_ReleaseGPUTexture(device, normal_id);
+            if (composite_color) SDL_ReleaseGPUTexture(device, composite_color);
+
+            if (pixel_mode == 0) {
+                internal_w = std::max(1, win_w / pixel_divisor);
+                internal_h = std::max(1, win_h / pixel_divisor);
+            }
+            else {
+                internal_h = alturas[altura_idx];
+                internal_w = std::max(2, (int)std::llround(internal_h * (double)win_w / (double)win_h)) & ~1;
+            }
+
+            depth_info.width = (uint32_t)internal_w;
+            depth_info.height = (uint32_t)internal_h;
+            depth_texture = SDL_CreateGPUTexture(device, &depth_info);
+
+            scene_color_info.width = (uint32_t)internal_w;
+            scene_color_info.height = (uint32_t)internal_h;
+            scene_color = SDL_CreateGPUTexture(device, &scene_color_info);
+
+            normal_id_info.width = (uint32_t)internal_w;
+            normal_id_info.height = (uint32_t)internal_h;
+            normal_id = SDL_CreateGPUTexture(device, &normal_id_info);
+
+            comp_color_info.width = (uint32_t)internal_w;
+            comp_color_info.height = (uint32_t)internal_h;
+            composite_color = SDL_CreateGPUTexture(device, &comp_color_info);
+
+            app_log.add("Res interna: %dx%d", internal_w, internal_h);
+
+            resize_needed = false;
         }
 
         ImGui::Render();
@@ -1484,53 +1881,119 @@ int main(int argc, char* argv[]) {
         }
 
         if (swapchain_texture && win_w > 0 && win_h > 0) {
-            float aspect = (float)win_w / (float)win_h;
+            float aspect = (float)internal_w / (float)internal_h;
             glm::mat4 proj = glm::perspectiveLH_ZO(glm::radians(70.0f), aspect, 0.1f, 500.0f);
             glm::mat4 view = glm::lookAtLH(cam_pos, cam_pos + front, glm::vec3(0, 1, 0));
             glm::mat4 mvp = proj * view;
 
             SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
 
-            if (!manual_sun) {
-                float t_h = g_hours + g_minutes / 60.0f;
-                sun_yaw = t_h * 15.0f;
-                if (t_h >= 6.0f && t_h <= 18.0f) {
-                    float sun_t = (t_h - 6.0f) / 12.0f;
-                    sun_pitch = -90.0f * std::sin(sun_t * 3.14159265f);
-                    sun_ambient = 0.35f;
-                }
-                else {
-                    sun_pitch = -10.0f;
-                    sun_ambient = 0.05f;
-                }
+            glm::vec3 to_sun_vec;
+            float effective_intensity = sun_intensity;
+            glm::vec3 c_zenith, c_horizon;
+            float effective_ambient = sun_ambient;
+
+            if (sol_automatico) {
+                float t_frac = (g_hours * 60.0f + g_minutes) / 1440.0f;
+                float theta = (t_frac - 0.25f) * 2.0f * 3.14159265f;
+                float phi = glm::radians(arco_inclinacao);
+
+                to_sun_vec = glm::normalize(glm::vec3(
+                    std::cos(theta),
+                    std::sin(theta) * std::cos(phi),
+                    std::sin(theta) * std::sin(phi)
+                ));
+
+                float sol_fator = glm::smoothstep(-0.05f, 0.25f, to_sun_vec.y);
+                effective_intensity = sun_intensity * sol_fator;
+
+                auto saturate = [](float x) { return std::max(0.0f, std::min(1.0f, x)); };
+                float day_w = saturate(to_sun_vec.y);
+                float sunset_w = saturate(1.0f - std::fabs(to_sun_vec.y));
+                float night_w = saturate(-to_sun_vec.y);
+
+                glm::vec3 zd(0.25f, 0.55f, 0.95f);
+                glm::vec3 hd(0.60f, 0.80f, 0.98f);
+                glm::vec3 zp(0.30f, 0.30f, 0.60f);
+                glm::vec3 hp(0.98f, 0.55f, 0.25f);
+                glm::vec3 zn(0.02f, 0.03f, 0.08f);
+                glm::vec3 hn(0.05f, 0.07f, 0.15f);
+
+                c_zenith = day_w * zd + sunset_w * zp + night_w * zn;
+                c_horizon = day_w * hd + sunset_w * hp + night_w * hn;
+
+                effective_ambient = sun_ambient * (1.0f - night_w) + 0.10f * night_w;
+            }
+            else {
+                float sy_rad = glm::radians(sun_yaw);
+                float sp_rad = glm::radians(sun_pitch);
+                to_sun_vec = glm::normalize(glm::vec3(
+                    std::cos(sp_rad) * std::sin(sy_rad),
+                    std::sin(sp_rad),
+                    std::cos(sp_rad) * std::cos(sy_rad)
+                ));
+
+                c_zenith = glm::vec3(0.1f, 0.4f, 0.8f);
+                c_horizon = glm::vec3(0.4f, 0.7f, 0.9f);
+                effective_ambient = sun_ambient;
             }
 
-            float sy_rad = glm::radians(sun_yaw);
-            float sp_rad = glm::radians(sun_pitch);
-            glm::vec3 s_dir(
-                cos(sp_rad) * sin(sy_rad),
-                sin(sp_rad),
-                cos(sp_rad) * cos(sy_rad)
-            );
-            s_dir = glm::normalize(s_dir);
+            // A luz vem DO sol PARA O CHAO (convencao da iluminacao do cenario mantida)
+            glm::vec3 s_dir = -to_sun_vec;
+
+            // M2.5-13: O Bloco do Ceu enxuto com vetor to_sun unificado 
+            SkyParams sky_params;
+            sky_params.to_sun[0] = to_sun_vec.x;
+            sky_params.to_sun[1] = to_sun_vec.y;
+            sky_params.to_sun[2] = to_sun_vec.z;
+            sky_params.pad0 = 0.0f;
+            sky_params.zenith_color[0] = c_zenith.x;
+            sky_params.zenith_color[1] = c_zenith.y;
+            sky_params.zenith_color[2] = c_zenith.z;
+            sky_params.pad1 = 0.0f;
+            sky_params.horizon_color[0] = c_horizon.x;
+            sky_params.horizon_color[1] = c_horizon.y;
+            sky_params.horizon_color[2] = c_horizon.z;
+            sky_params.pad2 = 0.0f;
+            sky_params.sun_color[0] = sun_color_arr[0] * effective_intensity;
+            sky_params.sun_color[1] = sun_color_arr[1] * effective_intensity;
+            sky_params.sun_color[2] = sun_color_arr[2] * effective_intensity;
+            sky_params.pad3 = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
             sun_params.dir[1] = s_dir.y;
             sun_params.dir[2] = s_dir.z;
-            sun_params.ambient = sun_ambient;
-            sun_params.color[0] = sun_color_arr[0] * sun_intensity;
-            sun_params.color[1] = sun_color_arr[1] * sun_intensity;
-            sun_params.color[2] = sun_color_arr[2] * sun_intensity;
+            sun_params.ambient = effective_ambient;
+            sun_params.color[0] = sun_color_arr[0] * effective_intensity;
+            sun_params.color[1] = sun_color_arr[1] * effective_intensity;
+            sun_params.color[2] = sun_color_arr[2] * effective_intensity;
             sun_params.pad = 0.0f;
+            sun_params.cam_pos[0] = cam_pos.x;
+            sun_params.cam_pos[1] = cam_pos.y;
+            sun_params.cam_pos[2] = cam_pos.z;
+            sun_params.pad2 = 0.0f;
+            sun_params.toon_cuts = (float)toon_cuts;
+            sun_params.toon_soft = toon_soft;
+            sun_params.pad3[0] = 0.0f;
+            sun_params.pad3[1] = 0.0f;
+            sun_params.fog_color[0] = c_horizon.x;
+            sun_params.fog_color[1] = c_horizon.y;
+            sun_params.fog_color[2] = c_horizon.z;
+            sun_params.fog_density = fog_density;
 
             ImGui_ImplSDLGPU3_PrepareDrawData(dd, cmd_buffer);
 
-            SDL_GPUColorTargetInfo color_target = {};
-            color_target.texture = swapchain_texture;
-            color_target.clear_color = { 0.05f, 0.07f, 0.12f, 1.0f };
-            color_target.load_op = SDL_GPU_LOADOP_CLEAR;
-            color_target.store_op = SDL_GPU_STOREOP_STORE;
+            SDL_GPUColorTargetInfo color_targets[2] = {};
+            color_targets[0].texture = scene_color;
+            color_targets[0].clear_color = { 0.05f, 0.07f, 0.12f, 1.0f };
+            color_targets[0].load_op = SDL_GPU_LOADOP_CLEAR;
+            color_targets[0].store_op = SDL_GPU_STOREOP_STORE;
+
+            color_targets[1].texture = normal_id;
+            color_targets[1].clear_color = { 0.0f, 0.0f, 0.0f, 0.0f };
+            color_targets[1].load_op = SDL_GPU_LOADOP_CLEAR;
+            color_targets[1].store_op = SDL_GPU_STOREOP_STORE;
 
             SDL_GPUDepthStencilTargetInfo depth_target = {};
             depth_target.texture = depth_texture;
@@ -1539,10 +2002,29 @@ int main(int argc, char* argv[]) {
             depth_target.store_op = SDL_GPU_STOREOP_STORE;
             depth_target.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
             depth_target.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-            depth_target.cycle = true;
+            depth_target.cycle = false;
 
-            SDL_GPURenderPass* scene_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target, 1, &depth_target);
+            SDL_GPURenderPass* scene_pass = SDL_BeginGPURenderPass(cmd_buffer, color_targets, 2, &depth_target);
+
+            if (draw_sky) {
+                SDL_BindGPUGraphicsPipeline(scene_pass, sky_pipeline);
+
+                glm::mat4 sky_model = glm::translate(glm::mat4(1.0f), cam_pos) * glm::scale(glm::mat4(1.0f), glm::vec3(10.0f));
+                glm::mat4 sky_mvp = proj * view * sky_model;
+                SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(sky_mvp), sizeof(sky_mvp));
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sky_params, sizeof(SkyParams));
+
+                SDL_GPUBufferBinding sky_vb_bind = { dome_vertex_buffer, 0 };
+                SDL_BindGPUVertexBuffers(scene_pass, 0, &sky_vb_bind, 1);
+
+                SDL_GPUBufferBinding sky_ib_bind = { dome_index_buffer, 0 };
+                SDL_BindGPUIndexBuffer(scene_pass, &sky_ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+                SDL_DrawGPUIndexedPrimitives(scene_pass, dome_indices.size(), 1, 0, 0, 0);
+            }
+
             SDL_BindGPUGraphicsPipeline(scene_pass, pipeline);
+            SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp)); // restaura o MVP da cena (o ceu sobrescreveu o slot 0)
 
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sun_params, sizeof(SunParams));
 
@@ -1558,7 +2040,17 @@ int main(int argc, char* argv[]) {
             SDL_GPUTextureSamplerBinding samp_bind = { fallback_tex, sampler };
             SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
-            SDL_DrawGPUIndexedPrimitives(scene_pass, nivel_range.index_count, 1, nivel_range.first_index, 0, 0);
+            ObjIdParams obj_id;
+
+            for (size_t i = 0; i < box_ranges.size(); ++i) {
+                obj_id.id = (float)(10 + (i % 240)) / 255.0f;
+                obj_id.pad[0] = 0; obj_id.pad[1] = 0; obj_id.pad[2] = 0;
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
+                SDL_DrawGPUIndexedPrimitives(scene_pass, box_ranges[i].index_count, 1, box_ranges[i].first_index, 0, 0);
+            }
+
+            obj_id.id = 1.0f / 255.0f;
+            SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
             SDL_DrawGPUIndexedPrimitives(scene_pass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
 
             for (const auto& a : level_assets) {
@@ -1570,11 +2062,15 @@ int main(int argc, char* argv[]) {
             SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
             if (draw_crowd) {
+                obj_id.id = 2.0f / 255.0f;
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
                 SDL_GPUBufferBinding inst_bind_crowd = { crowd_instance_buffer, 0 };
                 SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_crowd, 1);
                 SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_multidao.index_count, 100000, cubo_multidao.first_index, 0, 0);
             }
 
+            obj_id.id = 3.0f / 255.0f;
+            SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
             SDL_GPUBufferBinding inst_bind_char = { char_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_char, 1);
 
@@ -1582,6 +2078,8 @@ int main(int argc, char* argv[]) {
             SDL_DrawGPUIndexedPrimitives(scene_pass, range_active_player.index_count, 1, range_active_player.first_index, 0, 0);
             SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_plataforma.index_count, 1, cubo_plataforma.first_index, 0, 1);
 
+            obj_id.id = 4.0f / 255.0f;
+            SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
             SDL_GPUBufferBinding inst_bind_npc = { npc_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_npc, 1);
 
@@ -1599,6 +2097,66 @@ int main(int argc, char* argv[]) {
             }
 
             SDL_EndGPURenderPass(scene_pass);
+
+            SDL_GPUColorTargetInfo outline_target = {};
+            outline_target.texture = composite_color;
+            outline_target.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+            outline_target.load_op = SDL_GPU_LOADOP_CLEAR;
+            outline_target.store_op = SDL_GPU_STOREOP_STORE;
+
+            SDL_GPURenderPass* o_pass = SDL_BeginGPURenderPass(cmd_buffer, &outline_target, 1, nullptr);
+            SDL_BindGPUGraphicsPipeline(o_pass, out_pipeline);
+
+            OutlineParams op;
+            op.texel[0] = 1.0f / (float)internal_w;
+            op.texel[1] = 1.0f / (float)internal_h;
+            op.z_cutoff = out_z_cutoff;
+            op.grazing_scale = out_grazing_scale;
+            op.crease_low = out_crease_low;
+            op.crease_high = out_crease_high;
+            op.line_darken = out_line_darken;
+            op.crease_brighten = out_crease_brighten;
+            op.cam_fwd[0] = front.x;
+            op.cam_fwd[1] = front.y;
+            op.cam_fwd[2] = front.z;
+            op.pad = 0.0f;
+            SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &op, sizeof(OutlineParams));
+
+            SDL_GPUTextureSamplerBinding o_samp_binds[3] = {
+                { scene_color, point_sampler },
+                { normal_id, point_sampler },
+                { depth_texture, point_sampler }
+            };
+            SDL_BindGPUFragmentSamplers(o_pass, 0, o_samp_binds, 3);
+
+            SDL_DrawGPUPrimitives(o_pass, 3, 1, 0, 0);
+            SDL_EndGPURenderPass(o_pass);
+
+            SDL_GPUColorTargetInfo upscale_color_target = {};
+            upscale_color_target.texture = swapchain_texture;
+            upscale_color_target.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+            upscale_color_target.load_op = SDL_GPU_LOADOP_CLEAR;
+            upscale_color_target.store_op = SDL_GPU_STOREOP_STORE;
+
+            SDL_GPURenderPass* fs_pass = SDL_BeginGPURenderPass(cmd_buffer, &upscale_color_target, 1, nullptr);
+            SDL_BindGPUGraphicsPipeline(fs_pass, fs_pipeline);
+
+            FsParams fs_params;
+            fs_params.tex_size[0] = (float)internal_w;
+            fs_params.tex_size[1] = (float)internal_h;
+            fs_params.pad[0] = 0.0f;
+            fs_params.pad[1] = 0.0f;
+            SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &fs_params, sizeof(FsParams));
+
+            SDL_GPUTexture* upscale_source = composite_color;
+            if (view_mode == 1) upscale_source = normal_id;
+            else if (view_mode == 2) upscale_source = scene_color;
+
+            SDL_GPUTextureSamplerBinding fs_samp_bind = { upscale_source, upscale_sampler };
+            SDL_BindGPUFragmentSamplers(fs_pass, 0, &fs_samp_bind, 1);
+
+            SDL_DrawGPUPrimitives(fs_pass, 3, 1, 0, 0);
+            SDL_EndGPURenderPass(fs_pass);
 
             SDL_GPUColorTargetInfo ui_target = {};
             ui_target.texture = swapchain_texture;
@@ -1639,6 +2197,27 @@ int main(int argc, char* argv[]) {
 
     if (fallback_tex) SDL_ReleaseGPUTexture(device, fallback_tex);
     if (sampler) SDL_ReleaseGPUSampler(device, sampler);
+
+    SDL_ReleaseGPUGraphicsPipeline(device, sky_pipeline);
+    SDL_ReleaseGPUShader(device, sky_vs);
+    SDL_ReleaseGPUShader(device, sky_ps);
+
+    SDL_ReleaseGPUBuffer(device, dome_vertex_buffer);
+    SDL_ReleaseGPUBuffer(device, dome_index_buffer);
+
+    SDL_ReleaseGPUGraphicsPipeline(device, out_pipeline);
+    SDL_ReleaseGPUShader(device, out_vs);
+    SDL_ReleaseGPUShader(device, out_ps);
+    SDL_ReleaseGPUTexture(device, composite_color);
+    SDL_ReleaseGPUSampler(device, point_sampler);
+
+    SDL_ReleaseGPUGraphicsPipeline(device, fs_pipeline);
+    SDL_ReleaseGPUShader(device, fs_vs);
+    SDL_ReleaseGPUShader(device, fs_ps);
+    SDL_ReleaseGPUSampler(device, upscale_sampler);
+
+    SDL_ReleaseGPUTexture(device, scene_color);
+    SDL_ReleaseGPUTexture(device, normal_id);
 
     SDL_ReleaseGPUTransferBuffer(device, dyn_transfer_buf);
     SDL_ReleaseGPUTransferBuffer(device, char_transfer_buf);

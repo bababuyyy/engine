@@ -72,19 +72,27 @@ find_program(FXC fxc HINTS
     "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
 )
 
+# M2.5-11: A cadeia de compilacao FXC agora integra o Sky Shader
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h
+           ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_ps.h
+           ${CMAKE_CURRENT_BINARY_DIR}/outline_vs.h ${CMAKE_CURRENT_BINARY_DIR}/outline_ps.h
+           ${CMAKE_CURRENT_BINARY_DIR}/sky_vs.h ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h
     COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h /Vn g_basic_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
     COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h /Vn g_basic_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
+    COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h /Vn g_fullscreen_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_ps.h /Vn g_fullscreen_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl
+    COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/outline_vs.h /Vn g_outline_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/outline_ps.h /Vn g_outline_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl
+    COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/sky_vs.h /Vn g_sky_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h /Vn g_sky_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl
 )
 
-# Adicionado social.cpp
 add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp src/social/social.cpp)
-target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h)
+target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_ps.h ${CMAKE_CURRENT_BINARY_DIR}/outline_vs.h ${CMAKE_CURRENT_BINARY_DIR}/outline_ps.h ${CMAKE_CURRENT_BINARY_DIR}/sky_vs.h ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h)
 target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${cgltf_SOURCE_DIR} ${stb_SOURCE_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
-# SCHEDULES_DIR exportado para a build principal
 target_compile_definitions(engine PRIVATE 
     LEVELS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/levels/"
     ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/"
@@ -96,16 +104,14 @@ if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 endif()
 
-# Adicionado social.cpp à build de testes (Sentinela)
 add_executable(sim_tests tests/sim_tests.cpp src/sim/sim.cpp src/level/level.cpp src/gen/gen.cpp src/social/social.cpp)
 target_include_directories(sim_tests PRIVATE src)
-target_compile_definitions(sim_tests PRIVATE 
-    SCHEDULES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/schedules/"
-    SOCIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/social/"
-)
 if(MSVC)
     target_compile_options(sim_tests PRIVATE /W4)
 endif()
+target_compile_definitions(sim_tests PRIVATE 
+    SOCIAL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/social/"
+)
 
 if(CMAKE_BUILD_TYPE MATCHES "Rel")
     add_test(NAME sim_headless 
