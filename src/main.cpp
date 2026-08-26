@@ -38,6 +38,8 @@ typedef unsigned char BYTE;
 #include "outline_ps.h"
 #include "sky_vs.h"
 #include "sky_ps.h"
+#include "grass_vs.h"
+#include "grass_ps.h"
 
 // ============================================================================
 // SISTEMA DE FEEL / MAQUINA DE ESTADO DO JOGADOR
@@ -148,6 +150,12 @@ struct OutlineParams {
     float pad;
 };
 
+struct GrassVSParams {
+    float mvp[16];
+    float cam_pos[3];
+    float scale;
+};
+
 struct LoadedAsset {
     MeshRange range;
     SDL_GPUTexture* tex;
@@ -158,6 +166,12 @@ struct NpcVisual {
     SDL_GPUTexture* tex;
     bool has_mesh;
 };
+
+float grass_density = 8.0f;
+float grass_verdice_min = 0.05f;
+float grass_slope_min = 0.7f;
+uint32_t grass_inst_count = 0;
+SDL_GPUBuffer* grass_instbuf = nullptr;
 
 int main(int argc, char* argv[]) {
     (void)argc;
@@ -269,6 +283,27 @@ int main(int argc, char* argv[]) {
     sky_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_ps = SDL_CreateGPUShader(device, &sky_ps_info);
     if (!sky_ps) return 1;
+
+    SDL_GPUShaderCreateInfo grass_vs_info = {};
+    grass_vs_info.code = g_grass_vs;
+    grass_vs_info.code_size = sizeof(g_grass_vs);
+    grass_vs_info.entrypoint = "VSMain";
+    grass_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    grass_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    grass_vs_info.num_uniform_buffers = 1;
+    SDL_GPUShader* grass_vs = SDL_CreateGPUShader(device, &grass_vs_info);
+    if (!grass_vs) return 1;
+
+    SDL_GPUShaderCreateInfo grass_ps_info = {};
+    grass_ps_info.code = g_grass_ps;
+    grass_ps_info.code_size = sizeof(g_grass_ps);
+    grass_ps_info.entrypoint = "PSMain";
+    grass_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    grass_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    grass_ps_info.num_samplers = 1;
+    grass_ps_info.num_uniform_buffers = 1;
+    SDL_GPUShader* grass_ps = SDL_CreateGPUShader(device, &grass_ps_info);
+    if (!grass_ps) return 1;
 
     core::JobSystem js;
 
@@ -469,6 +504,63 @@ int main(int argc, char* argv[]) {
     point_samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     SDL_GPUSampler* point_sampler = SDL_CreateGPUSampler(device, &point_samp_info);
 
+    std::vector<Vertex> g_verts;
+    std::vector<uint16_t> g_inds;
+
+    auto add_g_quad = [&](float x0, float y0, float z0, float u0, float v0,
+        float x1, float y1, float z1, float u1, float v1,
+        float x2, float y2, float z2, float u2, float v2,
+        float x3, float y3, float z3, float u3, float v3) {
+            uint16_t b = (uint16_t)g_verts.size();
+            g_verts.push_back({ x0,y0,z0, 1,1,1, u0,v0, 0,1,0 });
+            g_verts.push_back({ x1,y1,z1, 1,1,1, u1,v1, 0,1,0 });
+            g_verts.push_back({ x2,y2,z2, 1,1,1, u2,v2, 0,1,0 });
+            g_verts.push_back({ x3,y3,z3, 1,1,1, u3,v3, 0,1,0 });
+            g_inds.push_back(b); g_inds.push_back(b + 1); g_inds.push_back(b + 2);
+            g_inds.push_back(b); g_inds.push_back(b + 2); g_inds.push_back(b + 3);
+        };
+
+    // M2.5-16: apenas a lamina C (familia coroada)
+    for (int i = 0; i < 3; ++i) {
+        float ang = i * 2.09439f;
+        float s = sin(ang), c = cos(ang);
+        auto rot = [&](float x, float z, float& ox, float& oz) { ox = x * c - z * s; oz = x * s + z * c; };
+        float w1 = 0.075f, w2 = 0.05f;
+        float xbl, zbl, xbr, zbr, xml, zml, xmr, zmr, xt, zt;
+        rot(-w1, 0, xbl, zbl); rot(w1, 0, xbr, zbr);
+        rot(-w2, 0.15f, xml, zml); rot(w2, 0.15f, xmr, zmr);
+        rot(0, 0.4f, xt, zt);
+
+        add_g_quad(xml, 0.5f, zml, 0, 0.5f, xmr, 0.5f, zmr, 1, 0.5f, xbr, 0.0f, zbr, 1, 0.0f, xbl, 0.0f, zbl, 0, 0.0f);
+        add_g_quad(xt, 1.0f, zt, 0.5f, 1.0f, xt, 1.0f, zt, 0.5f, 1.0f, xmr, 0.5f, zmr, 1, 0.5f, xml, 0.5f, zml, 0, 0.5f);
+    }
+    uint32_t g_total_count = (uint32_t)g_inds.size();
+
+    uint32_t gvb_sz = (uint32_t)(g_verts.size() * sizeof(Vertex));
+    uint32_t gib_sz = (uint32_t)(g_inds.size() * sizeof(uint16_t));
+
+    SDL_GPUTransferBufferCreateInfo g_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, gvb_sz + gib_sz };
+    SDL_GPUTransferBuffer* g_tb = SDL_CreateGPUTransferBuffer(device, &g_tb_info);
+    void* g_map = SDL_MapGPUTransferBuffer(device, g_tb, false);
+    memcpy(g_map, g_verts.data(), gvb_sz);
+    memcpy((uint8_t*)g_map + gvb_sz, g_inds.data(), gib_sz);
+    SDL_UnmapGPUTransferBuffer(device, g_tb);
+
+    SDL_GPUBufferCreateInfo g_vinfo = { SDL_GPU_BUFFERUSAGE_VERTEX, gvb_sz };
+    SDL_GPUBuffer* grass_vbuf = SDL_CreateGPUBuffer(device, &g_vinfo);
+    SDL_GPUBufferCreateInfo g_iinfo = { SDL_GPU_BUFFERUSAGE_INDEX, gib_sz };
+    SDL_GPUBuffer* grass_ibuf = SDL_CreateGPUBuffer(device, &g_iinfo);
+
+    SDL_GPUCommandBuffer* g_cmd = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass* g_pass = SDL_BeginGPUCopyPass(g_cmd);
+    SDL_GPUTransferBufferLocation gl1 = { g_tb, 0 }, gl2 = { g_tb, gvb_sz };
+    SDL_GPUBufferRegion gr1 = { grass_vbuf, 0, gvb_sz }, gr2 = { grass_ibuf, 0, gib_sz };
+    SDL_UploadToGPUBuffer(g_pass, &gl1, &gr1, false);
+    SDL_UploadToGPUBuffer(g_pass, &gl2, &gr2, false);
+    SDL_EndGPUCopyPass(g_pass);
+    SDL_SubmitGPUCommandBuffer(g_cmd);
+    SDL_ReleaseGPUTransferBuffer(device, g_tb);
+
     AppLog app_log;
     app_log.add("Res interna inicial: %dx%d", internal_w, internal_h);
 
@@ -504,6 +596,8 @@ int main(int argc, char* argv[]) {
     glm::vec3 current_player_pos(0.0f);
     glm::vec3 prev_player_pos(0.0f);
     phys::PhysState active_phys_state = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false };
+
+    SDL_GPUTexture* active_grass_tex = nullptr;
 
     auto build_level = [&](const level::LevelData& lvl) {
         SDL_WaitForGPUIdle(device);
@@ -641,6 +735,107 @@ int main(int argc, char* argv[]) {
                     }
                     uint32_t bid = phys::phys_create_mesh_shape(phys_verts.data(), vert_count, asset.indices.data(), asset.indices.size());
                     level_body_ids.push_back(bid);
+
+                    // M2.5-16: plantio por vertex paint (replanta a cada rebuild)
+                    if (grass_instbuf) {
+                        SDL_WaitForGPUIdle(device);
+                        SDL_ReleaseGPUBuffer(device, grass_instbuf);
+                        grass_instbuf = nullptr;
+                    }
+                    grass_inst_count = 0;
+
+                    std::vector<InstanceData> g_insts;
+                    const uint32_t MAX_GRASS = 20000;
+
+                    auto hash_float = [](uint32_t seed) {
+                        seed = (seed ^ 61) ^ (seed >> 16);
+                        seed *= 9;
+                        seed = seed ^ (seed >> 4);
+                        seed *= 0x27d4eb2d;
+                        seed = seed ^ (seed >> 15);
+                        return (float)seed / 4294967296.0f;
+                    };
+
+                    size_t num_tris = asset.indices.size() / 3;
+                    for (size_t t = 0; t < num_tris; ++t) {
+                        if (g_insts.size() >= MAX_GRASS) break;
+
+                        uint32_t i0 = asset.indices[t * 3 + 0];
+                        uint32_t i1 = asset.indices[t * 3 + 1];
+                        uint32_t i2 = asset.indices[t * 3 + 2];
+
+                        glm::vec3 v0(phys_verts[i0 * 3], phys_verts[i0 * 3 + 1], phys_verts[i0 * 3 + 2]);
+                        glm::vec3 v1(phys_verts[i1 * 3], phys_verts[i1 * 3 + 1], phys_verts[i1 * 3 + 2]);
+                        glm::vec3 v2(phys_verts[i2 * 3], phys_verts[i2 * 3 + 1], phys_verts[i2 * 3 + 2]);
+
+                        glm::vec3 e1 = v1 - v0;
+                        glm::vec3 e2 = v2 - v0;
+                        glm::vec3 normal = glm::normalize(glm::cross(e1, e2));
+
+                        if (normal.y < grass_slope_min) continue;
+
+                        glm::vec3 c0(asset.pos_rgb[i0 * 6 + 3], asset.pos_rgb[i0 * 6 + 4], asset.pos_rgb[i0 * 6 + 5]);
+                        glm::vec3 c1(asset.pos_rgb[i1 * 6 + 3], asset.pos_rgb[i1 * 6 + 4], asset.pos_rgb[i1 * 6 + 5]);
+                        glm::vec3 c2(asset.pos_rgb[i2 * 6 + 3], asset.pos_rgb[i2 * 6 + 4], asset.pos_rgb[i2 * 6 + 5]);
+                        glm::vec3 color = (c0 + c1 + c2) / 3.0f;
+
+                        float verdice = std::clamp(color.g - std::max(color.r, color.b), 0.0f, 1.0f);
+                        if (verdice < grass_verdice_min) continue;
+
+                        float area = 0.5f * glm::length(glm::cross(e1, e2));
+                        float expected_tufts = area * grass_density * verdice;
+                        
+                        uint32_t base_tufts = (uint32_t)expected_tufts;
+                        float frac_tufts = expected_tufts - base_tufts;
+                        
+                        uint32_t tuft_count = base_tufts;
+                        if (hash_float((uint32_t)t * 1337) < frac_tufts) tuft_count++;
+
+                        for (uint32_t tufo_idx = 0; tufo_idx < tuft_count; ++tufo_idx) {
+                            if (g_insts.size() >= MAX_GRASS) break;
+                            
+                            float r1 = hash_float((uint32_t)t * 73856093 ^ tufo_idx * 19349663);
+                            float r2 = hash_float((uint32_t)t * 83492791 ^ tufo_idx * 39916801);
+                            
+                            float sqrt_r1 = std::sqrt(r1);
+                            float u = 1.0f - sqrt_r1;
+                            float v = sqrt_r1 * (1.0f - r2);
+                            float w = 1.0f - u - v;
+
+                            glm::vec3 pos = u * v0 + v * v1 + w * v2;
+                            glm::vec3 inst_color = u * c0 + v * c1 + w * c2;
+                            
+                            g_insts.push_back({ pos.x, pos.y, pos.z, inst_color.r, inst_color.g, inst_color.b });
+                        }
+                    }
+
+                    grass_inst_count = (uint32_t)g_insts.size();
+                    if (grass_inst_count >= MAX_GRASS) {
+                        app_log.add("Aviso: Limite MAX_GRASS atingido (%u)", MAX_GRASS);
+                    }
+                    app_log.add("Grama: %u tufos plantados", grass_inst_count);
+
+                    if (grass_inst_count > 0) {
+                        uint32_t ginst_sz = grass_inst_count * sizeof(InstanceData);
+                        SDL_GPUBufferCreateInfo g_instinfo = { SDL_GPU_BUFFERUSAGE_VERTEX, ginst_sz };
+                        grass_instbuf = SDL_CreateGPUBuffer(device, &g_instinfo);
+
+                        SDL_GPUTransferBufferCreateInfo g_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, ginst_sz };
+                        SDL_GPUTransferBuffer* g_tb = SDL_CreateGPUTransferBuffer(device, &g_tb_info);
+                        
+                        void* g_map = SDL_MapGPUTransferBuffer(device, g_tb, false);
+                        memcpy(g_map, g_insts.data(), ginst_sz);
+                        SDL_UnmapGPUTransferBuffer(device, g_tb);
+
+                        SDL_GPUCommandBuffer* l_cmd = SDL_AcquireGPUCommandBuffer(device);
+                        SDL_GPUCopyPass* l_pass = SDL_BeginGPUCopyPass(l_cmd);
+                        SDL_GPUTransferBufferLocation gl = { g_tb, 0 };
+                        SDL_GPUBufferRegion gr = { grass_instbuf, 0, ginst_sz };
+                        SDL_UploadToGPUBuffer(l_pass, &gl, &gr, false);
+                        SDL_EndGPUCopyPass(l_pass);
+                        SDL_SubmitGPUCommandBuffer(l_cmd);
+                        SDL_ReleaseGPUTransferBuffer(device, g_tb);
+                    }
                 }
 
                 LoadedAsset la;
@@ -659,6 +854,10 @@ int main(int argc, char* argv[]) {
                     la.tex = SDL_CreateGPUTexture(device, &asset_tex_info);
 
                     pending_texs.push_back({ la.tex, (uint32_t)asset.tex_w, (uint32_t)asset.tex_h, std::move(asset.tex_rgba) });
+
+                    if (m.path.find("grass_sprite") != std::string::npos) {
+                        active_grass_tex = la.tex;
+                    }
                 }
 
                 level_assets.push_back(la);
@@ -937,6 +1136,14 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUGraphicsPipeline* sky_pipeline = SDL_CreateGPUGraphicsPipeline(device, &sky_pipe_info);
     if (!sky_pipeline) return 1;
+
+    SDL_GPUGraphicsPipelineCreateInfo grass_pipe_info = pipe_info;
+    grass_pipe_info.vertex_shader = grass_vs;
+    grass_pipe_info.fragment_shader = grass_ps;
+    grass_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    SDL_GPUGraphicsPipeline* grass_pipeline = SDL_CreateGPUGraphicsPipeline(device, &grass_pipe_info);
+
+    if (!grass_pipeline) { SDL_Log("FALHA grass_pipeline: %s", SDL_GetError()); return 1; }
 
     SDL_GPUColorTargetDescription out_color_desc = {};
     out_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
@@ -1595,6 +1802,15 @@ int main(int argc, char* argv[]) {
         ImGui::Text("FPS: %.1f", last_frame_ms > 0.0 ? 1000.0 / last_frame_ms : 0.0);
 
         ImGui::Checkbox("Multidao", &draw_crowd);
+        ImGui::SameLine();
+
+        static bool draw_grass = true;
+        static float grass_scale = 1.0f;
+        ImGui::Checkbox("Grama", &draw_grass);
+        ImGui::SliderFloat("Escala do tufo", &grass_scale, 0.3f, 2.0f);
+        ImGui::SliderFloat("Densidade (F5 replanta)", &grass_density, 0.0f, 30.0f);
+        ImGui::SliderFloat("Verdice min", &grass_verdice_min, 0.0f, 0.3f);
+        ImGui::SliderFloat("Slope min", &grass_slope_min, 0.0f, 1.0f);
 
         const char* modos_pixel[] = { "Divisor", "Altura fixa" };
         if (ImGui::Combo("Modo pixel", &pixel_mode, modos_pixel, 2)) {
@@ -2073,6 +2289,36 @@ int main(int argc, char* argv[]) {
                 SDL_DrawGPUIndexedPrimitives(scene_pass, a.range.index_count, 1, a.range.first_index, 0, 0);
             }
 
+            if (draw_grass && grass_inst_count > 0 && grass_instbuf) {
+                SDL_BindGPUGraphicsPipeline(scene_pass, grass_pipeline);
+                SDL_GPUTextureSamplerBinding g_samp = { active_grass_tex ? active_grass_tex : fallback_tex, sampler };
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, &g_samp, 1);
+
+                SDL_GPUBufferBinding g_vbs[2] = { { grass_vbuf, 0 }, { grass_instbuf, 0 } };
+                SDL_BindGPUVertexBuffers(scene_pass, 0, g_vbs, 2);
+                SDL_GPUBufferBinding g_ib = { grass_ibuf, 0 };
+                SDL_BindGPUIndexBuffer(scene_pass, &g_ib, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+                GrassVSParams gvs;
+                memcpy(gvs.mvp, glm::value_ptr(mvp), 64);
+                gvs.cam_pos[0] = cam_pos.x; gvs.cam_pos[1] = cam_pos.y; gvs.cam_pos[2] = cam_pos.z;
+                gvs.scale = grass_scale;
+
+                SDL_PushGPUVertexUniformData(cmd_buffer, 0, &gvs, sizeof(GrassVSParams));
+                SDL_DrawGPUIndexedPrimitives(scene_pass, g_total_count, grass_inst_count, 0, 0, 0);
+
+                // Restaura estado para o restante dos renders da fase
+                SDL_BindGPUGraphicsPipeline(scene_pass, pipeline);
+                SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sun_params, sizeof(SunParams));
+                SDL_GPUBufferBinding vb_r = { vertex_buffer, 0 };
+                SDL_BindGPUVertexBuffers(scene_pass, 0, &vb_r, 1);
+                SDL_GPUBufferBinding ib_r = { index_buffer, 0 };
+                SDL_BindGPUIndexBuffer(scene_pass, &ib_r, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+                SDL_GPUBufferBinding in_r = { neutral_instance_buffer, 0 };
+                SDL_BindGPUVertexBuffers(scene_pass, 1, &in_r, 1);
+            }
+
             SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
             if (draw_crowd) {
@@ -2232,6 +2478,13 @@ int main(int argc, char* argv[]) {
 
     SDL_ReleaseGPUTexture(device, scene_color);
     SDL_ReleaseGPUTexture(device, normal_id);
+
+    SDL_ReleaseGPUGraphicsPipeline(device, grass_pipeline);
+    SDL_ReleaseGPUShader(device, grass_vs);
+    SDL_ReleaseGPUShader(device, grass_ps);
+    SDL_ReleaseGPUBuffer(device, grass_vbuf);
+    SDL_ReleaseGPUBuffer(device, grass_ibuf);
+    if (grass_instbuf) SDL_ReleaseGPUBuffer(device, grass_instbuf);
 
     SDL_ReleaseGPUTransferBuffer(device, dyn_transfer_buf);
     SDL_ReleaseGPUTransferBuffer(device, char_transfer_buf);

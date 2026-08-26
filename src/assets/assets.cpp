@@ -54,6 +54,7 @@ MeshData assets_load_glb(const char* path) {
             cgltf_accessor* pos_accessor = nullptr;
             cgltf_accessor* uv_accessor = nullptr;
             cgltf_accessor* normal_accessor = nullptr;
+            cgltf_accessor* color_accessor = nullptr;
 
             for (cgltf_size i = 0; i < primitive->attributes_count; ++i) {
                 if (primitive->attributes[i].type == cgltf_attribute_type_position) {
@@ -64,6 +65,9 @@ MeshData assets_load_glb(const char* path) {
                 }
                 else if (primitive->attributes[i].type == cgltf_attribute_type_normal) {
                     normal_accessor = primitive->attributes[i].data;
+                }
+                else if (primitive->attributes[i].type == cgltf_attribute_type_color) {
+                    color_accessor = primitive->attributes[i].data;
                 }
             }
 
@@ -117,9 +121,11 @@ MeshData assets_load_glb(const char* path) {
                 result.pos_rgb.push_back(vx);
                 result.pos_rgb.push_back(vy);
                 result.pos_rgb.push_back(vz);
-                result.pos_rgb.push_back(r);
-                result.pos_rgb.push_back(g);
-                result.pos_rgb.push_back(b);
+                float vc[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+                if (color_accessor) cgltf_accessor_read_float(color_accessor, i, vc, 4);
+                result.pos_rgb.push_back(r * vc[0]);
+                result.pos_rgb.push_back(g * vc[1]);
+                result.pos_rgb.push_back(b * vc[2]);
 
                 float uv[2] = { 0.0f, 0.0f };
                 if (uv_accessor) cgltf_accessor_read_float(uv_accessor, i, uv, 2);
