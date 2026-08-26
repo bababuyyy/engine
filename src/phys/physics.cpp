@@ -11,6 +11,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/RayCast.h>
@@ -18,6 +19,8 @@
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 
 JPH_SUPPRESS_WARNINGS
+
+static const bool TERRAIN_FLIP_WINDING = false;
 
 namespace phys {
     using namespace JPH;
@@ -133,6 +136,39 @@ namespace phys {
         Body* box = bi.CreateBody(bcs);
         bi.AddBody(box->GetID(), EActivation::DontActivate);
         return box->GetID().GetIndexAndSequenceNumber();
+    }
+
+    uint32_t phys_create_mesh_shape(const float* vertices, size_t vertex_count, const uint16_t* indices, size_t index_count) {
+        VertexList jolt_vertices;
+        jolt_vertices.reserve(vertex_count);
+        for (size_t i = 0; i < vertex_count; ++i) {
+            jolt_vertices.push_back(Float3(vertices[i * 3 + 0], vertices[i * 3 + 1], vertices[i * 3 + 2]));
+        }
+
+        IndexedTriangleList jolt_triangles;
+        size_t triangle_count = index_count / 3;
+        jolt_triangles.reserve(triangle_count);
+        for (size_t i = 0; i < triangle_count; ++i) {
+            uint32_t i0 = indices[i * 3 + 0];
+            uint32_t i1 = indices[i * 3 + 1];
+            uint32_t i2 = indices[i * 3 + 2];
+            if (TERRAIN_FLIP_WINDING) {
+                jolt_triangles.push_back(IndexedTriangle(i0, i2, i1));
+            }
+            else {
+                jolt_triangles.push_back(IndexedTriangle(i0, i1, i2));
+            }
+        }
+
+        MeshShapeSettings settings(jolt_vertices, jolt_triangles);
+        ShapeRefC mesh_shape = settings.Create().Get();
+
+        BodyCreationSettings bcs(mesh_shape, RVec3::sZero(), Quat::sIdentity(), EMotionType::Static, Layers::NON_MOVING);
+        BodyInterface& bi = physics_system->GetBodyInterface();
+        Body* body = bi.CreateBody(bcs);
+        bi.AddBody(body->GetID(), EActivation::DontActivate);
+
+        return body->GetID().GetIndexAndSequenceNumber();
     }
 
     void phys_destroy_body(uint32_t id) {

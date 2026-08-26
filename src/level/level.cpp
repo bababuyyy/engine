@@ -8,6 +8,8 @@ namespace level {
         LevelData data;
         data.ok = false;
         data.spawn = { 0.0f, 2.0f, 0.0f };
+        data.has_terrain = false;
+        data.terrain_mesh_index = -1;
 
         std::ifstream file(filepath);
         if (!file.is_open()) {
@@ -45,6 +47,17 @@ namespace level {
                 }
                 else {
                     std::cerr << "Linha " << line_num << ": Formato de mesh invalido\n";
+                }
+            }
+            else if (type == "terrain") {
+                LevelMesh m;
+                if (ss >> m.path >> m.x >> m.y >> m.z) {
+                    data.has_terrain = true;
+                    data.terrain_mesh_index = (int)data.meshes.size();
+                    data.meshes.push_back(m);
+                }
+                else {
+                    std::cerr << "Linha " << line_num << ": Formato de terrain invalido\n";
                 }
             }
             else {

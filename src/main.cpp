@@ -392,7 +392,7 @@ int main(int argc, char* argv[]) {
 
 
     int pixel_mode = 1;
-    const int alturas[] = { 180, 240, 270, 360, 450 };
+    const int alturas[] = { 180, 240, 270, 360, 450, 540 };
     int altura_idx = 3;
     int pixel_divisor = 4;
     bool resize_needed = false;
@@ -602,6 +602,7 @@ int main(int argc, char* argv[]) {
         struct PendingTex { SDL_GPUTexture* tex; uint32_t w, h; std::vector<unsigned char> data; };
         std::vector<PendingTex> pending_texs;
 
+        int mesh_idx = 0;
         for (const auto& m : lvl.meshes) {
             std::string full_path = std::string(ASSETS_DIR) + m.path;
             MeshData asset = assets_load_glb(full_path.c_str());
@@ -630,6 +631,18 @@ int main(int argc, char* argv[]) {
                     indices.push_back(base + asset.indices[i]);
                 }
 
+                if (lvl.has_terrain && mesh_idx == lvl.terrain_mesh_index) {
+                    std::vector<float> phys_verts;
+                    phys_verts.reserve(vert_count * 3);
+                    for (size_t i = 0; i < vert_count; ++i) {
+                        phys_verts.push_back(asset.pos_rgb[i * 6 + 0] + m.x);
+                        phys_verts.push_back(asset.pos_rgb[i * 6 + 1] + m.y);
+                        phys_verts.push_back(asset.pos_rgb[i * 6 + 2] + m.z);
+                    }
+                    uint32_t bid = phys::phys_create_mesh_shape(phys_verts.data(), vert_count, asset.indices.data(), asset.indices.size());
+                    level_body_ids.push_back(bid);
+                }
+
                 LoadedAsset la;
                 la.range = { start_idx, (uint32_t)asset.indices.size() };
                 la.tex = nullptr;
@@ -654,6 +667,7 @@ int main(int argc, char* argv[]) {
             else {
                 app_log.add("Aviso: Falha ao carregar %s (%s)", m.path.c_str(), asset.error.c_str());
             }
+            mesh_idx++;
         }
 
         for (int i = 0; i < 5; ++i) {
@@ -1592,8 +1606,8 @@ int main(int argc, char* argv[]) {
             }
         }
         else {
-            const char* alturas_str[] = { "180", "240", "270", "360", "450" };
-            if (ImGui::Combo("Altura interna", &altura_idx, alturas_str, 5)) {
+            const char* alturas_str[] = { "180", "240", "270", "360", "450", "540" };
+            if (ImGui::Combo("Altura interna", &altura_idx, alturas_str, 6)) {
                 resize_needed = true;
             }
         }

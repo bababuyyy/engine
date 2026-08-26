@@ -33,6 +33,7 @@ namespace phys {
 
     // Cria colisores estáticos e retorna a ID Jolt embutida num descritor genérico (necessário pro F5 Reload)
     uint32_t phys_create_static_box(float px, float py, float pz, float hx, float hy, float hz, float rot_yaw = 0.0f, float rot_pitch = 0.0f);
+    uint32_t phys_create_mesh_shape(const float* vertices, size_t vertex_count, const uint16_t* indices, size_t index_count);
     void phys_destroy_body(uint32_t id);
 
     // Cria um colisor movimentável pela API sem assimilação de forças, retornando a ID atrelada

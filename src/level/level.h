@@ -24,6 +24,8 @@ namespace level {
         std::vector<LevelMesh> meshes;
         SpawnDef spawn;
         bool ok;
+        bool has_terrain;
+        int terrain_mesh_index;
     };
 
     LevelData load_level(const char* filepath);
