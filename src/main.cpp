@@ -116,7 +116,6 @@ struct SunParams {
     float fog_density;
 };
 
-// M2.5-13: Reducao Estrutural Exata - O Shader espelha esse padrao exato
 struct SkyParams {
     float to_sun[3];
     float pad0;
@@ -154,11 +153,15 @@ struct GrassVSParams {
     float mvp[16];
     float cam_pos[3];
     float scale;
+    float wind_dir[2];
+    float wind_strength;
+    float time;
 };
 
 struct LoadedAsset {
     MeshRange range;
     SDL_GPUTexture* tex;
+    bool is_terrain;
 };
 
 struct NpcVisual {
@@ -167,6 +170,16 @@ struct NpcVisual {
     bool has_mesh;
 };
 
+// ============================================================================
+// VARIAVEIS GLOBAIS DE SISTEMAS (Vento & Grama)
+// ============================================================================
+namespace wind {
+    float dir_deg = 45.0f;
+    float strength = 0.5f;
+}
+
+float grass_clump_pull = 0.35f;
+float grass_clump_cell = 2.5f;
 float grass_density = 8.0f;
 float grass_verdice_min = 0.05f;
 float grass_slope_min = 0.7f;
@@ -269,7 +282,7 @@ int main(int argc, char* argv[]) {
     sky_vs_info.entrypoint = "VSMain";
     sky_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     sky_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-    sky_vs_info.num_uniform_buffers = 1; // Necessario para o MVP do Domo
+    sky_vs_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_vs = SDL_CreateGPUShader(device, &sky_vs_info);
     if (!sky_vs) return 1;
 
@@ -357,9 +370,6 @@ int main(int argc, char* argv[]) {
     SDL_SubmitGPUCommandBuffer(init_cmd);
     SDL_ReleaseGPUTransferBuffer(device, fallback_tb);
 
-    // ============================================================================
-    // M2.5-13: Domo Celeste (Geometria Estatica Esférica Procedural)
-    // ============================================================================
     std::vector<float> dome_vertices;
     std::vector<uint16_t> dome_indices;
     int d_seg = 24;
@@ -520,7 +530,7 @@ int main(int argc, char* argv[]) {
             g_inds.push_back(b); g_inds.push_back(b + 2); g_inds.push_back(b + 3);
         };
 
-    // M2.5-16: apenas a lamina C (familia coroada)
+    uint32_t g_start = (uint32_t)g_inds.size();
     for (int i = 0; i < 3; ++i) {
         float ang = i * 2.09439f;
         float s = sin(ang), c = cos(ang);
@@ -534,7 +544,7 @@ int main(int argc, char* argv[]) {
         add_g_quad(xml, 0.5f, zml, 0, 0.5f, xmr, 0.5f, zmr, 1, 0.5f, xbr, 0.0f, zbr, 1, 0.0f, xbl, 0.0f, zbl, 0, 0.0f);
         add_g_quad(xt, 1.0f, zt, 0.5f, 1.0f, xt, 1.0f, zt, 0.5f, 1.0f, xmr, 0.5f, zmr, 1, 0.5f, xml, 0.5f, zml, 0, 0.5f);
     }
-    uint32_t g_total_count = (uint32_t)g_inds.size();
+    uint32_t g_count = (uint32_t)g_inds.size() - g_start;
 
     uint32_t gvb_sz = (uint32_t)(g_verts.size() * sizeof(Vertex));
     uint32_t gib_sz = (uint32_t)(g_inds.size() * sizeof(uint16_t));
@@ -601,6 +611,12 @@ int main(int argc, char* argv[]) {
 
     auto build_level = [&](const level::LevelData& lvl) {
         SDL_WaitForGPUIdle(device);
+
+        if (grass_instbuf) {
+            SDL_ReleaseGPUBuffer(device, grass_instbuf);
+            grass_instbuf = nullptr;
+        }
+        grass_inst_count = 0;
 
         for (uint32_t id : level_body_ids) phys::phys_destroy_body(id);
         level_body_ids.clear();
@@ -736,14 +752,6 @@ int main(int argc, char* argv[]) {
                     uint32_t bid = phys::phys_create_mesh_shape(phys_verts.data(), vert_count, asset.indices.data(), asset.indices.size());
                     level_body_ids.push_back(bid);
 
-                    // M2.5-16: plantio por vertex paint (replanta a cada rebuild)
-                    if (grass_instbuf) {
-                        SDL_WaitForGPUIdle(device);
-                        SDL_ReleaseGPUBuffer(device, grass_instbuf);
-                        grass_instbuf = nullptr;
-                    }
-                    grass_inst_count = 0;
-
                     std::vector<InstanceData> g_insts;
                     const uint32_t MAX_GRASS = 20000;
 
@@ -754,7 +762,7 @@ int main(int argc, char* argv[]) {
                         seed *= 0x27d4eb2d;
                         seed = seed ^ (seed >> 15);
                         return (float)seed / 4294967296.0f;
-                    };
+                        };
 
                     size_t num_tris = asset.indices.size() / 3;
                     for (size_t t = 0; t < num_tris; ++t) {
@@ -784,19 +792,19 @@ int main(int argc, char* argv[]) {
 
                         float area = 0.5f * glm::length(glm::cross(e1, e2));
                         float expected_tufts = area * grass_density * verdice;
-                        
+
                         uint32_t base_tufts = (uint32_t)expected_tufts;
                         float frac_tufts = expected_tufts - base_tufts;
-                        
+
                         uint32_t tuft_count = base_tufts;
                         if (hash_float((uint32_t)t * 1337) < frac_tufts) tuft_count++;
 
                         for (uint32_t tufo_idx = 0; tufo_idx < tuft_count; ++tufo_idx) {
                             if (g_insts.size() >= MAX_GRASS) break;
-                            
+
                             float r1 = hash_float((uint32_t)t * 73856093 ^ tufo_idx * 19349663);
                             float r2 = hash_float((uint32_t)t * 83492791 ^ tufo_idx * 39916801);
-                            
+
                             float sqrt_r1 = std::sqrt(r1);
                             float u = 1.0f - sqrt_r1;
                             float v = sqrt_r1 * (1.0f - r2);
@@ -804,7 +812,50 @@ int main(int argc, char* argv[]) {
 
                             glm::vec3 pos = u * v0 + v * v1 + w * v2;
                             glm::vec3 inst_color = u * c0 + v * c1 + w * c2;
-                            
+
+                            glm::vec2 g_pos = glm::vec2(pos.x, pos.z) / grass_clump_cell;
+                            int gx = (int)std::floor(g_pos.x);
+                            int gy = (int)std::floor(g_pos.y);
+
+                            float min_d = 999.0f;
+                            glm::vec2 best_c = g_pos;
+                            float clump_hash = 0.0f;
+
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    int cx = gx + dx;
+                                    int cy = gy + dy;
+
+                                    uint32_t s1 = (uint32_t)(cx * 73856093 ^ cy * 19349663);
+                                    s1 = (s1 ^ 61) ^ (s1 >> 16); s1 *= 9; s1 = s1 ^ (s1 >> 4);
+                                    s1 *= 0x27d4eb2d; s1 = s1 ^ (s1 >> 15);
+                                    float hx = (float)s1 / 4294967296.0f;
+
+                                    uint32_t s2 = (uint32_t)(cx * 83492791 ^ cy * 39916801);
+                                    s2 = (s2 ^ 61) ^ (s2 >> 16); s2 *= 9; s2 = s2 ^ (s2 >> 4);
+                                    s2 *= 0x27d4eb2d; s2 = s2 ^ (s2 >> 15);
+                                    float hy = (float)s2 / 4294967296.0f;
+
+                                    glm::vec2 pt = glm::vec2(cx, cy) + glm::vec2(hx, hy);
+                                    float d = glm::length(g_pos - pt);
+                                    if (d < min_d) {
+                                        min_d = d;
+                                        best_c = pt * grass_clump_cell;
+                                        clump_hash = hx;
+                                    }
+                                }
+                            }
+
+                            pos.x = glm::mix(pos.x, best_c.x, grass_clump_pull);
+                            pos.z = glm::mix(pos.z, best_c.y, grass_clump_pull);
+                            // re-projeta y no plano do triangulo (pull horizontal nao flutua/enterra na ladeira)
+                            pos.y = v0.y - (normal.x * (pos.x - v0.x) + normal.z * (pos.z - v0.z)) / normal.y;
+
+                            float tint_shift = (clump_hash - 0.5f) * 0.15f;
+                            inst_color.r = std::clamp(inst_color.r + tint_shift, 0.0f, 1.0f);
+                            inst_color.g = std::clamp(inst_color.g + tint_shift, 0.0f, 1.0f);
+                            inst_color.b = std::clamp(inst_color.b + tint_shift, 0.0f, 1.0f);
+
                             g_insts.push_back({ pos.x, pos.y, pos.z, inst_color.r, inst_color.g, inst_color.b });
                         }
                     }
@@ -822,7 +873,7 @@ int main(int argc, char* argv[]) {
 
                         SDL_GPUTransferBufferCreateInfo g_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, ginst_sz };
                         SDL_GPUTransferBuffer* g_tb = SDL_CreateGPUTransferBuffer(device, &g_tb_info);
-                        
+
                         void* g_map = SDL_MapGPUTransferBuffer(device, g_tb, false);
                         memcpy(g_map, g_insts.data(), ginst_sz);
                         SDL_UnmapGPUTransferBuffer(device, g_tb);
@@ -841,6 +892,7 @@ int main(int argc, char* argv[]) {
                 LoadedAsset la;
                 la.range = { start_idx, (uint32_t)asset.indices.size() };
                 la.tex = nullptr;
+                la.is_terrain = (lvl.has_terrain && mesh_idx == lvl.terrain_mesh_index);
 
                 if (asset.tex_w > 0 && asset.tex_h > 0 && !asset.tex_rgba.empty()) {
                     SDL_GPUTextureCreateInfo asset_tex_info = {};
@@ -1104,7 +1156,6 @@ int main(int argc, char* argv[]) {
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipe_info);
     if (!pipeline) return 1;
 
-    // M2.5-13: Pipeline de Render do Domo Celeste 
     SDL_GPUVertexAttribute sky_attr[1] = {};
     sky_attr[0].location = 0;
     sky_attr[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
@@ -1812,6 +1863,21 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Verdice min", &grass_verdice_min, 0.0f, 0.3f);
         ImGui::SliderFloat("Slope min", &grass_slope_min, 0.0f, 1.0f);
 
+        ImGui::Separator();
+        ImGui::Text("Clump-lite & Vento");
+        ImGui::SliderFloat("Clump Pull", &grass_clump_pull, 0.0f, 1.0f);
+        ImGui::SliderFloat("Clump Cell Size", &grass_clump_cell, 0.5f, 5.0f);
+        ImGui::SliderFloat("Vento: Direcao", &wind::dir_deg, 0.0f, 360.0f);
+        ImGui::SliderFloat("Vento: Forca", &wind::strength, 0.0f, 2.0f);
+
+        if (ImGui::Button("Replantar Grama (ou F5)")) {
+            SDL_Event evt;
+            SDL_zero(evt);
+            evt.type = SDL_EVENT_KEY_DOWN;
+            evt.key.key = SDLK_F5;
+            SDL_PushEvent(&evt);
+        }
+
         const char* modos_pixel[] = { "Divisor", "Altura fixa" };
         if (ImGui::Combo("Modo pixel", &pixel_mode, modos_pixel, 2)) {
             resize_needed = true;
@@ -2272,52 +2338,34 @@ int main(int argc, char* argv[]) {
 
             ObjIdParams obj_id;
 
+            int mesh_id_counter = 0;
+            for (const auto& a : level_assets) {
+                if (a.is_terrain) {
+                    obj_id.id = 6.0f / 255.0f; // ID estrito para terreno
+                }
+                else {
+                    obj_id.id = (float)(10 + (mesh_id_counter % 240)) / 255.0f;
+                }
+                obj_id.pad[0] = 0; obj_id.pad[1] = 0; obj_id.pad[2] = 0;
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
+
+                SDL_GPUTextureSamplerBinding asset_samp_bind = { a.tex ? a.tex : fallback_tex, sampler };
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, &asset_samp_bind, 1);
+                SDL_DrawGPUIndexedPrimitives(scene_pass, a.range.index_count, 1, a.range.first_index, 0, 0);
+                mesh_id_counter++;
+            }
+
             for (size_t i = 0; i < box_ranges.size(); ++i) {
-                obj_id.id = (float)(10 + (i % 240)) / 255.0f;
+                obj_id.id = (float)(10 + (mesh_id_counter % 240)) / 255.0f;
                 obj_id.pad[0] = 0; obj_id.pad[1] = 0; obj_id.pad[2] = 0;
                 SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
                 SDL_DrawGPUIndexedPrimitives(scene_pass, box_ranges[i].index_count, 1, box_ranges[i].first_index, 0, 0);
+                mesh_id_counter++;
             }
 
             obj_id.id = 1.0f / 255.0f;
             SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
             SDL_DrawGPUIndexedPrimitives(scene_pass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
-
-            for (const auto& a : level_assets) {
-                SDL_GPUTextureSamplerBinding asset_samp_bind = { a.tex ? a.tex : fallback_tex, sampler };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, &asset_samp_bind, 1);
-                SDL_DrawGPUIndexedPrimitives(scene_pass, a.range.index_count, 1, a.range.first_index, 0, 0);
-            }
-
-            if (draw_grass && grass_inst_count > 0 && grass_instbuf) {
-                SDL_BindGPUGraphicsPipeline(scene_pass, grass_pipeline);
-                SDL_GPUTextureSamplerBinding g_samp = { active_grass_tex ? active_grass_tex : fallback_tex, sampler };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, &g_samp, 1);
-
-                SDL_GPUBufferBinding g_vbs[2] = { { grass_vbuf, 0 }, { grass_instbuf, 0 } };
-                SDL_BindGPUVertexBuffers(scene_pass, 0, g_vbs, 2);
-                SDL_GPUBufferBinding g_ib = { grass_ibuf, 0 };
-                SDL_BindGPUIndexBuffer(scene_pass, &g_ib, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-
-                GrassVSParams gvs;
-                memcpy(gvs.mvp, glm::value_ptr(mvp), 64);
-                gvs.cam_pos[0] = cam_pos.x; gvs.cam_pos[1] = cam_pos.y; gvs.cam_pos[2] = cam_pos.z;
-                gvs.scale = grass_scale;
-
-                SDL_PushGPUVertexUniformData(cmd_buffer, 0, &gvs, sizeof(GrassVSParams));
-                SDL_DrawGPUIndexedPrimitives(scene_pass, g_total_count, grass_inst_count, 0, 0, 0);
-
-                // Restaura estado para o restante dos renders da fase
-                SDL_BindGPUGraphicsPipeline(scene_pass, pipeline);
-                SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
-                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sun_params, sizeof(SunParams));
-                SDL_GPUBufferBinding vb_r = { vertex_buffer, 0 };
-                SDL_BindGPUVertexBuffers(scene_pass, 0, &vb_r, 1);
-                SDL_GPUBufferBinding ib_r = { index_buffer, 0 };
-                SDL_BindGPUIndexBuffer(scene_pass, &ib_r, SDL_GPU_INDEXELEMENTSIZE_16BIT);
-                SDL_GPUBufferBinding in_r = { neutral_instance_buffer, 0 };
-                SDL_BindGPUVertexBuffers(scene_pass, 1, &in_r, 1);
-            }
 
             SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
 
@@ -2354,6 +2402,42 @@ int main(int argc, char* argv[]) {
                     SDL_BindGPUFragmentSamplers(scene_pass, 0, &npc_samp_bind, 1);
                     SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_npc.index_count, 1, cubo_npc.first_index, 0, i);
                 }
+            }
+
+            if (draw_grass && grass_inst_count > 0 && grass_instbuf) {
+                SDL_BindGPUGraphicsPipeline(scene_pass, grass_pipeline);
+                SDL_GPUTextureSamplerBinding g_samp = { active_grass_tex ? active_grass_tex : fallback_tex, sampler };
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, &g_samp, 1);
+
+                SDL_GPUBufferBinding g_vbs[2] = { { grass_vbuf, 0 }, { grass_instbuf, 0 } };
+                SDL_BindGPUVertexBuffers(scene_pass, 0, g_vbs, 2);
+                SDL_GPUBufferBinding g_ib = { grass_ibuf, 0 };
+                SDL_BindGPUIndexBuffer(scene_pass, &g_ib, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+                GrassVSParams gvs;
+                memcpy(gvs.mvp, glm::value_ptr(mvp), 64);
+                gvs.cam_pos[0] = cam_pos.x; gvs.cam_pos[1] = cam_pos.y; gvs.cam_pos[2] = cam_pos.z;
+                gvs.scale = grass_scale;
+
+                float w_rad = glm::radians(wind::dir_deg);
+                gvs.wind_dir[0] = cos(w_rad);
+                gvs.wind_dir[1] = sin(w_rad);
+                gvs.wind_strength = wind::strength;
+                gvs.time = (float)(sim_tick * DT);
+
+                SDL_PushGPUVertexUniformData(cmd_buffer, 0, &gvs, sizeof(GrassVSParams));
+                SDL_DrawGPUIndexedPrimitives(scene_pass, g_count, grass_inst_count, 0, 0, 0);
+
+                // Restaura estado para o restante dos renders da fase
+                SDL_BindGPUGraphicsPipeline(scene_pass, pipeline);
+                SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sun_params, sizeof(SunParams));
+                SDL_GPUBufferBinding vb_r = { vertex_buffer, 0 };
+                SDL_BindGPUVertexBuffers(scene_pass, 0, &vb_r, 1);
+                SDL_GPUBufferBinding ib_r = { index_buffer, 0 };
+                SDL_BindGPUIndexBuffer(scene_pass, &ib_r, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+                SDL_GPUBufferBinding in_r = { neutral_instance_buffer, 0 };
+                SDL_BindGPUVertexBuffers(scene_pass, 1, &in_r, 1);
             }
 
             SDL_EndGPURenderPass(scene_pass);

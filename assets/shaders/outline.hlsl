@@ -1,6 +1,3 @@
-// outline.hlsl - M2.5-8 + patches: crease unilateral (1px) e screen blend
-// Passe fullscreen: le scene_color + normal_id + depth, escreve composite.
-
 struct PSInput
 {
     float4 pos : SV_Position;
@@ -37,14 +34,12 @@ cbuffer OutlineBlock : register(b0, space3)
 
 float4 PSMain(PSInput input) : SV_Target0
 {
-    // A. Extracao central
     float4 c0 = tex_color.Sample(samp0, input.uv);
     float4 nid0 = tex_norm_id.Sample(samp1, input.uv);
     float3 N0 = nid0.xyz * 2.0f - 1.0f;
     float id0 = nid0.a;
     float d0 = tex_depth.Sample(samp2, input.uv).r;
 
-    // B. Vizinhos cardeais (1 texel)
     float2 uvL = input.uv - float2(texel.x, 0.0f);
     float2 uvR = input.uv + float2(texel.x, 0.0f);
     float2 uvT = input.uv - float2(0.0f, texel.y);
@@ -70,12 +65,9 @@ float4 PSMain(PSInput input) : SV_Target0
     float3 cT = tex_color.Sample(samp0, uvT).rgb;
     float3 cB = tex_color.Sample(samp0, uvB).rgb;
 
-    // C. Mascara de angulo rasante (ameye) - limiar modulado por
-    //    profundidade e por NdotV: mata o ruido de borda no chao raso.
     float ndv = saturate(abs(dot(N0, -cam_fwd)));
     float limiar = z_cutoff * max(d0, 1e-4f) * (1.0f + grazing_scale * (1.0f - ndv));
 
-    // D. Silhueta (borda externa, unilateral por construcao)
     float d_max = max(max(dL, dR), max(dT, dB));
     bool depth_edge = (d_max - d0) > limiar;
 
@@ -105,9 +97,6 @@ float4 PSMain(PSInput input) : SV_Target0
 
     cor_silhueta *= line_darken;
 
-    // E. Crease (borda interna) - directional contrast + UNILATERAL:
-    //    detecta como sempre (imune a curvas), mas so desenha no lado
-    //    da aresta mais proximo da camera -> linha de 1px.
     float diffT = 1.0f - dot(N0, nT);
     float diffB = 1.0f - dot(N0, nB);
     float diffL = 1.0f - dot(N0, nL);
@@ -116,9 +105,6 @@ float4 PSMain(PSInput input) : SV_Target0
     float cx = abs(diffL - diffR);
     float cy = abs(diffT - diffB);
 
-    // Bilateral (2px) com COR UNIFORME: os dois lados da aresta usam o
-    // mesmo par {face propria, face do outro lado} e clareiam o mais
-    // claro do par -> mesma cor nos dois pixels.
     float creaseX = smoothstep(crease_low, crease_high, cx);
     float creaseY = smoothstep(crease_low, crease_high, cy);
     float crease = max(creaseX, creaseY);
@@ -129,13 +115,19 @@ float4 PSMain(PSInput input) : SV_Target0
     float3 base_crease = max(c0.rgb, c_cross);
 
     if (sil)
-        crease = 0.0f; // silhueta tem prioridade sobre crease
+        crease = 0.0f;
 
-    // Screen blend: clareia ate superficies ja claras
-    // (brighten 1.0 = neutro; 2.0 = branco puro)
+    // G3: OUTLINE SÓ-EM-OBJETOS
+    // Se o pixel central pertence à grama (5/255) ou ao terreno (6/255), bypass global do trace.
+    bool is_grass_or_terrain = (abs(id0 - 5.0f / 255.0f) <= id_thresh) ||
+                               (abs(id0 - 6.0f / 255.0f) <= id_thresh);
+    if (is_grass_or_terrain)
+    {
+        sil = false;
+        crease = 0.0f;
+    }
+
     float3 cor_crease = min(base_crease * crease_brighten, 1.0f);
-
-    // F. Composicao final
     float3 final_color = sil ? cor_silhueta : lerp(c0.rgb, cor_crease, crease);
 
     return float4(final_color, c0.a);
