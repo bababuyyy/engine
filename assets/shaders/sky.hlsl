@@ -23,6 +23,7 @@ PSInput VSMain(VSInput input)
     return output;
 }
 
+// M2.5-19D: Repack com as novas constantes de estilizacao (+ cloud_shadow_color)
 cbuffer SkyBlock : register(b0, space3)
 {
     float3 to_sun;
@@ -53,10 +54,12 @@ cbuffer SkyBlock : register(b0, space3)
     float sun_ambient;
     float cloud_type;
     float erosao_str;
-    float pad_a;
-    float pad_b;
+    float cloud_silhouette;
+    float cloud_bands;
     float3 sky_ambient_color;
-    float pad_c;
+    float pad_a;
+    float3 cloud_shadow_color;
+    float pad_b;
 };
 
 Texture3D<float> cloud_noise : register(t1, space2);
@@ -76,7 +79,7 @@ float vnoise2(float2 pp)
 {
     float2 i = floor(pp);
     float2 f = frac(pp);
-    float2 u = f * f * (3.0f - 2.0f * f);
+    float2 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
     float a = hash12w(i);
     float b = hash12w(i + float2(1, 0));
     float c = hash12w(i + float2(0, 1));
@@ -85,7 +88,8 @@ float vnoise2(float2 pp)
 }
 float wfbm(float2 pp)
 {
-    return vnoise2(pp) * 0.66f + vnoise2(pp * 2.7f) * 0.34f;
+    float2 pr = float2(pp.x * 0.8f - pp.y * 0.6f, pp.x * 0.6f + pp.y * 0.8f);
+    return vnoise2(pp) * 0.66f + vnoise2(pr * 2.7f) * 0.34f;
 }
 
 static const float bayer[16] =
@@ -99,7 +103,7 @@ static const float bayer[16] =
 float hg_phase(float cos_theta, float g)
 {
     float g2 = g * g;
-    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 12.5663706f);
+    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 3.14159265f);
 }
 
 float get_height_fraction(float4 grad, float hf)
@@ -117,13 +121,10 @@ PSOutput PSMain(PSInput input)
     
     float cos_sun = dot(dir, to_sun);
     
-    // M2.5-20: Sol Digno (Limb Darkening + Duplo Halo)
-    // O nucleo fica forte, mas queima gradualmente para a borda.
     float sun_core = smoothstep(0.9985f, 0.9995f, cos_sun);
     sun_core = pow(sun_core, 0.6f);
     float3 sun_disk = sun_color * sun_core * 0.75f;
     
-    // Halo composto: um estrito e denso; um largo e esfumacado que reage perto do horizonte.
     float angle = acos(saturate(cos_sun));
     float halo_str = lerp(1.0f, 2.5f, 1.0f - saturate(dir.y * 4.0f));
     float3 sun_halo = sun_color * exp(-angle / 0.04f) * 0.5f +
@@ -131,16 +132,13 @@ PSOutput PSMain(PSInput input)
     
     float3 astro = sun_disk + sun_halo;
     
-    // Fase global pre-calculada
     float phase_val = lerp(hg_phase(cos_sun, hg_g_frontal), hg_phase(cos_sun, -0.2f), 0.5f);
     float sun_angular_gate = saturate(-cos_sun);
     
-    // Raymarch Volumetrico c/ Acumulacao de Radiance
     float T = 1.0f;
     float3 radiance = float3(0.0f, 0.0f, 0.0f);
     float cloud_dist = 9999.0f;
     
-    // Gradientes Baseados no Tipo
     float4 grad_stratus = float4(0.0f, 0.07f, 0.08f, 0.15f);
     float4 grad_cumulus = float4(0.0f, 0.08f, 0.75f, 0.98f);
     float4 grad_nimbus = float4(0.0f, 0.06f, 0.88f, 1.0f);
@@ -193,6 +191,9 @@ PSOutput PSMain(PSInput input)
                 
                 float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
                 float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
+                float3 p_v = float3(p.x * 0.70f - p.z * 0.714f, p.y * 1.13f, p.x * 0.714f + p.z * 0.70f);
+                float3 uvw2 = frac((p_v + float3(wdisp.x, 0.0f, wdisp.y)) * escala * 0.37f);
+                noise_val = noise_val * 0.62f + cloud_noise.SampleLevel(cloud_samp, uvw2, 0).r * 0.38f; // variedade: quebra o periodo do tile
                 float fade = 1.0f - smoothstep(cap * 0.8f, cap, t - t_min);
                 
                 float wcov = saturate((wfbm((p.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
@@ -201,7 +202,7 @@ PSOutput PSMain(PSInput input)
                 float prof = get_height_fraction(active_grad, hf);
                 
                 float d_base = noise_val * prof - (1.0f - cobertura * wcov);
-                float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf);
+                float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * saturate(t / cap)); // erosao esmaece longe: mata os pontinhos
                 float d_raw = saturate(d_base - d_erosao);
                 
                 d_raw *= lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf));
@@ -233,10 +234,19 @@ PSOutput PSMain(PSInput input)
                     float powder = 1.0f - exp(-2.0f * dens_sol);
                     luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
                     
-                    float3 ambient_term = sky_ambient_color * sun_ambient * lerp(0.5f, 1.0f, hf);
-                    float3 direct_term = luz * phase_val * sun_color * sun_intensity;
+                    // M2.5-19D: Bandas de Luz
+                    if (cloud_bands >= 2.0f)
+                    {
+                        luz = (floor(luz * cloud_bands) + smoothstep(0.35f, 0.65f, frac(luz * cloud_bands))) / cloud_bands;
+                    }
                     
-                    radiance += T * d * step_sz * (cloud_color * (ambient_term + direct_term));
+                    // M2.5-19D: Paleta propria de sombra
+                    float3 base_ambient = lerp(cloud_shadow_color, sky_ambient_color, 0.4f);
+                    float3 ambient_term = base_ambient * sun_ambient * lerp(0.72f, 1.0f, hf); // piso ambiente: bases luminosas
+                    
+                    float3 direct_term = (luz * phase_val + 0.12f) * sun_color * sun_intensity; // piso multi-scatter: fundo nunca morto
+                    
+                    radiance += T * (1.0f - exp(-d * step_sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
                     T *= exp(-d * step_sz * absorcao);
                 }
                 
@@ -250,10 +260,14 @@ PSOutput PSMain(PSInput input)
         }
     }
     
-    float fog_air = saturate(cloud_dist / 900.0f) * 0.65f;
-    float3 c_col = lerp(cloud_color, horizon_color, fog_air);
+    // M2.5-19D: Corte Desenhado da Silhueta 
+    float alpha = 1.0f - T;
+    alpha = smoothstep(cloud_silhouette, cloud_silhouette + 0.12f, alpha);
+    T = 1.0f - alpha;
     
-    float3 final_color = lerp(radiance, horizon_color * (1.0f - T), fog_air) + T * (ceu + astro); // radiance E a nuvem (termo chapado morto, 5a)
+    float fog_air = saturate(cloud_dist / 900.0f) * 0.65f;
+    
+    float3 final_color = lerp(radiance, horizon_color * (1.0f - T), fog_air) + T * (ceu + astro);
     
     PSOutput output;
     output.color = float4(final_color, 1.0f);

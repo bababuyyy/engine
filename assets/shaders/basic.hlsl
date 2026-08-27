@@ -82,7 +82,7 @@ float vnoise2(float2 pp)
 {
     float2 i = floor(pp);
     float2 f = frac(pp);
-    float2 u = f * f * (3.0f - 2.0f * f);
+    float2 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f); // fade quintico: a grade some
     float a = hash12w(i);
     float b = hash12w(i + float2(1, 0));
     float c = hash12w(i + float2(0, 1));
@@ -91,7 +91,8 @@ float vnoise2(float2 pp)
 }
 float wfbm(float2 pp)
 {
-    return vnoise2(pp) * 0.66f + vnoise2(pp * 2.7f) * 0.34f;
+    float2 pr = float2(pp.x * 0.8f - pp.y * 0.6f, pp.x * 0.6f + pp.y * 0.8f); // 2a octava rotacionada
+    return vnoise2(pp) * 0.66f + vnoise2(pr * 2.7f) * 0.34f;
 }
 
 PSOutput PSMain(PSInput input)

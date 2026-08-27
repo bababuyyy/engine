@@ -134,8 +134,9 @@ struct SkyParams {
     float densidade;        float escala;     float h_min;      float h_max;
     float cap;              float passos;     float absorcao;   float hg_g_frontal;
     float powder_str;       float sun_intensity; float sun_ambient; float cloud_type;
-    float erosao_str;       float pad_a;      float pad_b;      float pad_c;
-    float sky_ambient_color[3];               float pad_d;
+    float erosao_str;       float cloud_silhouette; float cloud_bands; float pad_a;
+    float sky_ambient_color[3];               float pad_b;
+    float cloud_shadow_color[3];              float pad_c;
 };
 
 struct ObjIdParams {
@@ -205,6 +206,175 @@ SDL_GPUBuffer* grass_instbuf = nullptr;
 
 std::vector<float> terrain_phys_verts;
 std::vector<uint16_t> terrain_indices;
+
+// Variaveis de Tuning extraidas para escopo global para acesso no Parser
+bool draw_sky = true;
+float fog_density = 0.006f;
+
+bool draw_clouds = true;
+float cloud_cobertura = 0.45f;
+float cloud_densidade = 3.0f;
+float cloud_escala = 0.005f;
+float cloud_speed = 1.0f;
+int cloud_passos = 16;
+float cloud_h_min = 120.0f;
+float cloud_h_max = 220.0f;
+float cloud_cap = 600.0f;
+float cloud_absorcao = 1.0f;
+float cloud_hg_g_frontal = 0.8f;
+float cloud_powder_str = 0.5f;
+float shadow_str = 0.55f;
+
+float cloud_type_blend = 0.5f;
+float cloud_erosao_str = 0.4f;
+float cloud_silhouette = 0.18f;
+float cloud_bands = 3.0f;
+
+bool sol_automatico = true;
+float arco_inclinacao = 25.0f;
+float sun_yaw = 45.0f;
+float sun_pitch = -45.0f;
+float sun_ambient = 0.55f;
+float sun_intensity = 1.2f;
+
+float ray_strength = 0.6f;
+float ray_decay = 0.97f;
+int ray_samples = 48;
+
+float out_z_cutoff = 0.005f;
+float out_grazing_scale = 4.0f;
+float out_crease_low = 0.05f;
+float out_crease_high = 0.3f;
+float out_line_darken = 0.35f;
+float out_crease_brighten = 1.25f;
+
+bool draw_grass = true;
+float grass_scale = 1.0f;
+
+// Lambdas de persistencia
+auto save_tuning = []() {
+    std::filesystem::create_directories("config");
+    std::ofstream f("config/tuning.ini");
+    if (!f) {
+        SDL_Log("FALHA: Nao foi possivel salvar config/tuning.ini");
+        return;
+    }
+
+    f << "wind_dir_deg=" << wind::dir_deg << "\n";
+    f << "wind_strength=" << wind::strength << "\n";
+    f << "grass_clump_pull=" << grass_clump_pull << "\n";
+    f << "grass_clump_cell=" << grass_clump_cell << "\n";
+    f << "grass_density=" << grass_density << "\n";
+    f << "grass_verdice_min=" << grass_verdice_min << "\n";
+    f << "grass_slope_min=" << grass_slope_min << "\n";
+    f << "grass_border_sharp=" << grass_border_sharp << "\n";
+    f << "grass_scale=" << grass_scale << "\n";
+    f << "draw_grass=" << (draw_grass ? "1" : "0") << "\n";
+    f << "draw_sky=" << (draw_sky ? "1" : "0") << "\n";
+    f << "fog_density=" << fog_density << "\n";
+    f << "draw_clouds=" << (draw_clouds ? "1" : "0") << "\n";
+    f << "cloud_cobertura=" << cloud_cobertura << "\n";
+    f << "cloud_densidade=" << cloud_densidade << "\n";
+    f << "cloud_escala=" << cloud_escala << "\n";
+    f << "cloud_speed=" << cloud_speed << "\n";
+    f << "cloud_passos=" << cloud_passos << "\n";
+    f << "cloud_h_min=" << cloud_h_min << "\n";
+    f << "cloud_h_max=" << cloud_h_max << "\n";
+    f << "cloud_cap=" << cloud_cap << "\n";
+    f << "cloud_absorcao=" << cloud_absorcao << "\n";
+    f << "cloud_hg_g_frontal=" << cloud_hg_g_frontal << "\n";
+    f << "cloud_powder_str=" << cloud_powder_str << "\n";
+    f << "shadow_str=" << shadow_str << "\n";
+    f << "cloud_type_blend=" << cloud_type_blend << "\n";
+    f << "cloud_erosao_str=" << cloud_erosao_str << "\n";
+    f << "cloud_silhouette=" << cloud_silhouette << "\n";
+    f << "cloud_bands=" << cloud_bands << "\n";
+    f << "sol_automatico=" << (sol_automatico ? "1" : "0") << "\n";
+    f << "arco_inclinacao=" << arco_inclinacao << "\n";
+    f << "sun_yaw=" << sun_yaw << "\n";
+    f << "sun_pitch=" << sun_pitch << "\n";
+    f << "sun_ambient=" << sun_ambient << "\n";
+    f << "sun_intensity=" << sun_intensity << "\n";
+    f << "ray_strength=" << ray_strength << "\n";
+    f << "ray_decay=" << ray_decay << "\n";
+    f << "ray_samples=" << ray_samples << "\n";
+    f << "out_z_cutoff=" << out_z_cutoff << "\n";
+    f << "out_grazing_scale=" << out_grazing_scale << "\n";
+    f << "out_crease_low=" << out_crease_low << "\n";
+    f << "out_crease_high=" << out_crease_high << "\n";
+    f << "out_line_darken=" << out_line_darken << "\n";
+    f << "out_crease_brighten=" << out_crease_brighten << "\n";
+    SDL_Log("Tuning salvo com sucesso em config/tuning.ini");
+    };
+
+auto load_tuning = []() {
+    std::ifstream f("config/tuning.ini");
+    if (!f) {
+        SDL_Log("tuning.ini nao encontrado. Usando defaults.");
+        return;
+    }
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto delim = line.find('=');
+        if (delim == std::string::npos) continue;
+
+        std::string key = line.substr(0, delim);
+        std::string val = line.substr(delim + 1);
+
+        try {
+            if (key == "wind_dir_deg") wind::dir_deg = std::stof(val);
+            else if (key == "wind_strength") wind::strength = std::stof(val);
+            else if (key == "grass_clump_pull") grass_clump_pull = std::stof(val);
+            else if (key == "grass_clump_cell") grass_clump_cell = std::stof(val);
+            else if (key == "grass_density") grass_density = std::stof(val);
+            else if (key == "grass_verdice_min") grass_verdice_min = std::stof(val);
+            else if (key == "grass_slope_min") grass_slope_min = std::stof(val);
+            else if (key == "grass_border_sharp") grass_border_sharp = std::stof(val);
+            else if (key == "grass_scale") grass_scale = std::stof(val);
+            else if (key == "draw_grass") draw_grass = (val == "1");
+            else if (key == "draw_sky") draw_sky = (val == "1");
+            else if (key == "fog_density") fog_density = std::stof(val);
+            else if (key == "draw_clouds") draw_clouds = (val == "1");
+            else if (key == "cloud_cobertura") cloud_cobertura = std::stof(val);
+            else if (key == "cloud_densidade") cloud_densidade = std::stof(val);
+            else if (key == "cloud_escala") cloud_escala = std::stof(val);
+            else if (key == "cloud_speed") cloud_speed = std::stof(val);
+            else if (key == "cloud_passos") cloud_passos = std::stoi(val);
+            else if (key == "cloud_h_min") cloud_h_min = std::stof(val);
+            else if (key == "cloud_h_max") cloud_h_max = std::stof(val);
+            else if (key == "cloud_cap") cloud_cap = std::stof(val);
+            else if (key == "cloud_absorcao") cloud_absorcao = std::stof(val);
+            else if (key == "cloud_hg_g_frontal") cloud_hg_g_frontal = std::stof(val);
+            else if (key == "cloud_powder_str") cloud_powder_str = std::stof(val);
+            else if (key == "shadow_str") shadow_str = std::stof(val);
+            else if (key == "cloud_type_blend") cloud_type_blend = std::stof(val);
+            else if (key == "cloud_erosao_str") cloud_erosao_str = std::stof(val);
+            else if (key == "cloud_silhouette") cloud_silhouette = std::stof(val);
+            else if (key == "cloud_bands") cloud_bands = std::stof(val);
+            else if (key == "sol_automatico") sol_automatico = (val == "1");
+            else if (key == "arco_inclinacao") arco_inclinacao = std::stof(val);
+            else if (key == "sun_yaw") sun_yaw = std::stof(val);
+            else if (key == "sun_pitch") sun_pitch = std::stof(val);
+            else if (key == "sun_ambient") sun_ambient = std::stof(val);
+            else if (key == "sun_intensity") sun_intensity = std::stof(val);
+            else if (key == "ray_strength") ray_strength = std::stof(val);
+            else if (key == "ray_decay") ray_decay = std::stof(val);
+            else if (key == "ray_samples") ray_samples = std::stoi(val);
+            else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
+            else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
+            else if (key == "out_crease_low") out_crease_low = std::stof(val);
+            else if (key == "out_crease_high") out_crease_high = std::stof(val);
+            else if (key == "out_line_darken") out_line_darken = std::stof(val);
+            else if (key == "out_crease_brighten") out_crease_brighten = std::stof(val);
+        }
+        catch (...) {
+            SDL_Log("Aviso: Falha ao fazer o parse da chave %s no tuning.ini", key.c_str());
+        }
+    }
+    SDL_Log("Tuning carregado de config/tuning.ini");
+    };
 
 int main(int argc, char* argv[]) {
     (void)argc;
@@ -633,6 +803,9 @@ int main(int argc, char* argv[]) {
     app_log.add("SkyParams alinhado: %zu bytes", sizeof(SkyParams));
     app_log.add("SunParams alinhado: %zu bytes", sizeof(SunParams));
 
+    // M2.5-21: Leitura silenciosa dos parametros antes da simulacao
+    load_tuning();
+
     social::Relations rels;
     {
         std::ifstream f(std::string(SOCIAL_DIR) + "relacoes.txt");
@@ -679,7 +852,7 @@ int main(int argc, char* argv[]) {
         if (terrain_indices.empty()) return;
 
         std::vector<InstanceData> g_insts;
-        const uint32_t MAX_GRASS = 120000;
+        const uint32_t MAX_GRASS = 50000;
         // Pre-escala justa: se o pedido total estoura o cap, TODOS afinam por igual (fim da fome por ordem)
         float fair_total = 0.0f;
         for (size_t ft = 0; ft < terrain_indices.size() / 3; ++ft) {
@@ -1363,53 +1536,13 @@ int main(int argc, char* argv[]) {
     bool draw_crowd = true;
     bool manual_sun = false;
 
-    bool sol_automatico = true;
-    float arco_inclinacao = 25.0f;
-    float sun_yaw = 45.0f;
-    float sun_pitch = -45.0f;
-    float sun_ambient = 0.35f;
     float sun_color_arr[3] = { 1.0f, 1.0f, 1.0f };
-    float sun_intensity = 1.0f;
-
-    bool draw_sky = true;
-    float fog_density = 0.006f;
-
-    // M2.5-20: Parametros Screen-Space God Rays
-    float ray_strength = 0.6f;
-    float ray_decay = 0.97f;
-    int   ray_samples = 48;
-
-    // M2.5-19A: Parametros interativos do volume
-    bool draw_clouds = true;
-    float cloud_cobertura = 0.45f;
-    float cloud_densidade = 3.0f;
-    float cloud_escala = 0.005f;
-    float cloud_speed = 1.0f;
-    int cloud_passos = 16;
-    float cloud_h_min = 120.0f;
-    float cloud_h_max = 220.0f;
-    float cloud_cap = 600.0f;
-    float cloud_absorcao = 1.0f;
-    float cloud_hg_g_frontal = 0.8f;
-    float cloud_powder_str = 0.5f;
-    float shadow_str = 0.55f;
-
-    // M2.5-19C: Cloud Tuning
-    float cloud_type_blend = 0.5f;
-    float cloud_erosao_str = 0.4f;
 
     int view_mode = 0;
     const char* view_modes[] = { "Final", "Normais+ID", "Sem outline" };
 
     int toon_cuts = 3;
     float toon_soft = 1.0f;
-
-    float out_z_cutoff = 0.005f;
-    float out_grazing_scale = 4.0f;
-    float out_crease_low = 0.05f;
-    float out_crease_high = 0.3f;
-    float out_line_darken = 0.35f;
-    float out_crease_brighten = 1.25f;
 
     constexpr uint64_t SIM_HZ = 60;
     constexpr double DT = 1.0 / 60.0;
@@ -1946,6 +2079,18 @@ int main(int argc, char* argv[]) {
         ImGui::NewFrame();
 
         ImGui::Begin("Tempo");
+
+        // M2.5-21: Controle de Persistencia Tuning
+        if (ImGui::Button("Salvar Config")) {
+            save_tuning();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Recarregar")) {
+            load_tuning();
+            replant_grass(); // Reflete imediatamente mudancas nos tufos (densidade, etc)
+        }
+        ImGui::Separator();
+
         if (ImGui::SliderInt("Threads", &sim_threads, 1, max_hardware_threads)) {
             app_log.add("Poder de processamento ajustado para %d threads.", sim_threads);
         }
@@ -1982,8 +2127,6 @@ int main(int argc, char* argv[]) {
         ImGui::Checkbox("Multidao", &draw_crowd);
         ImGui::SameLine();
 
-        static bool draw_grass = true;
-        static float grass_scale = 1.0f;
         ImGui::Checkbox("Grama", &draw_grass);
         ImGui::SliderFloat("Escala do tufo", &grass_scale, 0.3f, 2.0f);
         ImGui::SliderFloat("Densidade", &grass_density, 0.0f, 30.0f);
@@ -2154,6 +2297,8 @@ int main(int argc, char* argv[]) {
         ImGui::Checkbox("Renderizar Nuvens", &draw_clouds);
         ImGui::SliderFloat("Tipo de Nuvem", &cloud_type_blend, 0.0f, 1.0f, "Stratus -> Cumulonimbus");
         ImGui::SliderFloat("Erosao de Topo", &cloud_erosao_str, 0.0f, 1.0f);
+        ImGui::SliderFloat("Silhueta", &cloud_silhouette, 0.0f, 0.5f);
+        ImGui::SliderFloat("Bandas de luz", &cloud_bands, 1.0f, 5.0f);
         ImGui::SliderFloat("Cobertura", &cloud_cobertura, 0.0f, 1.0f);
         ImGui::SliderFloat("Densidade Volume", &cloud_densidade, 0.5f, 8.0f);
         ImGui::SliderFloat("Escala do Ruido", &cloud_escala, 0.001f, 0.02f, "%.4f");
@@ -2395,8 +2540,13 @@ int main(int argc, char* argv[]) {
             glm::vec3 c_sky_amb_sunset(0.85f, 0.60f, 0.70f);
             glm::vec3 c_sky_amb_night(0.02f, 0.03f, 0.08f);
 
+            glm::vec3 c_cloud_shad_day(0.55f, 0.60f, 0.75f); // Azul lavanda opaco
+            glm::vec3 c_cloud_shad_sunset(0.50f, 0.35f, 0.40f); // Roxo quente
+            glm::vec3 c_cloud_shad_night(0.01f, 0.01f, 0.04f); // Azul escuro profundo
+
             glm::vec3 effective_cloud_color = c_cloud_day;
             glm::vec3 effective_sky_amb = c_sky_amb_day;
+            glm::vec3 effective_cloud_shad = c_cloud_shad_day;
 
             if (sol_automatico) {
                 auto saturate = [](float x) { return std::max(0.0f, std::min(1.0f, x)); };
@@ -2406,6 +2556,7 @@ int main(int argc, char* argv[]) {
 
                 effective_cloud_color = day_w * c_cloud_day + sunset_w * c_cloud_sunset + night_w * c_cloud_night;
                 effective_sky_amb = day_w * c_sky_amb_day + sunset_w * c_sky_amb_sunset + night_w * c_sky_amb_night;
+                effective_cloud_shad = day_w * c_cloud_shad_day + sunset_w * c_cloud_shad_sunset + night_w * c_cloud_shad_night;
             }
 
             SkyParams sky_params;
@@ -2454,18 +2605,22 @@ int main(int argc, char* argv[]) {
             sky_params.powder_str = cloud_powder_str;
             sky_params.sun_intensity = effective_intensity;
             sky_params.sun_ambient = effective_ambient;
-
-            // M2.5-19C: Aditivos de Nuvem Dupla e Type/Erosion
             sky_params.cloud_type = cloud_type_blend;
             sky_params.erosao_str = cloud_erosao_str;
+
+            sky_params.cloud_silhouette = cloud_silhouette;
+            sky_params.cloud_bands = cloud_bands;
             sky_params.pad_a = 0.0f;
-            sky_params.pad_b = 0.0f;
-            sky_params.pad_c = 0.0f;
 
             sky_params.sky_ambient_color[0] = effective_sky_amb.r;
             sky_params.sky_ambient_color[1] = effective_sky_amb.g;
             sky_params.sky_ambient_color[2] = effective_sky_amb.b;
-            sky_params.pad_d = 0.0f;
+            sky_params.pad_b = 0.0f;
+
+            sky_params.cloud_shadow_color[0] = effective_cloud_shad.r;
+            sky_params.cloud_shadow_color[1] = effective_cloud_shad.g;
+            sky_params.cloud_shadow_color[2] = effective_cloud_shad.b;
+            sky_params.pad_c = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
