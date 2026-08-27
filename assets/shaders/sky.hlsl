@@ -23,7 +23,6 @@ PSInput VSMain(VSInput input)
     return output;
 }
 
-// M2.5-19D: Repack com as novas constantes de estilizacao (+ cloud_shadow_color)
 cbuffer SkyBlock : register(b0, space3)
 {
     float3 to_sun;
@@ -57,12 +56,13 @@ cbuffer SkyBlock : register(b0, space3)
     float cloud_silhouette;
     float cloud_bands;
     float3 sky_ambient_color;
-    float pad_a;
+    float detail_str; // M2.5-24C: Forca do detalhe de borda
     float3 cloud_shadow_color;
-    float pad_b;
+    float curl_str; // M2.5-24C: Forca da distorcao do curl noise
 };
 
 Texture3D<float> cloud_noise : register(t1, space2);
+Texture3D<float> cloud_detail : register(t2, space2); // M2.5-24C: Swiss Cheese Detail 32^3
 SamplerState cloud_samp : register(s1, space2);
 
 struct PSOutput
@@ -75,6 +75,7 @@ float hash12w(float2 pp)
 {
     return frac(sin(dot(pp, float2(127.1f, 311.7f))) * 43758.5453f);
 }
+
 float vnoise2(float2 pp)
 {
     float2 i = floor(pp);
@@ -86,6 +87,7 @@ float vnoise2(float2 pp)
     float dd = hash12w(i + float2(1, 1));
     return lerp(lerp(a, b, u.x), lerp(c, dd, u.x), u.y);
 }
+
 float wfbm(float2 pp)
 {
     float2 pr = float2(pp.x * 0.8f - pp.y * 0.6f, pp.x * 0.6f + pp.y * 0.8f);
@@ -103,7 +105,7 @@ static const float bayer[16] =
 float hg_phase(float cos_theta, float g)
 {
     float g2 = g * g;
-    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 3.14159265f);
+    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 12.5663706f);
 }
 
 float get_height_fraction(float4 grad, float hf)
@@ -115,7 +117,6 @@ PSOutput PSMain(PSInput input)
 {
     float3 dir = normalize(input.dir);
     
-    // Composicao Base do Ceu Atmosferico
     float h = saturate(dir.y);
     float3 ceu = lerp(horizon_color, zenith_color, pow(h, 0.6f));
     
@@ -191,9 +192,6 @@ PSOutput PSMain(PSInput input)
                 
                 float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
                 float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
-                float3 p_v = float3(p.x * 0.70f - p.z * 0.714f, p.y * 1.13f, p.x * 0.714f + p.z * 0.70f);
-                float3 uvw2 = frac((p_v + float3(wdisp.x, 0.0f, wdisp.y)) * escala * 0.37f);
-                noise_val = noise_val * 0.62f + cloud_noise.SampleLevel(cloud_samp, uvw2, 0).r * 0.38f; // variedade: quebra o periodo do tile
                 float fade = 1.0f - smoothstep(cap * 0.8f, cap, t - t_min);
                 
                 float wcov = saturate((wfbm((p.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
@@ -202,10 +200,27 @@ PSOutput PSMain(PSInput input)
                 float prof = get_height_fraction(active_grad, hf);
                 
                 float d_base = noise_val * prof - (1.0f - cobertura * wcov);
-                float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * saturate(t / cap)); // erosao esmaece longe: mata os pontinhos
+                float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * saturate(t / cap));
                 float d_raw = saturate(d_base - d_erosao);
                 
                 d_raw *= lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf));
+                
+                // M2.5-24C: Anti-algodao (Curl warp & Swiss Cheese Erosion da borda)
+                if (d_raw > 0.01f)
+                {
+                    float2 cw = float2(
+                        vnoise2(p.xz * 0.004f + 17.3f) - 0.5f,
+                        vnoise2(p.xz * 0.004f - 31.7f) - 0.5f) * curl_str * 30.0f;
+                    
+                    float det = cloud_detail.SampleLevel(cloud_samp, frac((p + float3(cw.x, 0.0f, cw.y)) * escala * 6.1f), 0).r;
+                    
+                    float borda = 1.0f - saturate(d_raw / 0.35f);
+                    float det_str_h = detail_str * lerp(1.25f, 0.7f, pow(hf, 0.25f));
+                    
+                    det_str_h *= (1.0f - 0.65f * saturate(t / cap)); // HZD Nubis
+                    
+                    d_raw = saturate(d_raw - det * borda * det_str_h);
+                }
                 
                 d_raw = smoothstep(0.0f, 0.18f, d_raw);
                 float d = d_raw * densidade * fade;
@@ -234,17 +249,15 @@ PSOutput PSMain(PSInput input)
                     float powder = 1.0f - exp(-2.0f * dens_sol);
                     luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
                     
-                    // M2.5-19D: Bandas de Luz
                     if (cloud_bands >= 2.0f)
                     {
                         luz = (floor(luz * cloud_bands) + smoothstep(0.35f, 0.65f, frac(luz * cloud_bands))) / cloud_bands;
                     }
                     
-                    // M2.5-19D: Paleta propria de sombra
                     float3 base_ambient = lerp(cloud_shadow_color, sky_ambient_color, 0.4f);
-                    float3 ambient_term = base_ambient * sun_ambient * lerp(0.72f, 1.0f, hf); // piso ambiente: bases luminosas
+                    float3 ambient_term = base_ambient * sun_ambient * lerp(0.72f, 1.0f, hf);
                     
-                    float3 direct_term = (luz * phase_val + 0.12f) * sun_color * sun_intensity; // piso multi-scatter: fundo nunca morto
+                    float3 direct_term = (luz * phase_val + 0.12f) * sun_color * sun_intensity;
                     
                     radiance += T * (1.0f - exp(-d * step_sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
                     T *= exp(-d * step_sz * absorcao);
@@ -260,7 +273,6 @@ PSOutput PSMain(PSInput input)
         }
     }
     
-    // M2.5-19D: Corte Desenhado da Silhueta 
     float alpha = 1.0f - T;
     alpha = smoothstep(cloud_silhouette, cloud_silhouette + 0.12f, alpha);
     T = 1.0f - alpha;
@@ -268,6 +280,7 @@ PSOutput PSMain(PSInput input)
     float fog_air = saturate(cloud_dist / 900.0f) * 0.65f;
     
     float3 final_color = lerp(radiance, horizon_color * (1.0f - T), fog_air) + T * (ceu + astro);
+    final_color = min(max(final_color, 0.0f), 8.0f);
     
     PSOutput output;
     output.color = float4(final_color, 1.0f);

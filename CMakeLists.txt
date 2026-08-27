@@ -78,7 +78,7 @@ add_custom_command(
            ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_ps.h
            ${CMAKE_CURRENT_BINARY_DIR}/outline_vs.h ${CMAKE_CURRENT_BINARY_DIR}/outline_ps.h
            ${CMAKE_CURRENT_BINARY_DIR}/sky_vs.h ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h
-           ${CMAKE_CURRENT_BINARY_DIR}/grass_vs.h ${CMAKE_CURRENT_BINARY_DIR}/grass_ps.h
+           ${CMAKE_CURRENT_BINARY_DIR}/grass_vs.h ${CMAKE_CURRENT_BINARY_DIR}/grass_ps.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_vs.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_thresh_ps.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_down_ps.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_up_ps.h ${CMAKE_CURRENT_BINARY_DIR}/shadow_vs.h ${CMAKE_CURRENT_BINARY_DIR}/shadow_ps.h
     COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h /Vn g_basic_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
     COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h /Vn g_basic_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl
     COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h /Vn g_fullscreen_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl
@@ -89,11 +89,17 @@ add_custom_command(
     COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h /Vn g_sky_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl
     COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/grass_vs.h /Vn g_grass_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/grass.hlsl
     COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/grass_ps.h /Vn g_grass_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/grass.hlsl
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/grass.hlsl
+    COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/bloom_vs.h /Vn g_bloom_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PS_Threshold /Fh ${CMAKE_CURRENT_BINARY_DIR}/bloom_thresh_ps.h /Vn g_bloom_thresh_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PS_Down /Fh ${CMAKE_CURRENT_BINARY_DIR}/bloom_down_ps.h /Vn g_bloom_down_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PS_Up /Fh ${CMAKE_CURRENT_BINARY_DIR}/bloom_up_ps.h /Vn g_bloom_up_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl
+    COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/shadow_vs.h /Vn g_shadow_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shadow.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/shadow_ps.h /Vn g_shadow_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shadow.hlsl
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/grass.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shadow.hlsl
 )
 
 add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp src/social/social.cpp src/clouds/cloud_noise.h src/clouds/cloud_noise.cpp)
-target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_ps.h ${CMAKE_CURRENT_BINARY_DIR}/outline_vs.h ${CMAKE_CURRENT_BINARY_DIR}/outline_ps.h ${CMAKE_CURRENT_BINARY_DIR}/sky_vs.h ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h ${CMAKE_CURRENT_BINARY_DIR}/grass_vs.h ${CMAKE_CURRENT_BINARY_DIR}/grass_ps.h)
+target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_ps.h ${CMAKE_CURRENT_BINARY_DIR}/outline_vs.h ${CMAKE_CURRENT_BINARY_DIR}/outline_ps.h ${CMAKE_CURRENT_BINARY_DIR}/sky_vs.h ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h ${CMAKE_CURRENT_BINARY_DIR}/grass_vs.h ${CMAKE_CURRENT_BINARY_DIR}/grass_ps.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_vs.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_thresh_ps.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_down_ps.h ${CMAKE_CURRENT_BINARY_DIR}/bloom_up_ps.h ${CMAKE_CURRENT_BINARY_DIR}/shadow_vs.h ${CMAKE_CURRENT_BINARY_DIR}/shadow_ps.h)
 target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${cgltf_SOURCE_DIR} ${stb_SOURCE_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
 target_compile_definitions(engine PRIVATE 

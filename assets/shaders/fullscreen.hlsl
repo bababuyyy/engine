@@ -17,6 +17,7 @@ PSInput VSMain(uint vertexID : SV_VertexID)
 
 Texture2D tex_color : register(t0, space2);
 Texture2D tex_norm_id : register(t1, space2); // Adicionado para servir de gate oclusor pros God Rays
+Texture2D tex_bloom : register(t2, space2); // M2.5-23: resultado da piramide dual-Kawase
 SamplerState samp : register(s0, space2);
 
 cbuffer FsBlock : register(b0, space3)
@@ -27,7 +28,8 @@ cbuffer FsBlock : register(b0, space3)
     float ray_intensity;
     float ray_decay;
     float ray_samples;
-    float2 pad_r;
+    float bloom_intensity;
+    float pad_r;
 };
 
 float4 PSMain(PSInput input) : SV_Target0
@@ -41,7 +43,7 @@ float4 PSMain(PSInput input) : SV_Target0
     float4 final_color = tex_color.Sample(samp, fuv);
     
     // M2.5-20: God Rays Aditivos via Radial Blur Screen-Space
-    // Somente opera se os raios não estiverem desbotados de vez (costas viradas pro sol)
+    // Somente opera se os raios nï¿½o estiverem desbotados de vez (costas viradas pro sol)
     if (ray_intensity > 0.001f)
     {
         float2 texcoord = input.uv;
@@ -77,5 +79,8 @@ float4 PSMain(PSInput input) : SV_Target0
         final_color.rgb += (ray_accum / ray_samples) * ray_color * ray_intensity;
     }
 
+    final_color.rgb += tex_bloom.Sample(samp, input.uv).rgb * bloom_intensity; // M2.5-23: o florescer
+    float dth = frac(sin(dot(input.uv, float2(12.9898f, 78.233f))) * 43758.5453f);
+    final_color.rgb += (dth - 0.5f) / 255.0f; // de-banding do 8-bit (estagio final, padrao HDRP)
     return final_color;
 }

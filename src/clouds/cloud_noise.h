@@ -8,4 +8,7 @@ namespace clouds {
 
     // Gera ou recarrega do cache o volume 3D tileavel de ruido Perlin-Worley (R8)
     std::vector<uint8_t> generate_cloud_noise(int w, int h, int d);
+
+    // M2.5-24C: Gera ou recarrega o ruido de detalhe 3D (Swiss Cheese) 
+    std::vector<uint8_t> generate_cloud_detail(int w, int h, int d);
 }

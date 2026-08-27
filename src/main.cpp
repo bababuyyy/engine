@@ -40,6 +40,12 @@ typedef unsigned char BYTE;
 #include "sky_ps.h"
 #include "grass_vs.h"
 #include "grass_ps.h"
+#include "bloom_vs.h"
+#include "bloom_thresh_ps.h"
+#include "bloom_down_ps.h"
+#include "bloom_up_ps.h"
+#include "shadow_vs.h"
+#include "shadow_ps.h"
 #include "clouds/cloud_noise.h"
 
 // ============================================================================
@@ -106,21 +112,14 @@ struct MeshRange {
 };
 
 struct SunParams {
-    float dir[3];
-    float ambient;
-    float color[3];
-    float pad;
-    float cam_pos[3];
-    float pad2;
-    float toon_cuts;
-    float toon_soft;
-    float wind_dir[2];
-    float fog_color[3];
-    float fog_density;
-    float cloud_time;
-    float cloud_cover;
-    float shadow_str;
-    float pad3;
+    float dir[3];            float ambient;
+    float color[3];          float toon_cuts;
+    float cam_pos[3];        float toon_soft;
+    float wind_dir[2];       float fog_density; float cloud_time;
+    float fog_color[3];      float cloud_cover;
+    float shadow_str;        float grass_backlight; float grass_specular; float obj_shadow_str;
+    float obj_shadow_bias;   float debug_shadows;   float pad_0[2];
+    float light_vp[16];
 };
 
 struct SkyParams {
@@ -135,8 +134,8 @@ struct SkyParams {
     float cap;              float passos;     float absorcao;   float hg_g_frontal;
     float powder_str;       float sun_intensity; float sun_ambient; float cloud_type;
     float erosao_str;       float cloud_silhouette; float cloud_bands; float pad_a;
-    float sky_ambient_color[3];               float pad_b;
-    float cloud_shadow_color[3];              float pad_c;
+    float sky_ambient_color[3];               float detail_str;
+    float cloud_shadow_color[3];              float curl_str;
 };
 
 struct ObjIdParams {
@@ -151,7 +150,14 @@ struct FsParams {
     float ray_intensity;
     float ray_decay;
     float ray_samples;
-    float pad[2];
+    float bloom_intensity;
+    float pad[1];
+};
+
+struct BloomParams {
+    float texel[2];
+    float threshold;
+    float knee;
 };
 
 struct OutlineParams {
@@ -187,9 +193,6 @@ struct NpcVisual {
     bool has_mesh;
 };
 
-// ============================================================================
-// VARIAVEIS GLOBAIS DE SISTEMAS (Vento & Grama)
-// ============================================================================
 namespace wind {
     float dir_deg = 45.0f;
     float strength = 0.5f;
@@ -207,7 +210,6 @@ SDL_GPUBuffer* grass_instbuf = nullptr;
 std::vector<float> terrain_phys_verts;
 std::vector<uint16_t> terrain_indices;
 
-// Variaveis de Tuning extraidas para escopo global para acesso no Parser
 bool draw_sky = true;
 float fog_density = 0.006f;
 
@@ -229,6 +231,8 @@ float cloud_type_blend = 0.5f;
 float cloud_erosao_str = 0.4f;
 float cloud_silhouette = 0.18f;
 float cloud_bands = 3.0f;
+float cloud_detail_str = 0.35f; // M2.5-24C
+float cloud_curl_str = 0.4f;
 
 bool sol_automatico = true;
 float arco_inclinacao = 25.0f;
@@ -248,10 +252,20 @@ float out_crease_high = 0.3f;
 float out_line_darken = 0.35f;
 float out_crease_brighten = 1.25f;
 
+bool draw_bloom = true;
+float bloom_intensity = 0.25f;
+float bloom_threshold = 0.75f;
+
 bool draw_grass = true;
 float grass_scale = 1.0f;
+float grass_backlight = 0.35f;
+float grass_specular = 0.25f;
 
-// Lambdas de persistencia
+bool draw_shadows = true;
+bool debug_shadows = false;
+float obj_shadow_str = 0.8f;
+float obj_shadow_bias = 0.005f;
+
 auto save_tuning = []() {
     std::filesystem::create_directories("config");
     std::ofstream f("config/tuning.ini");
@@ -269,6 +283,8 @@ auto save_tuning = []() {
     f << "grass_slope_min=" << grass_slope_min << "\n";
     f << "grass_border_sharp=" << grass_border_sharp << "\n";
     f << "grass_scale=" << grass_scale << "\n";
+    f << "grass_backlight=" << grass_backlight << "\n";
+    f << "grass_specular=" << grass_specular << "\n";
     f << "draw_grass=" << (draw_grass ? "1" : "0") << "\n";
     f << "draw_sky=" << (draw_sky ? "1" : "0") << "\n";
     f << "fog_density=" << fog_density << "\n";
@@ -289,6 +305,8 @@ auto save_tuning = []() {
     f << "cloud_erosao_str=" << cloud_erosao_str << "\n";
     f << "cloud_silhouette=" << cloud_silhouette << "\n";
     f << "cloud_bands=" << cloud_bands << "\n";
+    f << "cloud_detail_str=" << cloud_detail_str << "\n";
+    f << "cloud_curl_str=" << cloud_curl_str << "\n";
     f << "sol_automatico=" << (sol_automatico ? "1" : "0") << "\n";
     f << "arco_inclinacao=" << arco_inclinacao << "\n";
     f << "sun_yaw=" << sun_yaw << "\n";
@@ -298,12 +316,18 @@ auto save_tuning = []() {
     f << "ray_strength=" << ray_strength << "\n";
     f << "ray_decay=" << ray_decay << "\n";
     f << "ray_samples=" << ray_samples << "\n";
+    f << "draw_bloom=" << (draw_bloom ? "1" : "0") << "\n";
+    f << "bloom_intensity=" << bloom_intensity << "\n";
+    f << "bloom_threshold=" << bloom_threshold << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
     f << "out_crease_low=" << out_crease_low << "\n";
     f << "out_crease_high=" << out_crease_high << "\n";
     f << "out_line_darken=" << out_line_darken << "\n";
     f << "out_crease_brighten=" << out_crease_brighten << "\n";
+    f << "draw_shadows=" << (draw_shadows ? "1" : "0") << "\n";
+    f << "obj_shadow_str=" << obj_shadow_str << "\n";
+    f << "obj_shadow_bias=" << obj_shadow_bias << "\n";
     SDL_Log("Tuning salvo com sucesso em config/tuning.ini");
     };
 
@@ -333,6 +357,8 @@ auto load_tuning = []() {
             else if (key == "grass_slope_min") grass_slope_min = std::stof(val);
             else if (key == "grass_border_sharp") grass_border_sharp = std::stof(val);
             else if (key == "grass_scale") grass_scale = std::stof(val);
+            else if (key == "grass_backlight") grass_backlight = std::stof(val);
+            else if (key == "grass_specular") grass_specular = std::stof(val);
             else if (key == "draw_grass") draw_grass = (val == "1");
             else if (key == "draw_sky") draw_sky = (val == "1");
             else if (key == "fog_density") fog_density = std::stof(val);
@@ -353,6 +379,8 @@ auto load_tuning = []() {
             else if (key == "cloud_erosao_str") cloud_erosao_str = std::stof(val);
             else if (key == "cloud_silhouette") cloud_silhouette = std::stof(val);
             else if (key == "cloud_bands") cloud_bands = std::stof(val);
+            else if (key == "cloud_detail_str") cloud_detail_str = std::stof(val);
+            else if (key == "cloud_curl_str") cloud_curl_str = std::stof(val);
             else if (key == "sol_automatico") sol_automatico = (val == "1");
             else if (key == "arco_inclinacao") arco_inclinacao = std::stof(val);
             else if (key == "sun_yaw") sun_yaw = std::stof(val);
@@ -362,12 +390,18 @@ auto load_tuning = []() {
             else if (key == "ray_strength") ray_strength = std::stof(val);
             else if (key == "ray_decay") ray_decay = std::stof(val);
             else if (key == "ray_samples") ray_samples = std::stoi(val);
+            else if (key == "draw_bloom") draw_bloom = (val == "1");
+            else if (key == "bloom_intensity") bloom_intensity = std::stof(val);
+            else if (key == "bloom_threshold") bloom_threshold = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
             else if (key == "out_crease_low") out_crease_low = std::stof(val);
             else if (key == "out_crease_high") out_crease_high = std::stof(val);
             else if (key == "out_line_darken") out_line_darken = std::stof(val);
             else if (key == "out_crease_brighten") out_crease_brighten = std::stof(val);
+            else if (key == "draw_shadows") draw_shadows = (val == "1");
+            else if (key == "obj_shadow_str") obj_shadow_str = std::stof(val);
+            else if (key == "obj_shadow_bias") obj_shadow_bias = std::stof(val);
         }
         catch (...) {
             SDL_Log("Aviso: Falha ao fazer o parse da chave %s no tuning.ini", key.c_str());
@@ -419,7 +453,7 @@ int main(int argc, char* argv[]) {
     ps_info.entrypoint = "PSMain";
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    ps_info.num_samplers = 1;
+    ps_info.num_samplers = 3;
     ps_info.num_uniform_buffers = 2;
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
@@ -440,7 +474,7 @@ int main(int argc, char* argv[]) {
     fs_ps_info.entrypoint = "PSMain";
     fs_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     fs_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    fs_ps_info.num_samplers = 2; // M2.5-20: composite + norm_id (oclusao dos god rays)
+    fs_ps_info.num_samplers = 3;
     fs_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* fs_ps = SDL_CreateGPUShader(device, &fs_ps_info);
     if (!fs_ps) return 1;
@@ -475,7 +509,6 @@ int main(int argc, char* argv[]) {
     sky_vs_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_vs = SDL_CreateGPUShader(device, &sky_vs_info);
     if (!sky_vs) { SDL_Log("FALHA sky_vs: %s", SDL_GetError()); return 1; }
-    if (!sky_vs) return 1;
 
     SDL_GPUShaderCreateInfo sky_ps_info = {};
     sky_ps_info.code = g_sky_ps;
@@ -483,11 +516,10 @@ int main(int argc, char* argv[]) {
     sky_ps_info.entrypoint = "PSMain";
     sky_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     sky_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    sky_ps_info.num_samplers = 2; // M2.5-19A: O ceu passa a exigir samplers nativos (Volume 3D)
+    sky_ps_info.num_samplers = 3; // M2.5-24C: O ceu adere a textura de detalhe 32^3
     sky_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_ps = SDL_CreateGPUShader(device, &sky_ps_info);
     if (!sky_ps) { SDL_Log("FALHA sky_ps: %s", SDL_GetError()); return 1; }
-    if (!sky_ps) return 1;
 
     SDL_GPUShaderCreateInfo grass_vs_info = {};
     grass_vs_info.code = g_grass_vs;
@@ -505,10 +537,74 @@ int main(int argc, char* argv[]) {
     grass_ps_info.entrypoint = "PSMain";
     grass_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     grass_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    grass_ps_info.num_samplers = 1;
+    grass_ps_info.num_samplers = 3;
     grass_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* grass_ps = SDL_CreateGPUShader(device, &grass_ps_info);
     if (!grass_ps) return 1;
+
+    SDL_GPUShaderCreateInfo bloom_vs_info = {};
+    bloom_vs_info.code = g_bloom_vs;
+    bloom_vs_info.code_size = sizeof(g_bloom_vs);
+    bloom_vs_info.entrypoint = "VSMain";
+    bloom_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    bloom_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    bloom_vs_info.num_uniform_buffers = 0;
+    SDL_GPUShader* bloom_vs = SDL_CreateGPUShader(device, &bloom_vs_info);
+    if (!bloom_vs) { SDL_Log("FALHA bloom_vs: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo b_thresh_info = {};
+    b_thresh_info.code = g_bloom_thresh_ps;
+    b_thresh_info.code_size = sizeof(g_bloom_thresh_ps);
+    b_thresh_info.entrypoint = "PS_Threshold";
+    b_thresh_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    b_thresh_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    b_thresh_info.num_samplers = 1;
+    b_thresh_info.num_uniform_buffers = 1;
+    SDL_GPUShader* bloom_thresh_ps = SDL_CreateGPUShader(device, &b_thresh_info);
+    if (!bloom_thresh_ps) { SDL_Log("FALHA bloom_thresh_ps: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo b_down_info = {};
+    b_down_info.code = g_bloom_down_ps;
+    b_down_info.code_size = sizeof(g_bloom_down_ps);
+    b_down_info.entrypoint = "PS_Down";
+    b_down_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    b_down_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    b_down_info.num_samplers = 1;
+    b_down_info.num_uniform_buffers = 1;
+    SDL_GPUShader* bloom_down_ps = SDL_CreateGPUShader(device, &b_down_info);
+    if (!bloom_down_ps) { SDL_Log("FALHA bloom_down_ps: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo b_up_info = {};
+    b_up_info.code = g_bloom_up_ps;
+    b_up_info.code_size = sizeof(g_bloom_up_ps);
+    b_up_info.entrypoint = "PS_Up";
+    b_up_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    b_up_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    b_up_info.num_samplers = 1;
+    b_up_info.num_uniform_buffers = 1;
+    SDL_GPUShader* bloom_up_ps = SDL_CreateGPUShader(device, &b_up_info);
+    if (!bloom_up_ps) { SDL_Log("FALHA bloom_up_ps: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo shadow_vs_info = {};
+    shadow_vs_info.code = g_shadow_vs;
+    shadow_vs_info.code_size = sizeof(g_shadow_vs);
+    shadow_vs_info.entrypoint = "VSMain";
+    shadow_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    shadow_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    shadow_vs_info.num_uniform_buffers = 1;
+    SDL_GPUShader* shadow_vs = SDL_CreateGPUShader(device, &shadow_vs_info);
+    if (!shadow_vs) { SDL_Log("FALHA shadow_vs: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo shadow_ps_info = {};
+    shadow_ps_info.code = g_shadow_ps;
+    shadow_ps_info.code_size = sizeof(g_shadow_ps);
+    shadow_ps_info.entrypoint = "PSMain";
+    shadow_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    shadow_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    shadow_ps_info.num_samplers = 0;
+    shadow_ps_info.num_uniform_buffers = 0;
+    SDL_GPUShader* shadow_ps = SDL_CreateGPUShader(device, &shadow_ps_info);
+    if (!shadow_ps) { SDL_Log("FALHA shadow_ps_dummy: %s", SDL_GetError()); return 1; }
 
     core::JobSystem js;
 
@@ -553,13 +649,49 @@ int main(int argc, char* argv[]) {
     samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
     SDL_GPUSampler* sampler = SDL_CreateGPUSampler(device, &samp_info);
 
+    SDL_GPUSamplerCreateInfo shadow_diag_info = {};
+    shadow_diag_info.min_filter = SDL_GPU_FILTER_NEAREST;
+    shadow_diag_info.mag_filter = SDL_GPU_FILTER_NEAREST;
+    shadow_diag_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    shadow_diag_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    shadow_diag_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    shadow_diag_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    SDL_GPUSampler* shadow_diag = SDL_CreateGPUSampler(device, &shadow_diag_info);
+    if (!shadow_diag) { SDL_Log("FALHA shadow_diag: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUSamplerCreateInfo shadow_cmp_info = shadow_diag_info;
+    shadow_cmp_info.min_filter = SDL_GPU_FILTER_LINEAR;
+    shadow_cmp_info.mag_filter = SDL_GPU_FILTER_LINEAR;
+    shadow_cmp_info.enable_compare = true;
+    shadow_cmp_info.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+    SDL_GPUSampler* shadow_cmp = SDL_CreateGPUSampler(device, &shadow_cmp_info);
+    if (!shadow_cmp) { SDL_Log("FALHA shadow_cmp: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUTextureCreateInfo shadow_tex_info = {};
+    shadow_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+    shadow_tex_info.format = SDL_GPU_TEXTUREFORMAT_D16_UNORM;
+    shadow_tex_info.width = 2048;
+    shadow_tex_info.height = 2048;
+    shadow_tex_info.layer_count_or_depth = 1;
+    shadow_tex_info.num_levels = 1;
+    shadow_tex_info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+#ifdef SDL_PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT
+    SDL_PropertiesID sm_props = SDL_CreateProperties();
+    SDL_SetFloatProperty(sm_props, SDL_PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT, 1.0f);
+    shadow_tex_info.props = sm_props;
+#endif
+    SDL_GPUTexture* shadow_map = SDL_CreateGPUTexture(device, &shadow_tex_info);
+#ifdef SDL_PROP_GPU_TEXTURE_CREATE_D3D12_CLEAR_DEPTH_FLOAT
+    SDL_DestroyProperties(sm_props);
+#endif
+    if (!shadow_map) { SDL_Log("FALHA shadow_map_tex: %s", SDL_GetError()); return 1; }
+
     SDL_GPUCommandBuffer* init_cmd = SDL_AcquireGPUCommandBuffer(device);
     SDL_GPUCopyPass* init_pass = SDL_BeginGPUCopyPass(init_cmd);
     SDL_GPUTextureTransferInfo fb_tex_loc = { fallback_tb, 0, 0, 0 };
     SDL_GPUTextureRegion fb_tex_reg = { fallback_tex, 0, 0, 0, 0, 0, 1, 1, 1 };
     SDL_UploadToGPUTexture(init_pass, &fb_tex_loc, &fb_tex_reg, false);
 
-    // M2.5-19A: Volume Textural 3D de Nuvens via Cache Dinamico
     SDL_GPUTextureCreateInfo cloud_tex_info = {};
     cloud_tex_info.type = SDL_GPU_TEXTURETYPE_3D;
     cloud_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
@@ -569,6 +701,17 @@ int main(int argc, char* argv[]) {
     cloud_tex_info.num_levels = 1;
     cloud_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
     SDL_GPUTexture* cloud_tex = SDL_CreateGPUTexture(device, &cloud_tex_info);
+
+    // M2.5-24C: Textura de Detalhe Swiss Cheese
+    SDL_GPUTextureCreateInfo detail_tex_info = {};
+    detail_tex_info.type = SDL_GPU_TEXTURETYPE_3D;
+    detail_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    detail_tex_info.width = 32;
+    detail_tex_info.height = 32;
+    detail_tex_info.layer_count_or_depth = 32;
+    detail_tex_info.num_levels = 1;
+    detail_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* cloud_detail_tex = SDL_CreateGPUTexture(device, &detail_tex_info);
 
     SDL_GPUSamplerCreateInfo cloud_samp_info = {};
     cloud_samp_info.min_filter = SDL_GPU_FILTER_LINEAR;
@@ -587,14 +730,26 @@ int main(int argc, char* argv[]) {
     memcpy(cloud_map, cloud_data.data(), cloud_data.size());
     SDL_UnmapGPUTransferBuffer(device, cloud_tb);
 
+    std::vector<uint8_t> det_data = clouds::generate_cloud_detail(32, 32, 32);
+    SDL_GPUTransferBufferCreateInfo det_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)det_data.size() };
+    SDL_GPUTransferBuffer* det_tb = SDL_CreateGPUTransferBuffer(device, &det_tb_info);
+    void* det_map = SDL_MapGPUTransferBuffer(device, det_tb, false);
+    memcpy(det_map, det_data.data(), det_data.size());
+    SDL_UnmapGPUTransferBuffer(device, det_tb);
+
     SDL_GPUTextureTransferInfo cloud_tex_loc = { cloud_tb, 0, 128, 32 };
     SDL_GPUTextureRegion cloud_tex_reg = { cloud_tex, 0, 0, 0, 0, 0, 128, 32, 128 };
     SDL_UploadToGPUTexture(init_pass, &cloud_tex_loc, &cloud_tex_reg, false);
+
+    SDL_GPUTextureTransferInfo det_tex_loc = { det_tb, 0, 32, 32 };
+    SDL_GPUTextureRegion det_tex_reg = { cloud_detail_tex, 0, 0, 0, 0, 0, 32, 32, 32 };
+    SDL_UploadToGPUTexture(init_pass, &det_tex_loc, &det_tex_reg, false);
 
     SDL_EndGPUCopyPass(init_pass);
     SDL_SubmitGPUCommandBuffer(init_cmd);
     SDL_ReleaseGPUTransferBuffer(device, fallback_tb);
     SDL_ReleaseGPUTransferBuffer(device, cloud_tb);
+    SDL_ReleaseGPUTransferBuffer(device, det_tb);
     SDL_Log("BOOT: nuvens ok, seguindo p/ ceu");
 
     std::vector<float> dome_vertices;
@@ -852,14 +1007,14 @@ int main(int argc, char* argv[]) {
         if (terrain_indices.empty()) return;
 
         std::vector<InstanceData> g_insts;
-        const uint32_t MAX_GRASS = 50000;
+        const uint32_t MAX_GRASS = 120000;
         // Pre-escala justa: se o pedido total estoura o cap, TODOS afinam por igual (fim da fome por ordem)
         float fair_total = 0.0f;
         for (size_t ft = 0; ft < terrain_indices.size() / 3; ++ft) {
-            uint16_t fi0 = terrain_indices[ft*3+0], fi1 = terrain_indices[ft*3+1], fi2 = terrain_indices[ft*3+2];
-            glm::vec3 fv0(terrain_phys_verts[fi0*6+0], terrain_phys_verts[fi0*6+1], terrain_phys_verts[fi0*6+2]);
-            glm::vec3 fv1(terrain_phys_verts[fi1*6+0], terrain_phys_verts[fi1*6+1], terrain_phys_verts[fi1*6+2]);
-            glm::vec3 fv2(terrain_phys_verts[fi2*6+0], terrain_phys_verts[fi2*6+1], terrain_phys_verts[fi2*6+2]);
+            uint16_t fi0 = terrain_indices[ft * 3 + 0], fi1 = terrain_indices[ft * 3 + 1], fi2 = terrain_indices[ft * 3 + 2];
+            glm::vec3 fv0(terrain_phys_verts[fi0 * 6 + 0], terrain_phys_verts[fi0 * 6 + 1], terrain_phys_verts[fi0 * 6 + 2]);
+            glm::vec3 fv1(terrain_phys_verts[fi1 * 6 + 0], terrain_phys_verts[fi1 * 6 + 1], terrain_phys_verts[fi1 * 6 + 2]);
+            glm::vec3 fv2(terrain_phys_verts[fi2 * 6 + 0], terrain_phys_verts[fi2 * 6 + 1], terrain_phys_verts[fi2 * 6 + 2]);
             glm::vec3 fe1 = fv1 - fv0, fe2 = fv2 - fv0;
             glm::vec3 fn = glm::normalize(glm::cross(fe1, fe2));
             if (fn.y < grass_slope_min) continue;
@@ -1321,7 +1476,7 @@ int main(int argc, char* argv[]) {
         replant_grass();
         };
 
-        const char* npc_names[5] = { "Ana", "Bruno", "Cora", "Davi", "Eva" };
+    const char* npc_names[5] = { "Ana", "Bruno", "Cora", "Davi", "Eva" };
     float npc_colors[5][3] = { {1.0f, 0.3f, 0.3f}, {0.3f, 1.0f, 0.3f}, {0.3f, 0.3f, 1.0f}, {1.0f, 1.0f, 0.3f}, {1.0f, 0.3f, 1.0f} };
     social::Schedule npc_scheds[5];
     social::NpcState npcs[5];
@@ -1432,6 +1587,20 @@ int main(int argc, char* argv[]) {
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipe_info);
     if (!pipeline) { SDL_Log("FALHA pipeline (basic): %s", SDL_GetError()); return 1; }
 
+    // M2.5-24: Derivando a Shadow Pipeline via Struct Copying Atenciosa
+    SDL_GPUGraphicsPipelineCreateInfo shadow_pipe_info = pipe_info;
+    shadow_pipe_info.vertex_shader = shadow_vs;
+    shadow_pipe_info.fragment_shader = shadow_ps;
+    shadow_pipe_info.target_info.num_color_targets = 0;
+    shadow_pipe_info.target_info.color_target_descriptions = nullptr;
+    shadow_pipe_info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM;
+    shadow_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+    shadow_pipe_info.rasterizer_state.enable_depth_bias = true;
+    shadow_pipe_info.rasterizer_state.depth_bias_constant_factor = 1.25f;
+    shadow_pipe_info.rasterizer_state.depth_bias_slope_factor = 2.0f;
+    SDL_GPUGraphicsPipeline* shadow_pipeline = SDL_CreateGPUGraphicsPipeline(device, &shadow_pipe_info);
+    if (!shadow_pipeline) { SDL_Log("FALHA shadow_pipeline: %s", SDL_GetError()); return 1; }
+
     SDL_GPUVertexAttribute sky_attr[1] = {};
     sky_attr[0].location = 0;
     sky_attr[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
@@ -1501,6 +1670,42 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUGraphicsPipeline* fs_pipeline = SDL_CreateGPUGraphicsPipeline(device, &fs_pipe_info);
     if (!fs_pipeline) { SDL_Log("FALHA fs_pipeline: %s", SDL_GetError()); return 1; }
+
+    // M2.5-23: Criacao Unificada das 3 Permutacoes do Bloom Pipeline (LDR/Additive)
+    SDL_GPUGraphicsPipelineCreateInfo b_pipe_info = {};
+    b_pipe_info.vertex_shader = bloom_vs;
+    b_pipe_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    b_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    b_pipe_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    b_pipe_info.target_info.num_color_targets = 1;
+
+    SDL_GPUColorTargetDescription b_target_desc = {};
+    b_target_desc.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    b_pipe_info.target_info.color_target_descriptions = &b_target_desc;
+
+    b_pipe_info.fragment_shader = bloom_thresh_ps;
+    SDL_GPUGraphicsPipeline* bloom_thresh_pipeline = SDL_CreateGPUGraphicsPipeline(device, &b_pipe_info);
+
+    b_pipe_info.fragment_shader = bloom_down_ps;
+    SDL_GPUGraphicsPipeline* bloom_down_pipeline = SDL_CreateGPUGraphicsPipeline(device, &b_pipe_info);
+
+    // O pass de Up do Kawase requer Blend state Aditivo para fundir sobre a textura anterior
+    b_target_desc.blend_state.enable_blend = true;
+    b_target_desc.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    b_target_desc.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    b_target_desc.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    b_target_desc.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    b_target_desc.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    b_target_desc.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+
+    b_pipe_info.fragment_shader = bloom_up_ps;
+    SDL_GPUGraphicsPipeline* bloom_up_pipeline = SDL_CreateGPUGraphicsPipeline(device, &b_pipe_info);
+
+    // Variaveis globais de Render Target mantidas nulas ate a hora certa
+    SDL_GPUTexture* bloom_tex_a = nullptr;
+    SDL_GPUTexture* bloom_tex_b = nullptr;
+    SDL_GPUTexture* bloom_tex_c = nullptr;
+    SDL_GPUTexture* bloom_tex_d = nullptr;
 
     ImGui::CreateContext();
     ImGui_ImplSDL3_InitForSDLGPU(window);
@@ -2129,6 +2334,8 @@ int main(int argc, char* argv[]) {
 
         ImGui::Checkbox("Grama", &draw_grass);
         ImGui::SliderFloat("Escala do tufo", &grass_scale, 0.3f, 2.0f);
+        ImGui::SliderFloat("Backlight", &grass_backlight, 0.0f, 1.0f);
+        ImGui::SliderFloat("Brilho da ponta", &grass_specular, 0.0f, 0.6f);
         ImGui::SliderFloat("Densidade", &grass_density, 0.0f, 30.0f);
         ImGui::SliderFloat("Verdice min", &grass_verdice_min, 0.0f, 0.3f);
         ImGui::SetItemTooltip("verde mínimo p/ brotar (borracha = marrom)");
@@ -2322,10 +2529,24 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Intensity", &sun_intensity, 0.0f, 5.0f);
 
         ImGui::Separator();
+        ImGui::Text("Sombras Projetadas");
+        ImGui::Checkbox("Sombras Oclusoras", &draw_shadows);
+        ImGui::SameLine();
+        ImGui::Checkbox("Debug Sombra", &debug_shadows);
+        ImGui::SliderFloat("Sombra obj: Forca", &obj_shadow_str, 0.0f, 1.0f);
+        ImGui::SliderFloat("Bias", &obj_shadow_bias, 0.0005f, 0.01f, "%.4f");
+
+        ImGui::Separator();
         ImGui::Text("God Rays (Screen-Space)");
         ImGui::SliderFloat("Forca dos raios", &ray_strength, 0.0f, 2.0f);
         ImGui::SliderFloat("Decay", &ray_decay, 0.9f, 0.99f, "%.3f");
         ImGui::SliderInt("Amostras", &ray_samples, 16, 64);
+
+        ImGui::Separator();
+        ImGui::Text("Dual-Kawase Bloom");
+        ImGui::Checkbox("Bloom", &draw_bloom);
+        ImGui::SliderFloat("Bloom: Forca", &bloom_intensity, 0.0f, 1.0f);
+        ImGui::SliderFloat("Bloom: Limiar", &bloom_threshold, 0.4f, 1.0f);
 
         ImGui::Separator();
         ImGui::SliderInt("Cortes", &toon_cuts, 2, 5);
@@ -2384,6 +2605,29 @@ int main(int argc, char* argv[]) {
             comp_color_info.width = (uint32_t)internal_w;
             comp_color_info.height = (uint32_t)internal_h;
             composite_color = SDL_CreateGPUTexture(device, &comp_color_info);
+
+            // M2.5-23: Bloom Rendertargets Dinamicos
+            if (bloom_tex_a) SDL_ReleaseGPUTexture(device, bloom_tex_a);
+            if (bloom_tex_b) SDL_ReleaseGPUTexture(device, bloom_tex_b);
+            if (bloom_tex_c) SDL_ReleaseGPUTexture(device, bloom_tex_c);
+            if (bloom_tex_d) SDL_ReleaseGPUTexture(device, bloom_tex_d);
+
+            SDL_GPUTextureCreateInfo b_tex_info = {};
+            b_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+            b_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            b_tex_info.layer_count_or_depth = 1;
+            b_tex_info.num_levels = 1;
+            b_tex_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+            b_tex_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+
+            b_tex_info.width = std::max(1, internal_w / 2); b_tex_info.height = std::max(1, internal_h / 2);
+            bloom_tex_a = SDL_CreateGPUTexture(device, &b_tex_info);
+            b_tex_info.width = std::max(1, internal_w / 4); b_tex_info.height = std::max(1, internal_h / 4);
+            bloom_tex_b = SDL_CreateGPUTexture(device, &b_tex_info);
+            b_tex_info.width = std::max(1, internal_w / 8); b_tex_info.height = std::max(1, internal_h / 8);
+            bloom_tex_c = SDL_CreateGPUTexture(device, &b_tex_info);
+            b_tex_info.width = std::max(1, internal_w / 16); b_tex_info.height = std::max(1, internal_h / 16);
+            bloom_tex_d = SDL_CreateGPUTexture(device, &b_tex_info);
 
             app_log.add("Res interna: %dx%d", internal_w, internal_h);
 
@@ -2548,6 +2792,77 @@ int main(int argc, char* argv[]) {
             glm::vec3 effective_sky_amb = c_sky_amb_day;
             glm::vec3 effective_cloud_shad = c_cloud_shad_day;
 
+            // M2.5-24: Computacao da Matriz Orto p/ Sombra
+            glm::mat4 light_vp = glm::mat4(1.0f);
+            if (draw_shadows && to_sun_vec.y > 0.01f) {
+                float ortho_size = 340.0f; // cobre a geometria de teste em x=300
+                glm::mat4 light_proj = glm::orthoLH_ZO(-ortho_size, ortho_size, -ortho_size, ortho_size, -300.0f, 300.0f);
+                glm::mat4 light_view = glm::lookAtLH(to_sun_vec * 200.0f, glm::vec3(0.0f), glm::vec3(0, 1, 0));
+                light_vp = light_proj * light_view;
+
+                glm::vec3 origin_ndc = glm::vec3(light_vp * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+                float texel_ndc = 2.0f / 2048.0f;
+                float snap_x = std::fmod(origin_ndc.x, texel_ndc);
+                float snap_y = std::fmod(origin_ndc.y, texel_ndc);
+                light_proj[3][0] -= snap_x;
+                light_proj[3][1] -= snap_y;
+                light_vp = light_proj * light_view;
+
+                SDL_GPUDepthStencilTargetInfo shadow_target = {};
+                shadow_target.texture = shadow_map;
+                shadow_target.clear_depth = 1.0f;
+                shadow_target.load_op = SDL_GPU_LOADOP_CLEAR;
+                shadow_target.store_op = SDL_GPU_STOREOP_STORE;
+                shadow_target.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+                shadow_target.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+                shadow_target.cycle = true;
+
+                SDL_GPURenderPass* spass = SDL_BeginGPURenderPass(cmd_buffer, nullptr, 0, &shadow_target);
+                SDL_BindGPUGraphicsPipeline(spass, shadow_pipeline);
+                SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(light_vp), sizeof(light_vp));
+
+                SDL_GPUBufferBinding vb_bind_s = { vertex_buffer, 0 };
+                SDL_BindGPUVertexBuffers(spass, 0, &vb_bind_s, 1);
+                SDL_GPUBufferBinding ib_bind_s = { index_buffer, 0 };
+                SDL_BindGPUIndexBuffer(spass, &ib_bind_s, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+                SDL_GPUBufferBinding inst_bind_floor_s = { neutral_instance_buffer, 0 };
+                SDL_BindGPUVertexBuffers(spass, 1, &inst_bind_floor_s, 1);
+                for (size_t i = 0; i < box_ranges.size(); ++i) {
+                    SDL_DrawGPUIndexedPrimitives(spass, box_ranges[i].index_count, 1, box_ranges[i].first_index, 0, 0);
+                }
+                SDL_DrawGPUIndexedPrimitives(spass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
+
+                for (const auto& a : level_assets) {
+                    SDL_DrawGPUIndexedPrimitives(spass, a.range.index_count, 1, a.range.first_index, 0, 0);
+                }
+
+                if (draw_crowd) {
+                    SDL_GPUBufferBinding inst_bind_crowd_s = { crowd_instance_buffer, 0 };
+                    SDL_BindGPUVertexBuffers(spass, 1, &inst_bind_crowd_s, 1);
+                    SDL_DrawGPUIndexedPrimitives(spass, cubo_multidao.index_count, 100000, cubo_multidao.first_index, 0, 0);
+                }
+
+                SDL_GPUBufferBinding inst_bind_char_s = { char_instance_buffer, 0 };
+                SDL_BindGPUVertexBuffers(spass, 1, &inst_bind_char_s, 1);
+                MeshRange range_active_player = is_crouched ? cubo_jogador_agachado : cubo_jogador;
+                SDL_DrawGPUIndexedPrimitives(spass, range_active_player.index_count, 1, range_active_player.first_index, 0, 0);
+                SDL_DrawGPUIndexedPrimitives(spass, cubo_plataforma.index_count, 1, cubo_plataforma.first_index, 0, 1);
+
+                SDL_GPUBufferBinding inst_bind_npc_s = { npc_instance_buffer, 0 };
+                SDL_BindGPUVertexBuffers(spass, 1, &inst_bind_npc_s, 1);
+                for (int i = 0; i < 5; ++i) {
+                    if (npc_visuals[i].has_mesh) {
+                        SDL_DrawGPUIndexedPrimitives(spass, npc_visuals[i].range.index_count, 1, npc_visuals[i].range.first_index, 0, i);
+                    }
+                    else {
+                        SDL_DrawGPUIndexedPrimitives(spass, cubo_npc.index_count, 1, cubo_npc.first_index, 0, i);
+                    }
+                }
+
+                SDL_EndGPURenderPass(spass);
+            }
+
             if (sol_automatico) {
                 auto saturate = [](float x) { return std::max(0.0f, std::min(1.0f, x)); };
                 float day_w = saturate(to_sun_vec.y);
@@ -2615,26 +2930,24 @@ int main(int argc, char* argv[]) {
             sky_params.sky_ambient_color[0] = effective_sky_amb.r;
             sky_params.sky_ambient_color[1] = effective_sky_amb.g;
             sky_params.sky_ambient_color[2] = effective_sky_amb.b;
-            sky_params.pad_b = 0.0f;
+            sky_params.detail_str = cloud_detail_str;
 
             sky_params.cloud_shadow_color[0] = effective_cloud_shad.r;
             sky_params.cloud_shadow_color[1] = effective_cloud_shad.g;
             sky_params.cloud_shadow_color[2] = effective_cloud_shad.b;
-            sky_params.pad_c = 0.0f;
+            sky_params.curl_str = cloud_curl_str;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
             sun_params.dir[1] = s_dir.y;
             sun_params.dir[2] = s_dir.z;
             sun_params.ambient = effective_ambient;
-            sun_params.color[0] = sun_color_arr[0] * sun_intensity; // Volta ao cru no basic. A mascara cuida do esmaecimento de intensity agora
+            sun_params.color[0] = sun_color_arr[0] * sun_intensity;
             sun_params.color[1] = sun_color_arr[1] * sun_intensity;
             sun_params.color[2] = sun_color_arr[2] * sun_intensity;
-            sun_params.pad = 0.0f;
             sun_params.cam_pos[0] = cam_pos.x;
             sun_params.cam_pos[1] = cam_pos.y;
             sun_params.cam_pos[2] = cam_pos.z;
-            sun_params.pad2 = 0.0f;
             sun_params.toon_cuts = (float)toon_cuts;
             sun_params.toon_soft = toon_soft;
             sun_params.wind_dir[0] = cos(w_rad);
@@ -2646,7 +2959,13 @@ int main(int argc, char* argv[]) {
             sun_params.cloud_time = (float)(sim_tick * DT) * cloud_speed; // sombra anda NA velocidade da nuvem
             sun_params.cloud_cover = draw_clouds ? cloud_cobertura : -2.0f;
             sun_params.shadow_str = shadow_str;
-            sun_params.pad3 = 0.0f;
+            sun_params.grass_backlight = grass_backlight;
+            sun_params.grass_specular = grass_specular;
+            sun_params.obj_shadow_str = draw_shadows ? obj_shadow_str : 0.0f;
+            sun_params.obj_shadow_bias = obj_shadow_bias;
+            sun_params.debug_shadows = debug_shadows ? 1.0f : 0.0f;
+            sun_params.pad_0[0] = 0.0f; sun_params.pad_0[1] = 0.0f;
+            memcpy(sun_params.light_vp, glm::value_ptr(light_vp), 64);
 
             ImGui_ImplSDLGPU3_PrepareDrawData(dd, cmd_buffer);
 
@@ -2686,11 +3005,12 @@ int main(int argc, char* argv[]) {
                 SDL_GPUBufferBinding sky_ib_bind = { dome_index_buffer, 0 };
                 SDL_BindGPUIndexBuffer(scene_pass, &sky_ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
-                SDL_GPUTextureSamplerBinding sky_samps[2] = {
-                    { fallback_tex, sampler }, // t0/s0 fallback (nao usado na abobada)
-                    { cloud_tex, cloud_sampler }     // t1/s1 do Raymarch (wrap address e filtering)
+                SDL_GPUTextureSamplerBinding sky_samps[3] = {
+                    { fallback_tex, sampler },
+                    { cloud_tex, cloud_sampler },
+                    { cloud_detail_tex, cloud_sampler }
                 };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, sky_samps, 2);
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, sky_samps, 3);
 
                 SDL_DrawGPUIndexedPrimitives(scene_pass, dome_indices.size(), 1, 0, 0, 0);
             }
@@ -2709,8 +3029,16 @@ int main(int argc, char* argv[]) {
             SDL_GPUBufferBinding inst_bind_floor = { neutral_instance_buffer, 0 };
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_floor, 1);
 
-            SDL_GPUTextureSamplerBinding samp_bind = { fallback_tex, sampler };
-            SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
+            auto bind_3_samps = [&](SDL_GPUTexture* color_tex) {
+                SDL_GPUTextureSamplerBinding samps[3] = {
+                    { color_tex ? color_tex : fallback_tex, sampler },
+                    { shadow_map, shadow_cmp },
+                    { shadow_map, shadow_diag }
+                };
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, samps, 3);
+                };
+
+            bind_3_samps(fallback_tex);
 
             ObjIdParams obj_id;
 
@@ -2725,8 +3053,7 @@ int main(int argc, char* argv[]) {
                 obj_id.pad[0] = 0; obj_id.pad[1] = 0; obj_id.pad[2] = 0;
                 SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
 
-                SDL_GPUTextureSamplerBinding asset_samp_bind = { a.tex ? a.tex : fallback_tex, sampler };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, &asset_samp_bind, 1);
+                bind_3_samps(a.tex);
                 SDL_DrawGPUIndexedPrimitives(scene_pass, a.range.index_count, 1, a.range.first_index, 0, 0);
                 mesh_id_counter++;
             }
@@ -2743,7 +3070,7 @@ int main(int argc, char* argv[]) {
             SDL_PushGPUFragmentUniformData(cmd_buffer, 1, &obj_id, sizeof(ObjIdParams));
             SDL_DrawGPUIndexedPrimitives(scene_pass, tortura_range.index_count, 1, tortura_range.first_index, 0, 0);
 
-            SDL_BindGPUFragmentSamplers(scene_pass, 0, &samp_bind, 1);
+            bind_3_samps(fallback_tex);
 
             if (draw_crowd) {
                 obj_id.id = 2.0f / 255.0f;
@@ -2769,21 +3096,18 @@ int main(int argc, char* argv[]) {
 
             for (int i = 0; i < 5; ++i) {
                 if (npc_visuals[i].has_mesh) {
-                    SDL_GPUTextureSamplerBinding npc_samp_bind = { npc_visuals[i].tex ? npc_visuals[i].tex : fallback_tex, sampler };
-                    SDL_BindGPUFragmentSamplers(scene_pass, 0, &npc_samp_bind, 1);
+                    bind_3_samps(npc_visuals[i].tex);
                     SDL_DrawGPUIndexedPrimitives(scene_pass, npc_visuals[i].range.index_count, 1, npc_visuals[i].range.first_index, 0, i);
                 }
                 else {
-                    SDL_GPUTextureSamplerBinding npc_samp_bind = { fallback_tex, sampler };
-                    SDL_BindGPUFragmentSamplers(scene_pass, 0, &npc_samp_bind, 1);
+                    bind_3_samps(fallback_tex);
                     SDL_DrawGPUIndexedPrimitives(scene_pass, cubo_npc.index_count, 1, cubo_npc.first_index, 0, i);
                 }
             }
 
             if (draw_grass && grass_inst_count > 0 && grass_instbuf) {
                 SDL_BindGPUGraphicsPipeline(scene_pass, grass_pipeline);
-                SDL_GPUTextureSamplerBinding g_samp = { active_grass_tex ? active_grass_tex : fallback_tex, sampler };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, &g_samp, 1);
+                bind_3_samps(active_grass_tex);
 
                 SDL_GPUBufferBinding g_vbs[2] = { { grass_vbuf, 0 }, { grass_instbuf, 0 } };
                 SDL_BindGPUVertexBuffers(scene_pass, 0, g_vbs, 2);
@@ -2852,6 +3176,48 @@ int main(int argc, char* argv[]) {
             SDL_DrawGPUPrimitives(o_pass, 3, 1, 0, 0);
             SDL_EndGPURenderPass(o_pass);
 
+            // ============================================================================
+            // M2.5-23: Dual-Kawase Bloom Ping-Pong Pass
+            // ============================================================================
+            if (draw_bloom && view_mode == 0) {
+                BloomParams bp;
+                bp.threshold = bloom_threshold;
+                bp.knee = 0.5f;
+
+                auto run_bloom_pass = [&](SDL_GPUTexture* dst, SDL_GPUTexture* src, SDL_GPUGraphicsPipeline* pipe, int w, int h) {
+                    SDL_GPUColorTargetInfo t = {};
+                    t.texture = dst;
+                    // Se for o pipeline UP (add), precisamos de LOAD, senao CLEAR destrutivo padrao
+                    t.load_op = (pipe == bloom_up_pipeline) ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+                    t.store_op = SDL_GPU_STOREOP_STORE;
+                    t.clear_color = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+                    SDL_GPURenderPass* bpass = SDL_BeginGPURenderPass(cmd_buffer, &t, 1, nullptr);
+                    SDL_BindGPUGraphicsPipeline(bpass, pipe);
+
+                    bp.texel[0] = 1.0f / (float)w;
+                    bp.texel[1] = 1.0f / (float)h;
+                    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &bp, sizeof(BloomParams));
+
+                    SDL_GPUTextureSamplerBinding sb = { src, upscale_sampler };
+                    SDL_BindGPUFragmentSamplers(bpass, 0, &sb, 1);
+
+                    SDL_DrawGPUPrimitives(bpass, 3, 1, 0, 0);
+                    SDL_EndGPURenderPass(bpass);
+                    };
+
+                // Threshold pass: composite -> A
+                run_bloom_pass(bloom_tex_a, composite_color, bloom_thresh_pipeline, internal_w, internal_h);
+                // Downsamples
+                run_bloom_pass(bloom_tex_b, bloom_tex_a, bloom_down_pipeline, std::max(1, internal_w / 2), std::max(1, internal_h / 2));
+                run_bloom_pass(bloom_tex_c, bloom_tex_b, bloom_down_pipeline, std::max(1, internal_w / 4), std::max(1, internal_h / 4));
+                run_bloom_pass(bloom_tex_d, bloom_tex_c, bloom_down_pipeline, std::max(1, internal_w / 8), std::max(1, internal_h / 8));
+                // Upsamples (Add)
+                run_bloom_pass(bloom_tex_c, bloom_tex_d, bloom_up_pipeline, std::max(1, internal_w / 16), std::max(1, internal_h / 16));
+                run_bloom_pass(bloom_tex_b, bloom_tex_c, bloom_up_pipeline, std::max(1, internal_w / 8), std::max(1, internal_h / 8));
+                run_bloom_pass(bloom_tex_a, bloom_tex_b, bloom_up_pipeline, std::max(1, internal_w / 4), std::max(1, internal_h / 4));
+            }
+
             SDL_GPUColorTargetInfo upscale_color_target = {};
             upscale_color_target.texture = swapchain_texture;
             upscale_color_target.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -2884,8 +3250,8 @@ int main(int argc, char* argv[]) {
             fs_params.ray_intensity = (view_mode == 0) ? (ray_strength * r_fade) : 0.0f;
             fs_params.ray_decay = ray_decay;
             fs_params.ray_samples = (float)ray_samples;
+            fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
             fs_params.pad[0] = 0.0f;
-            fs_params.pad[1] = 0.0f;
 
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &fs_params, sizeof(FsParams));
 
@@ -2893,12 +3259,13 @@ int main(int argc, char* argv[]) {
             if (view_mode == 1) upscale_source = normal_id;
             else if (view_mode == 2) upscale_source = scene_color;
 
-            // O Pass Fullscreen agora bebe da id_mask pra calcular a oclusão volumetrica da luz
-            SDL_GPUTextureSamplerBinding fs_samp_binds[2] = {
+            // O Pass Fullscreen agora bebe da id_mask pra calcular a oclusão volumetrica da luz e da cor unificada do bloom kawase
+            SDL_GPUTextureSamplerBinding fs_samp_binds[3] = {
                 { upscale_source, upscale_sampler },
-                { normal_id, upscale_sampler }
+                { normal_id, upscale_sampler },
+                { bloom_tex_a ? bloom_tex_a : fallback_tex, upscale_sampler }
             };
-            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 2);
+            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 3);
 
             SDL_DrawGPUPrimitives(fs_pass, 3, 1, 0, 0);
             SDL_EndGPURenderPass(fs_pass);
@@ -2956,6 +3323,26 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUTexture(device, composite_color);
     SDL_ReleaseGPUSampler(device, point_sampler);
 
+    if (bloom_tex_a) SDL_ReleaseGPUTexture(device, bloom_tex_a);
+    if (bloom_tex_b) SDL_ReleaseGPUTexture(device, bloom_tex_b);
+    if (bloom_tex_c) SDL_ReleaseGPUTexture(device, bloom_tex_c);
+    if (bloom_tex_d) SDL_ReleaseGPUTexture(device, bloom_tex_d);
+
+    SDL_ReleaseGPUGraphicsPipeline(device, bloom_thresh_pipeline);
+    SDL_ReleaseGPUGraphicsPipeline(device, bloom_down_pipeline);
+    SDL_ReleaseGPUGraphicsPipeline(device, bloom_up_pipeline);
+    SDL_ReleaseGPUShader(device, bloom_vs);
+    SDL_ReleaseGPUShader(device, bloom_thresh_ps);
+    SDL_ReleaseGPUShader(device, bloom_down_ps);
+    SDL_ReleaseGPUShader(device, bloom_up_ps);
+
+    SDL_ReleaseGPUTexture(device, shadow_map);
+    SDL_ReleaseGPUSampler(device, shadow_diag);
+    SDL_ReleaseGPUSampler(device, shadow_cmp);
+    SDL_ReleaseGPUGraphicsPipeline(device, shadow_pipeline);
+    SDL_ReleaseGPUShader(device, shadow_vs);
+    SDL_ReleaseGPUShader(device, shadow_ps);
+
     SDL_ReleaseGPUGraphicsPipeline(device, fs_pipeline);
     SDL_ReleaseGPUShader(device, fs_vs);
     SDL_ReleaseGPUShader(device, fs_ps);
@@ -2964,6 +3351,7 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUTexture(device, scene_color);
     SDL_ReleaseGPUTexture(device, normal_id);
     SDL_ReleaseGPUTexture(device, cloud_tex);
+    SDL_ReleaseGPUTexture(device, cloud_detail_tex);
 
     SDL_ReleaseGPUGraphicsPipeline(device, grass_pipeline);
     SDL_ReleaseGPUShader(device, grass_vs);

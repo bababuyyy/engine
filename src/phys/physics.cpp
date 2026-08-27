@@ -50,6 +50,10 @@ namespace phys {
     };
 
     class BPLayerInterfaceImpl final : public BroadPhaseLayerInterface {
+#if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
+    public:
+        virtual const char* GetBroadPhaseLayerName(BroadPhaseLayer inLayer) const override { return "BP"; } // Debug do Jolt exige
+#endif
     public:
         BPLayerInterfaceImpl() {
             mObjectToBroadPhase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
@@ -239,11 +243,11 @@ namespace phys {
     }
 
     float phys_camera_ray(float fx, float fy, float fz, float dx, float dy, float dz, float max_dist) {
-        const NarrowPhaseQuery& npq = physics_system->GetNarrowPhaseQuery(); // CORREÇÃO: const devolvido
+        const NarrowPhaseQuery& npq = physics_system->GetNarrowPhaseQuery(); // CORREï¿½ï¿½O: const devolvido
         RRayCast ray{ RVec3(fx, fy, fz), Vec3(dx, dy, dz) * max_dist };
         RayCastResult hit;
 
-        // M1-6b: Filtros removidos. Aceita default (tudo que for sólido interage com o raio visual).
+        // M1-6b: Filtros removidos. Aceita default (tudo que for sï¿½lido interage com o raio visual).
         if (npq.CastRay(ray, hit)) {
             return hit.mFraction;
         }
