@@ -40,6 +40,9 @@ typedef unsigned char BYTE;
 #include "sky_ps.h"
 #include "grass_vs.h"
 #include "grass_ps.h"
+#include "clouds/cloud_noise.h"
+
+// ============================================================================
 
 // ============================================================================
 // SISTEMA DE FEEL / MAQUINA DE ESTADO DO JOGADOR
@@ -111,20 +114,28 @@ struct SunParams {
     float pad2;
     float toon_cuts;
     float toon_soft;
-    float pad3[2];
+    float wind_dir[2];
     float fog_color[3];
     float fog_density;
+    float cloud_time;
+    float cloud_cover;
+    float shadow_str;
+    float pad3;
 };
 
 struct SkyParams {
-    float to_sun[3];
-    float pad0;
-    float zenith_color[3];
-    float pad1;
-    float horizon_color[3];
-    float pad2;
-    float sun_color[3];
-    float pad3;
+    float to_sun[3];        float pad0;
+    float zenith_color[3];  float pad1;
+    float horizon_color[3]; float pad2;
+    float sun_color[3];     float pad3;
+    float cam_pos[3];       float pad4;
+    float wind_dir[2];      float time;       float cloud_speed;
+    float cloud_color[3];   float cobertura;
+    float densidade;        float escala;     float h_min;      float h_max;
+    float cap;              float passos;     float absorcao;   float hg_g_frontal;
+    float powder_str;       float sun_intensity; float sun_ambient; float cloud_type;
+    float erosao_str;       float pad_a;      float pad_b;      float pad_c;
+    float sky_ambient_color[3];               float pad_d;
 };
 
 struct ObjIdParams {
@@ -134,6 +145,11 @@ struct ObjIdParams {
 
 struct FsParams {
     float tex_size[2];
+    float sun_screen[2];
+    float ray_color[3];
+    float ray_intensity;
+    float ray_decay;
+    float ray_samples;
     float pad[2];
 };
 
@@ -183,8 +199,12 @@ float grass_clump_cell = 2.5f;
 float grass_density = 8.0f;
 float grass_verdice_min = 0.05f;
 float grass_slope_min = 0.7f;
+float grass_border_sharp = 12.0f;
 uint32_t grass_inst_count = 0;
 SDL_GPUBuffer* grass_instbuf = nullptr;
+
+std::vector<float> terrain_phys_verts;
+std::vector<uint16_t> terrain_indices;
 
 int main(int argc, char* argv[]) {
     (void)argc;
@@ -250,7 +270,7 @@ int main(int argc, char* argv[]) {
     fs_ps_info.entrypoint = "PSMain";
     fs_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     fs_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    fs_ps_info.num_samplers = 1;
+    fs_ps_info.num_samplers = 2; // M2.5-20: composite + norm_id (oclusao dos god rays)
     fs_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* fs_ps = SDL_CreateGPUShader(device, &fs_ps_info);
     if (!fs_ps) return 1;
@@ -284,6 +304,7 @@ int main(int argc, char* argv[]) {
     sky_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
     sky_vs_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_vs = SDL_CreateGPUShader(device, &sky_vs_info);
+    if (!sky_vs) { SDL_Log("FALHA sky_vs: %s", SDL_GetError()); return 1; }
     if (!sky_vs) return 1;
 
     SDL_GPUShaderCreateInfo sky_ps_info = {};
@@ -292,9 +313,10 @@ int main(int argc, char* argv[]) {
     sky_ps_info.entrypoint = "PSMain";
     sky_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     sky_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    sky_ps_info.num_samplers = 0;
+    sky_ps_info.num_samplers = 2; // M2.5-19A: O ceu passa a exigir samplers nativos (Volume 3D)
     sky_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_ps = SDL_CreateGPUShader(device, &sky_ps_info);
+    if (!sky_ps) { SDL_Log("FALHA sky_ps: %s", SDL_GetError()); return 1; }
     if (!sky_ps) return 1;
 
     SDL_GPUShaderCreateInfo grass_vs_info = {};
@@ -366,9 +388,44 @@ int main(int argc, char* argv[]) {
     SDL_GPUTextureTransferInfo fb_tex_loc = { fallback_tb, 0, 0, 0 };
     SDL_GPUTextureRegion fb_tex_reg = { fallback_tex, 0, 0, 0, 0, 0, 1, 1, 1 };
     SDL_UploadToGPUTexture(init_pass, &fb_tex_loc, &fb_tex_reg, false);
+
+    // M2.5-19A: Volume Textural 3D de Nuvens via Cache Dinamico
+    SDL_GPUTextureCreateInfo cloud_tex_info = {};
+    cloud_tex_info.type = SDL_GPU_TEXTURETYPE_3D;
+    cloud_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    cloud_tex_info.width = 128;
+    cloud_tex_info.height = 32;
+    cloud_tex_info.layer_count_or_depth = 128;
+    cloud_tex_info.num_levels = 1;
+    cloud_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* cloud_tex = SDL_CreateGPUTexture(device, &cloud_tex_info);
+
+    SDL_GPUSamplerCreateInfo cloud_samp_info = {};
+    cloud_samp_info.min_filter = SDL_GPU_FILTER_LINEAR;
+    cloud_samp_info.mag_filter = SDL_GPU_FILTER_LINEAR;
+    cloud_samp_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    cloud_samp_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    cloud_samp_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    cloud_samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+    SDL_GPUSampler* cloud_sampler = SDL_CreateGPUSampler(device, &cloud_samp_info);
+    if (!cloud_sampler) { SDL_Log("FALHA cloud_sampler: %s", SDL_GetError()); return 1; }
+
+    std::vector<uint8_t> cloud_data = clouds::generate_cloud_noise(128, 32, 128);
+    SDL_GPUTransferBufferCreateInfo c_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)cloud_data.size() };
+    SDL_GPUTransferBuffer* cloud_tb = SDL_CreateGPUTransferBuffer(device, &c_tb_info);
+    void* cloud_map = SDL_MapGPUTransferBuffer(device, cloud_tb, false);
+    memcpy(cloud_map, cloud_data.data(), cloud_data.size());
+    SDL_UnmapGPUTransferBuffer(device, cloud_tb);
+
+    SDL_GPUTextureTransferInfo cloud_tex_loc = { cloud_tb, 0, 128, 32 };
+    SDL_GPUTextureRegion cloud_tex_reg = { cloud_tex, 0, 0, 0, 0, 0, 128, 32, 128 };
+    SDL_UploadToGPUTexture(init_pass, &cloud_tex_loc, &cloud_tex_reg, false);
+
     SDL_EndGPUCopyPass(init_pass);
     SDL_SubmitGPUCommandBuffer(init_cmd);
     SDL_ReleaseGPUTransferBuffer(device, fallback_tb);
+    SDL_ReleaseGPUTransferBuffer(device, cloud_tb);
+    SDL_Log("BOOT: nuvens ok, seguindo p/ ceu");
 
     std::vector<float> dome_vertices;
     std::vector<uint16_t> dome_indices;
@@ -573,6 +630,8 @@ int main(int argc, char* argv[]) {
 
     AppLog app_log;
     app_log.add("Res interna inicial: %dx%d", internal_w, internal_h);
+    app_log.add("SkyParams alinhado: %zu bytes", sizeof(SkyParams));
+    app_log.add("SunParams alinhado: %zu bytes", sizeof(SunParams));
 
     social::Relations rels;
     {
@@ -608,6 +667,170 @@ int main(int argc, char* argv[]) {
     phys::PhysState active_phys_state = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false };
 
     SDL_GPUTexture* active_grass_tex = nullptr;
+
+    auto replant_grass = [&]() {
+        if (grass_instbuf) {
+            SDL_WaitForGPUIdle(device);
+            SDL_ReleaseGPUBuffer(device, grass_instbuf);
+            grass_instbuf = nullptr;
+        }
+        grass_inst_count = 0;
+
+        if (terrain_indices.empty()) return;
+
+        std::vector<InstanceData> g_insts;
+        const uint32_t MAX_GRASS = 120000;
+        // Pre-escala justa: se o pedido total estoura o cap, TODOS afinam por igual (fim da fome por ordem)
+        float fair_total = 0.0f;
+        for (size_t ft = 0; ft < terrain_indices.size() / 3; ++ft) {
+            uint16_t fi0 = terrain_indices[ft*3+0], fi1 = terrain_indices[ft*3+1], fi2 = terrain_indices[ft*3+2];
+            glm::vec3 fv0(terrain_phys_verts[fi0*6+0], terrain_phys_verts[fi0*6+1], terrain_phys_verts[fi0*6+2]);
+            glm::vec3 fv1(terrain_phys_verts[fi1*6+0], terrain_phys_verts[fi1*6+1], terrain_phys_verts[fi1*6+2]);
+            glm::vec3 fv2(terrain_phys_verts[fi2*6+0], terrain_phys_verts[fi2*6+1], terrain_phys_verts[fi2*6+2]);
+            glm::vec3 fe1 = fv1 - fv0, fe2 = fv2 - fv0;
+            glm::vec3 fn = glm::normalize(glm::cross(fe1, fe2));
+            if (fn.y < grass_slope_min) continue;
+            fair_total += 0.5f * glm::length(glm::cross(fe1, fe2)) * grass_density;
+        }
+        float fair_scale = (fair_total > (float)MAX_GRASS) ? (float)MAX_GRASS / fair_total : 1.0f;
+
+        auto hash_float = [](uint32_t seed) {
+            seed = (seed ^ 61) ^ (seed >> 16);
+            seed *= 9;
+            seed = seed ^ (seed >> 4);
+            seed *= 0x27d4eb2d;
+            seed = seed ^ (seed >> 15);
+            return (float)seed / 4294967296.0f;
+            };
+
+        size_t num_tris = terrain_indices.size() / 3;
+        for (size_t t = 0; t < num_tris; ++t) {
+            if (g_insts.size() >= MAX_GRASS) break;
+
+            uint32_t i0 = terrain_indices[t * 3 + 0];
+            uint32_t i1 = terrain_indices[t * 3 + 1];
+            uint32_t i2 = terrain_indices[t * 3 + 2];
+
+            glm::vec3 v0(terrain_phys_verts[i0 * 6 + 0], terrain_phys_verts[i0 * 6 + 1], terrain_phys_verts[i0 * 6 + 2]);
+            glm::vec3 v1(terrain_phys_verts[i1 * 6 + 0], terrain_phys_verts[i1 * 6 + 1], terrain_phys_verts[i1 * 6 + 2]);
+            glm::vec3 v2(terrain_phys_verts[i2 * 6 + 0], terrain_phys_verts[i2 * 6 + 1], terrain_phys_verts[i2 * 6 + 2]);
+
+            glm::vec3 e1 = v1 - v0;
+            glm::vec3 e2 = v2 - v0;
+            glm::vec3 normal = glm::normalize(glm::cross(e1, e2));
+
+            if (normal.y < grass_slope_min) continue;
+
+            glm::vec3 c0(terrain_phys_verts[i0 * 6 + 3], terrain_phys_verts[i0 * 6 + 4], terrain_phys_verts[i0 * 6 + 5]);
+            glm::vec3 c1(terrain_phys_verts[i1 * 6 + 3], terrain_phys_verts[i1 * 6 + 4], terrain_phys_verts[i1 * 6 + 5]);
+            glm::vec3 c2(terrain_phys_verts[i2 * 6 + 3], terrain_phys_verts[i2 * 6 + 4], terrain_phys_verts[i2 * 6 + 5]);
+
+            // Area do triangulo governa a quantidade BRUTA de tufos (sem filtro de verdice)
+            float area = 0.5f * glm::length(glm::cross(e1, e2));
+            float expected_tufts = area * grass_density * fair_scale;
+
+            uint32_t base_tufts = (uint32_t)expected_tufts;
+            float frac_tufts = expected_tufts - base_tufts;
+
+            uint32_t tuft_count = base_tufts;
+            if (hash_float((uint32_t)t * 1337) < frac_tufts) tuft_count++;
+
+            for (uint32_t tufo_idx = 0; tufo_idx < tuft_count; ++tufo_idx) {
+                if (g_insts.size() >= MAX_GRASS) break;
+
+                float r1 = hash_float((uint32_t)t * 73856093 ^ tufo_idx * 19349663);
+                float r2 = hash_float((uint32_t)t * 83492791 ^ tufo_idx * 39916801);
+
+                float sqrt_r1 = std::sqrt(r1);
+                float u = 1.0f - sqrt_r1;
+                float v = sqrt_r1 * (1.0f - r2);
+                float w = 1.0f - u - v;
+
+                glm::vec3 inst_color = u * c0 + v * c1 + w * c2;
+
+                // M2.5-18: Porteiro Baricêntrico e Hashed Alpha (Dureza da Borda)
+                float verdice_ponto = std::clamp(inst_color.g - std::max(inst_color.r, inst_color.b), 0.0f, 1.0f);
+                float threshold = std::clamp((verdice_ponto - grass_verdice_min) * grass_border_sharp, 0.0f, 1.0f);
+                float brota_hash = hash_float((uint32_t)t * 45293047 ^ tufo_idx * 22468225);
+
+                if (brota_hash >= threshold) continue;
+
+                glm::vec3 pos = u * v0 + v * v1 + w * v2;
+
+                glm::vec2 g_pos = glm::vec2(pos.x, pos.z) / grass_clump_cell;
+                int gx = (int)std::floor(g_pos.x);
+                int gy = (int)std::floor(g_pos.y);
+
+                float min_d = 999.0f;
+                glm::vec2 best_c = g_pos;
+                float clump_hash = 0.0f;
+
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int cx = gx + dx;
+                        int cy = gy + dy;
+
+                        uint32_t s1 = (uint32_t)(cx * 73856093 ^ cy * 19349663);
+                        s1 = (s1 ^ 61) ^ (s1 >> 16); s1 *= 9; s1 = s1 ^ (s1 >> 4);
+                        s1 *= 0x27d4eb2d; s1 = s1 ^ (s1 >> 15);
+                        float hx = (float)s1 / 4294967296.0f;
+
+                        uint32_t s2 = (uint32_t)(cx * 83492791 ^ cy * 39916801);
+                        s2 = (s2 ^ 61) ^ (s2 >> 16); s2 *= 9; s2 = s2 ^ (s2 >> 4);
+                        s2 *= 0x27d4eb2d; s2 = s2 ^ (s2 >> 15);
+                        float hy = (float)s2 / 4294967296.0f;
+
+                        glm::vec2 pt = glm::vec2(cx, cy) + glm::vec2(hx, hy);
+                        float d = glm::length(g_pos - pt);
+                        if (d < min_d) {
+                            min_d = d;
+                            best_c = pt * grass_clump_cell;
+                            clump_hash = hx;
+                        }
+                    }
+                }
+
+                pos.x = glm::mix(pos.x, best_c.x, grass_clump_pull);
+                pos.z = glm::mix(pos.z, best_c.y, grass_clump_pull);
+                pos.y = v0.y - (normal.x * (pos.x - v0.x) + normal.z * (pos.z - v0.z)) / normal.y;
+
+                float tint_shift = (clump_hash - 0.5f) * 0.15f;
+                inst_color.r = std::clamp(inst_color.r + tint_shift, 0.0f, 1.0f);
+                inst_color.g = std::clamp(inst_color.g + tint_shift, 0.0f, 1.0f);
+                inst_color.b = std::clamp(inst_color.b + tint_shift, 0.0f, 1.0f);
+
+                g_insts.push_back({ pos.x, pos.y, pos.z, inst_color.r, inst_color.g, inst_color.b });
+            }
+        }
+
+        grass_inst_count = (uint32_t)g_insts.size();
+        if (grass_inst_count >= MAX_GRASS) {
+            app_log.add("Aviso: Limite MAX_GRASS atingido (%u)", MAX_GRASS);
+        }
+        app_log.add("Grama: %u tufos plantados", grass_inst_count);
+
+        if (grass_inst_count > 0) {
+            uint32_t ginst_sz = grass_inst_count * sizeof(InstanceData);
+            SDL_GPUBufferCreateInfo g_instinfo = { SDL_GPU_BUFFERUSAGE_VERTEX, ginst_sz };
+            grass_instbuf = SDL_CreateGPUBuffer(device, &g_instinfo);
+
+            SDL_GPUTransferBufferCreateInfo g_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, ginst_sz };
+            SDL_GPUTransferBuffer* g_tb = SDL_CreateGPUTransferBuffer(device, &g_tb_info);
+
+            void* g_map = SDL_MapGPUTransferBuffer(device, g_tb, false);
+            memcpy(g_map, g_insts.data(), ginst_sz);
+            SDL_UnmapGPUTransferBuffer(device, g_tb);
+
+            SDL_GPUCommandBuffer* l_cmd = SDL_AcquireGPUCommandBuffer(device);
+            SDL_GPUCopyPass* l_pass = SDL_BeginGPUCopyPass(l_cmd);
+            SDL_GPUTransferBufferLocation gl = { g_tb, 0 };
+            SDL_GPUBufferRegion gr = { grass_instbuf, 0, ginst_sz };
+            SDL_UploadToGPUBuffer(l_pass, &gl, &gr, false);
+            SDL_EndGPUCopyPass(l_pass);
+            SDL_SubmitGPUCommandBuffer(l_cmd);
+            SDL_ReleaseGPUTransferBuffer(device, g_tb);
+        }
+        };
 
     auto build_level = [&](const level::LevelData& lvl) {
         SDL_WaitForGPUIdle(device);
@@ -744,149 +967,28 @@ int main(int argc, char* argv[]) {
                 if (lvl.has_terrain && mesh_idx == lvl.terrain_mesh_index) {
                     std::vector<float> phys_verts;
                     phys_verts.reserve(vert_count * 3);
+                    terrain_phys_verts.clear();
+                    terrain_phys_verts.reserve(vert_count * 6);
+
                     for (size_t i = 0; i < vert_count; ++i) {
-                        phys_verts.push_back(asset.pos_rgb[i * 6 + 0] + m.x);
-                        phys_verts.push_back(asset.pos_rgb[i * 6 + 1] + m.y);
-                        phys_verts.push_back(asset.pos_rgb[i * 6 + 2] + m.z);
+                        float vx = asset.pos_rgb[i * 6 + 0] + m.x;
+                        float vy = asset.pos_rgb[i * 6 + 1] + m.y;
+                        float vz = asset.pos_rgb[i * 6 + 2] + m.z;
+                        phys_verts.push_back(vx);
+                        phys_verts.push_back(vy);
+                        phys_verts.push_back(vz);
+
+                        terrain_phys_verts.push_back(vx);
+                        terrain_phys_verts.push_back(vy);
+                        terrain_phys_verts.push_back(vz);
+                        terrain_phys_verts.push_back(asset.pos_rgb[i * 6 + 3]);
+                        terrain_phys_verts.push_back(asset.pos_rgb[i * 6 + 4]);
+                        terrain_phys_verts.push_back(asset.pos_rgb[i * 6 + 5]);
                     }
+                    terrain_indices = asset.indices;
+
                     uint32_t bid = phys::phys_create_mesh_shape(phys_verts.data(), vert_count, asset.indices.data(), asset.indices.size());
                     level_body_ids.push_back(bid);
-
-                    std::vector<InstanceData> g_insts;
-                    const uint32_t MAX_GRASS = 20000;
-
-                    auto hash_float = [](uint32_t seed) {
-                        seed = (seed ^ 61) ^ (seed >> 16);
-                        seed *= 9;
-                        seed = seed ^ (seed >> 4);
-                        seed *= 0x27d4eb2d;
-                        seed = seed ^ (seed >> 15);
-                        return (float)seed / 4294967296.0f;
-                        };
-
-                    size_t num_tris = asset.indices.size() / 3;
-                    for (size_t t = 0; t < num_tris; ++t) {
-                        if (g_insts.size() >= MAX_GRASS) break;
-
-                        uint32_t i0 = asset.indices[t * 3 + 0];
-                        uint32_t i1 = asset.indices[t * 3 + 1];
-                        uint32_t i2 = asset.indices[t * 3 + 2];
-
-                        glm::vec3 v0(phys_verts[i0 * 3], phys_verts[i0 * 3 + 1], phys_verts[i0 * 3 + 2]);
-                        glm::vec3 v1(phys_verts[i1 * 3], phys_verts[i1 * 3 + 1], phys_verts[i1 * 3 + 2]);
-                        glm::vec3 v2(phys_verts[i2 * 3], phys_verts[i2 * 3 + 1], phys_verts[i2 * 3 + 2]);
-
-                        glm::vec3 e1 = v1 - v0;
-                        glm::vec3 e2 = v2 - v0;
-                        glm::vec3 normal = glm::normalize(glm::cross(e1, e2));
-
-                        if (normal.y < grass_slope_min) continue;
-
-                        glm::vec3 c0(asset.pos_rgb[i0 * 6 + 3], asset.pos_rgb[i0 * 6 + 4], asset.pos_rgb[i0 * 6 + 5]);
-                        glm::vec3 c1(asset.pos_rgb[i1 * 6 + 3], asset.pos_rgb[i1 * 6 + 4], asset.pos_rgb[i1 * 6 + 5]);
-                        glm::vec3 c2(asset.pos_rgb[i2 * 6 + 3], asset.pos_rgb[i2 * 6 + 4], asset.pos_rgb[i2 * 6 + 5]);
-                        glm::vec3 color = (c0 + c1 + c2) / 3.0f;
-
-                        float verdice = std::clamp(color.g - std::max(color.r, color.b), 0.0f, 1.0f);
-                        if (verdice < grass_verdice_min) continue;
-
-                        float area = 0.5f * glm::length(glm::cross(e1, e2));
-                        float expected_tufts = area * grass_density * verdice;
-
-                        uint32_t base_tufts = (uint32_t)expected_tufts;
-                        float frac_tufts = expected_tufts - base_tufts;
-
-                        uint32_t tuft_count = base_tufts;
-                        if (hash_float((uint32_t)t * 1337) < frac_tufts) tuft_count++;
-
-                        for (uint32_t tufo_idx = 0; tufo_idx < tuft_count; ++tufo_idx) {
-                            if (g_insts.size() >= MAX_GRASS) break;
-
-                            float r1 = hash_float((uint32_t)t * 73856093 ^ tufo_idx * 19349663);
-                            float r2 = hash_float((uint32_t)t * 83492791 ^ tufo_idx * 39916801);
-
-                            float sqrt_r1 = std::sqrt(r1);
-                            float u = 1.0f - sqrt_r1;
-                            float v = sqrt_r1 * (1.0f - r2);
-                            float w = 1.0f - u - v;
-
-                            glm::vec3 pos = u * v0 + v * v1 + w * v2;
-                            glm::vec3 inst_color = u * c0 + v * c1 + w * c2;
-
-                            glm::vec2 g_pos = glm::vec2(pos.x, pos.z) / grass_clump_cell;
-                            int gx = (int)std::floor(g_pos.x);
-                            int gy = (int)std::floor(g_pos.y);
-
-                            float min_d = 999.0f;
-                            glm::vec2 best_c = g_pos;
-                            float clump_hash = 0.0f;
-
-                            for (int dy = -1; dy <= 1; ++dy) {
-                                for (int dx = -1; dx <= 1; ++dx) {
-                                    int cx = gx + dx;
-                                    int cy = gy + dy;
-
-                                    uint32_t s1 = (uint32_t)(cx * 73856093 ^ cy * 19349663);
-                                    s1 = (s1 ^ 61) ^ (s1 >> 16); s1 *= 9; s1 = s1 ^ (s1 >> 4);
-                                    s1 *= 0x27d4eb2d; s1 = s1 ^ (s1 >> 15);
-                                    float hx = (float)s1 / 4294967296.0f;
-
-                                    uint32_t s2 = (uint32_t)(cx * 83492791 ^ cy * 39916801);
-                                    s2 = (s2 ^ 61) ^ (s2 >> 16); s2 *= 9; s2 = s2 ^ (s2 >> 4);
-                                    s2 *= 0x27d4eb2d; s2 = s2 ^ (s2 >> 15);
-                                    float hy = (float)s2 / 4294967296.0f;
-
-                                    glm::vec2 pt = glm::vec2(cx, cy) + glm::vec2(hx, hy);
-                                    float d = glm::length(g_pos - pt);
-                                    if (d < min_d) {
-                                        min_d = d;
-                                        best_c = pt * grass_clump_cell;
-                                        clump_hash = hx;
-                                    }
-                                }
-                            }
-
-                            pos.x = glm::mix(pos.x, best_c.x, grass_clump_pull);
-                            pos.z = glm::mix(pos.z, best_c.y, grass_clump_pull);
-                            // re-projeta y no plano do triangulo (pull horizontal nao flutua/enterra na ladeira)
-                            pos.y = v0.y - (normal.x * (pos.x - v0.x) + normal.z * (pos.z - v0.z)) / normal.y;
-
-                            float tint_shift = (clump_hash - 0.5f) * 0.15f;
-                            inst_color.r = std::clamp(inst_color.r + tint_shift, 0.0f, 1.0f);
-                            inst_color.g = std::clamp(inst_color.g + tint_shift, 0.0f, 1.0f);
-                            inst_color.b = std::clamp(inst_color.b + tint_shift, 0.0f, 1.0f);
-
-                            g_insts.push_back({ pos.x, pos.y, pos.z, inst_color.r, inst_color.g, inst_color.b });
-                        }
-                    }
-
-                    grass_inst_count = (uint32_t)g_insts.size();
-                    if (grass_inst_count >= MAX_GRASS) {
-                        app_log.add("Aviso: Limite MAX_GRASS atingido (%u)", MAX_GRASS);
-                    }
-                    app_log.add("Grama: %u tufos plantados", grass_inst_count);
-
-                    if (grass_inst_count > 0) {
-                        uint32_t ginst_sz = grass_inst_count * sizeof(InstanceData);
-                        SDL_GPUBufferCreateInfo g_instinfo = { SDL_GPU_BUFFERUSAGE_VERTEX, ginst_sz };
-                        grass_instbuf = SDL_CreateGPUBuffer(device, &g_instinfo);
-
-                        SDL_GPUTransferBufferCreateInfo g_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, ginst_sz };
-                        SDL_GPUTransferBuffer* g_tb = SDL_CreateGPUTransferBuffer(device, &g_tb_info);
-
-                        void* g_map = SDL_MapGPUTransferBuffer(device, g_tb, false);
-                        memcpy(g_map, g_insts.data(), ginst_sz);
-                        SDL_UnmapGPUTransferBuffer(device, g_tb);
-
-                        SDL_GPUCommandBuffer* l_cmd = SDL_AcquireGPUCommandBuffer(device);
-                        SDL_GPUCopyPass* l_pass = SDL_BeginGPUCopyPass(l_cmd);
-                        SDL_GPUTransferBufferLocation gl = { g_tb, 0 };
-                        SDL_GPUBufferRegion gr = { grass_instbuf, 0, ginst_sz };
-                        SDL_UploadToGPUBuffer(l_pass, &gl, &gr, false);
-                        SDL_EndGPUCopyPass(l_pass);
-                        SDL_SubmitGPUCommandBuffer(l_cmd);
-                        SDL_ReleaseGPUTransferBuffer(device, g_tb);
-                    }
                 }
 
                 LoadedAsset la;
@@ -1043,9 +1145,10 @@ int main(int argc, char* argv[]) {
         prev_player_pos = current_player_pos;
 
         level_box_count = lvl.boxes.size();
+        replant_grass();
         };
 
-    const char* npc_names[5] = { "Ana", "Bruno", "Cora", "Davi", "Eva" };
+        const char* npc_names[5] = { "Ana", "Bruno", "Cora", "Davi", "Eva" };
     float npc_colors[5][3] = { {1.0f, 0.3f, 0.3f}, {0.3f, 1.0f, 0.3f}, {0.3f, 0.3f, 1.0f}, {1.0f, 1.0f, 0.3f}, {1.0f, 0.3f, 1.0f} };
     social::Schedule npc_scheds[5];
     social::NpcState npcs[5];
@@ -1154,7 +1257,7 @@ int main(int argc, char* argv[]) {
     pipe_info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
 
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipe_info);
-    if (!pipeline) return 1;
+    if (!pipeline) { SDL_Log("FALHA pipeline (basic): %s", SDL_GetError()); return 1; }
 
     SDL_GPUVertexAttribute sky_attr[1] = {};
     sky_attr[0].location = 0;
@@ -1186,7 +1289,7 @@ int main(int argc, char* argv[]) {
     sky_pipe_info.vertex_input_state.vertex_buffer_descriptions = sky_vb_desc;
 
     SDL_GPUGraphicsPipeline* sky_pipeline = SDL_CreateGPUGraphicsPipeline(device, &sky_pipe_info);
-    if (!sky_pipeline) return 1;
+    if (!sky_pipeline) { SDL_Log("FALHA sky_pipeline: %s", SDL_GetError()); return 1; }
 
     SDL_GPUGraphicsPipelineCreateInfo grass_pipe_info = pipe_info;
     grass_pipe_info.vertex_shader = grass_vs;
@@ -1209,7 +1312,7 @@ int main(int argc, char* argv[]) {
     out_pipe_info.target_info.color_target_descriptions = &out_color_desc;
 
     SDL_GPUGraphicsPipeline* out_pipeline = SDL_CreateGPUGraphicsPipeline(device, &out_pipe_info);
-    if (!out_pipeline) return 1;
+    if (!out_pipeline) { SDL_Log("FALHA out_pipeline: %s", SDL_GetError()); return 1; }
 
     SDL_GPUColorTargetDescription fs_color_desc = {};
     fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
@@ -1224,7 +1327,7 @@ int main(int argc, char* argv[]) {
     fs_pipe_info.target_info.color_target_descriptions = &fs_color_desc;
 
     SDL_GPUGraphicsPipeline* fs_pipeline = SDL_CreateGPUGraphicsPipeline(device, &fs_pipe_info);
-    if (!fs_pipeline) return 1;
+    if (!fs_pipeline) { SDL_Log("FALHA fs_pipeline: %s", SDL_GetError()); return 1; }
 
     ImGui::CreateContext();
     ImGui_ImplSDL3_InitForSDLGPU(window);
@@ -1270,6 +1373,30 @@ int main(int argc, char* argv[]) {
 
     bool draw_sky = true;
     float fog_density = 0.006f;
+
+    // M2.5-20: Parametros Screen-Space God Rays
+    float ray_strength = 0.6f;
+    float ray_decay = 0.97f;
+    int   ray_samples = 48;
+
+    // M2.5-19A: Parametros interativos do volume
+    bool draw_clouds = true;
+    float cloud_cobertura = 0.45f;
+    float cloud_densidade = 3.0f;
+    float cloud_escala = 0.005f;
+    float cloud_speed = 1.0f;
+    int cloud_passos = 16;
+    float cloud_h_min = 120.0f;
+    float cloud_h_max = 220.0f;
+    float cloud_cap = 600.0f;
+    float cloud_absorcao = 1.0f;
+    float cloud_hg_g_frontal = 0.8f;
+    float cloud_powder_str = 0.5f;
+    float shadow_str = 0.55f;
+
+    // M2.5-19C: Cloud Tuning
+    float cloud_type_blend = 0.5f;
+    float cloud_erosao_str = 0.4f;
 
     int view_mode = 0;
     const char* view_modes[] = { "Final", "Normais+ID", "Sem outline" };
@@ -1859,8 +1986,10 @@ int main(int argc, char* argv[]) {
         static float grass_scale = 1.0f;
         ImGui::Checkbox("Grama", &draw_grass);
         ImGui::SliderFloat("Escala do tufo", &grass_scale, 0.3f, 2.0f);
-        ImGui::SliderFloat("Densidade (F5 replanta)", &grass_density, 0.0f, 30.0f);
+        ImGui::SliderFloat("Densidade", &grass_density, 0.0f, 30.0f);
         ImGui::SliderFloat("Verdice min", &grass_verdice_min, 0.0f, 0.3f);
+        ImGui::SetItemTooltip("verde mínimo p/ brotar (borracha = marrom)");
+        ImGui::SliderFloat("Dureza da borda", &grass_border_sharp, 1.0f, 40.0f);
         ImGui::SliderFloat("Slope min", &grass_slope_min, 0.0f, 1.0f);
 
         ImGui::Separator();
@@ -1870,12 +1999,8 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Vento: Direcao", &wind::dir_deg, 0.0f, 360.0f);
         ImGui::SliderFloat("Vento: Forca", &wind::strength, 0.0f, 2.0f);
 
-        if (ImGui::Button("Replantar Grama (ou F5)")) {
-            SDL_Event evt;
-            SDL_zero(evt);
-            evt.type = SDL_EVENT_KEY_DOWN;
-            evt.key.key = SDLK_F5;
-            SDL_PushEvent(&evt);
+        if (ImGui::Button("Replantar Grama")) {
+            replant_grass();
         }
 
         const char* modos_pixel[] = { "Divisor", "Altura fixa" };
@@ -2023,6 +2148,21 @@ int main(int argc, char* argv[]) {
         ImGui::Begin("Sol");
         ImGui::Checkbox("Ceu (Processual)", &draw_sky);
         ImGui::SliderFloat("Densidade do Fog", &fog_density, 0.0f, 0.02f, "%.4f");
+
+        ImGui::Separator();
+        ImGui::Text("Nuvens Volumetricas");
+        ImGui::Checkbox("Renderizar Nuvens", &draw_clouds);
+        ImGui::SliderFloat("Tipo de Nuvem", &cloud_type_blend, 0.0f, 1.0f, "Stratus -> Cumulonimbus");
+        ImGui::SliderFloat("Erosao de Topo", &cloud_erosao_str, 0.0f, 1.0f);
+        ImGui::SliderFloat("Cobertura", &cloud_cobertura, 0.0f, 1.0f);
+        ImGui::SliderFloat("Densidade Volume", &cloud_densidade, 0.5f, 8.0f);
+        ImGui::SliderFloat("Escala do Ruido", &cloud_escala, 0.001f, 0.02f, "%.4f");
+        ImGui::SliderFloat("Sombra de nuvem", &shadow_str, 0.0f, 1.0f);
+        ImGui::SliderFloat("Velocidade", &cloud_speed, 0.0f, 3.0f);
+        ImGui::SliderInt("Passos", &cloud_passos, 8, 48);
+        ImGui::SliderFloat("Powder", &cloud_powder_str, 0.0f, 1.0f);
+        ImGui::SliderFloat("G frontal", &cloud_hg_g_frontal, 0.5f, 0.85f);
+
         ImGui::Separator();
         ImGui::Checkbox("Sol automatico", &sol_automatico);
         if (sol_automatico) {
@@ -2035,6 +2175,13 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Ambient (Dia)", &sun_ambient, 0.0f, 1.0f);
         ImGui::SliderFloat3("Color", sun_color_arr, 0.0f, 1.0f);
         ImGui::SliderFloat("Intensity", &sun_intensity, 0.0f, 5.0f);
+
+        ImGui::Separator();
+        ImGui::Text("God Rays (Screen-Space)");
+        ImGui::SliderFloat("Forca dos raios", &ray_strength, 0.0f, 2.0f);
+        ImGui::SliderFloat("Decay", &ray_decay, 0.9f, 0.99f, "%.3f");
+        ImGui::SliderInt("Amostras", &ray_samples, 16, 64);
+
         ImGui::Separator();
         ImGui::SliderInt("Cortes", &toon_cuts, 2, 5);
         ImGui::SliderFloat("Suavidade", &toon_soft, 0.5f, 3.0f);
@@ -2218,7 +2365,10 @@ int main(int argc, char* argv[]) {
                 c_zenith = day_w * zd + sunset_w * zp + night_w * zn;
                 c_horizon = day_w * hd + sunset_w * hp + night_w * hn;
 
-                effective_ambient = sun_ambient * (1.0f - night_w) + 0.10f * night_w;
+                // M2.5-19C: Base lunar noturna - piso garantido de luz
+                float min_ambient_night = 0.04f;
+                effective_ambient = sun_ambient * (1.0f - night_w) + min_ambient_night * night_w;
+                effective_intensity = sun_intensity * (1.0f - night_w) + 0.1f * night_w; // Lua minima iluminando o campo
             }
             else {
                 float sy_rad = glm::radians(sun_yaw);
@@ -2237,7 +2387,27 @@ int main(int argc, char* argv[]) {
             // A luz vem DO sol PARA O CHAO (convencao da iluminacao do cenario mantida)
             glm::vec3 s_dir = -to_sun_vec;
 
-            // M2.5-13: O Bloco do Ceu enxuto com vetor to_sun unificado 
+            glm::vec3 c_cloud_day(0.95f, 0.95f, 0.95f);
+            glm::vec3 c_cloud_sunset(0.95f, 0.85f, 0.70f);
+            glm::vec3 c_cloud_night(0.08f, 0.1f, 0.15f);
+
+            glm::vec3 c_sky_amb_day(0.45f, 0.65f, 0.95f); // Azulada contra a luz solar
+            glm::vec3 c_sky_amb_sunset(0.85f, 0.60f, 0.70f);
+            glm::vec3 c_sky_amb_night(0.02f, 0.03f, 0.08f);
+
+            glm::vec3 effective_cloud_color = c_cloud_day;
+            glm::vec3 effective_sky_amb = c_sky_amb_day;
+
+            if (sol_automatico) {
+                auto saturate = [](float x) { return std::max(0.0f, std::min(1.0f, x)); };
+                float day_w = saturate(to_sun_vec.y);
+                float sunset_w = saturate(1.0f - std::fabs(to_sun_vec.y));
+                float night_w = saturate(-to_sun_vec.y);
+
+                effective_cloud_color = day_w * c_cloud_day + sunset_w * c_cloud_sunset + night_w * c_cloud_night;
+                effective_sky_amb = day_w * c_sky_amb_day + sunset_w * c_sky_amb_sunset + night_w * c_sky_amb_night;
+            }
+
             SkyParams sky_params;
             sky_params.to_sun[0] = to_sun_vec.x;
             sky_params.to_sun[1] = to_sun_vec.y;
@@ -2256,14 +2426,55 @@ int main(int argc, char* argv[]) {
             sky_params.sun_color[2] = sun_color_arr[2] * effective_intensity;
             sky_params.pad3 = 0.0f;
 
+            sky_params.cam_pos[0] = cam_pos.x;
+            sky_params.cam_pos[1] = cam_pos.y;
+            sky_params.cam_pos[2] = cam_pos.z;
+            sky_params.pad4 = 0.0f;
+
+            float w_rad = glm::radians(wind::dir_deg);
+            sky_params.wind_dir[0] = cos(w_rad);
+            sky_params.wind_dir[1] = sin(w_rad);
+            sky_params.time = (float)(sim_tick * DT);
+            sky_params.cloud_speed = cloud_speed;
+
+            sky_params.cloud_color[0] = effective_cloud_color.r;
+            sky_params.cloud_color[1] = effective_cloud_color.g;
+            sky_params.cloud_color[2] = effective_cloud_color.b;
+            sky_params.cobertura = draw_clouds ? cloud_cobertura : -2.0f;
+
+            sky_params.densidade = cloud_densidade;
+            sky_params.escala = cloud_escala;
+            sky_params.h_min = cloud_h_min;
+            sky_params.h_max = cloud_h_max;
+
+            sky_params.cap = cloud_cap;
+            sky_params.passos = (float)cloud_passos;
+            sky_params.absorcao = cloud_absorcao;
+            sky_params.hg_g_frontal = cloud_hg_g_frontal;
+            sky_params.powder_str = cloud_powder_str;
+            sky_params.sun_intensity = effective_intensity;
+            sky_params.sun_ambient = effective_ambient;
+
+            // M2.5-19C: Aditivos de Nuvem Dupla e Type/Erosion
+            sky_params.cloud_type = cloud_type_blend;
+            sky_params.erosao_str = cloud_erosao_str;
+            sky_params.pad_a = 0.0f;
+            sky_params.pad_b = 0.0f;
+            sky_params.pad_c = 0.0f;
+
+            sky_params.sky_ambient_color[0] = effective_sky_amb.r;
+            sky_params.sky_ambient_color[1] = effective_sky_amb.g;
+            sky_params.sky_ambient_color[2] = effective_sky_amb.b;
+            sky_params.pad_d = 0.0f;
+
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
             sun_params.dir[1] = s_dir.y;
             sun_params.dir[2] = s_dir.z;
             sun_params.ambient = effective_ambient;
-            sun_params.color[0] = sun_color_arr[0] * effective_intensity;
-            sun_params.color[1] = sun_color_arr[1] * effective_intensity;
-            sun_params.color[2] = sun_color_arr[2] * effective_intensity;
+            sun_params.color[0] = sun_color_arr[0] * sun_intensity; // Volta ao cru no basic. A mascara cuida do esmaecimento de intensity agora
+            sun_params.color[1] = sun_color_arr[1] * sun_intensity;
+            sun_params.color[2] = sun_color_arr[2] * sun_intensity;
             sun_params.pad = 0.0f;
             sun_params.cam_pos[0] = cam_pos.x;
             sun_params.cam_pos[1] = cam_pos.y;
@@ -2271,12 +2482,16 @@ int main(int argc, char* argv[]) {
             sun_params.pad2 = 0.0f;
             sun_params.toon_cuts = (float)toon_cuts;
             sun_params.toon_soft = toon_soft;
-            sun_params.pad3[0] = 0.0f;
-            sun_params.pad3[1] = 0.0f;
+            sun_params.wind_dir[0] = cos(w_rad);
+            sun_params.wind_dir[1] = sin(w_rad);
             sun_params.fog_color[0] = c_horizon.x;
             sun_params.fog_color[1] = c_horizon.y;
             sun_params.fog_color[2] = c_horizon.z;
             sun_params.fog_density = fog_density;
+            sun_params.cloud_time = (float)(sim_tick * DT) * cloud_speed; // sombra anda NA velocidade da nuvem
+            sun_params.cloud_cover = draw_clouds ? cloud_cobertura : -2.0f;
+            sun_params.shadow_str = shadow_str;
+            sun_params.pad3 = 0.0f;
 
             ImGui_ImplSDLGPU3_PrepareDrawData(dd, cmd_buffer);
 
@@ -2315,6 +2530,12 @@ int main(int argc, char* argv[]) {
 
                 SDL_GPUBufferBinding sky_ib_bind = { dome_index_buffer, 0 };
                 SDL_BindGPUIndexBuffer(scene_pass, &sky_ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+
+                SDL_GPUTextureSamplerBinding sky_samps[2] = {
+                    { fallback_tex, sampler }, // t0/s0 fallback (nao usado na abobada)
+                    { cloud_tex, cloud_sampler }     // t1/s1 do Raymarch (wrap address e filtering)
+                };
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, sky_samps, 2);
 
                 SDL_DrawGPUIndexedPrimitives(scene_pass, dome_indices.size(), 1, 0, 0, 0);
             }
@@ -2485,19 +2706,44 @@ int main(int argc, char* argv[]) {
             SDL_GPURenderPass* fs_pass = SDL_BeginGPURenderPass(cmd_buffer, &upscale_color_target, 1, nullptr);
             SDL_BindGPUGraphicsPipeline(fs_pass, fs_pipeline);
 
+            // M2.5-20: Projecao do Astro Sol na Matriz de View (Screen Space Pos)
+            glm::mat4 view_rot_only = glm::lookAtLH(glm::vec3(0.0f), front, glm::vec3(0, 1, 0));
+            glm::mat4 mvp_no_trans = proj * view_rot_only;
+            glm::vec4 sun_clip = mvp_no_trans * glm::vec4(to_sun_vec, 1.0f);
+            glm::vec3 sun_ndc = glm::vec3(sun_clip) / sun_clip.w;
+            glm::vec2 sun_screen_pos = glm::vec2(sun_ndc.x * 0.5f + 0.5f, -sun_ndc.y * 0.5f + 0.5f);
+
+            // Mascara de Fade: se a camera apontar p/ o lado oposto do Sol, os raios esmaecem suavemente
+            float dot_sun_cam = glm::dot(front, to_sun_vec);
+            float r_fade = std::clamp(dot_sun_cam * 2.0f, 0.0f, 1.0f);
+
             FsParams fs_params;
             fs_params.tex_size[0] = (float)internal_w;
             fs_params.tex_size[1] = (float)internal_h;
+            fs_params.sun_screen[0] = sun_screen_pos.x;
+            fs_params.sun_screen[1] = sun_screen_pos.y;
+            fs_params.ray_color[0] = sun_color_arr[0];
+            fs_params.ray_color[1] = sun_color_arr[1];
+            fs_params.ray_color[2] = sun_color_arr[2];
+            // Anular god rays nas views de debig de normal/sem outline para nao sujar a validacao
+            fs_params.ray_intensity = (view_mode == 0) ? (ray_strength * r_fade) : 0.0f;
+            fs_params.ray_decay = ray_decay;
+            fs_params.ray_samples = (float)ray_samples;
             fs_params.pad[0] = 0.0f;
             fs_params.pad[1] = 0.0f;
+
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &fs_params, sizeof(FsParams));
 
             SDL_GPUTexture* upscale_source = composite_color;
             if (view_mode == 1) upscale_source = normal_id;
             else if (view_mode == 2) upscale_source = scene_color;
 
-            SDL_GPUTextureSamplerBinding fs_samp_bind = { upscale_source, upscale_sampler };
-            SDL_BindGPUFragmentSamplers(fs_pass, 0, &fs_samp_bind, 1);
+            // O Pass Fullscreen agora bebe da id_mask pra calcular a oclusão volumetrica da luz
+            SDL_GPUTextureSamplerBinding fs_samp_binds[2] = {
+                { upscale_source, upscale_sampler },
+                { normal_id, upscale_sampler }
+            };
+            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 2);
 
             SDL_DrawGPUPrimitives(fs_pass, 3, 1, 0, 0);
             SDL_EndGPURenderPass(fs_pass);
@@ -2562,6 +2808,7 @@ int main(int argc, char* argv[]) {
 
     SDL_ReleaseGPUTexture(device, scene_color);
     SDL_ReleaseGPUTexture(device, normal_id);
+    SDL_ReleaseGPUTexture(device, cloud_tex);
 
     SDL_ReleaseGPUGraphicsPipeline(device, grass_pipeline);
     SDL_ReleaseGPUShader(device, grass_vs);

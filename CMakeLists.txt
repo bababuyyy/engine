@@ -92,7 +92,7 @@ add_custom_command(
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/grass.hlsl
 )
 
-add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp src/social/social.cpp)
+add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp src/social/social.cpp src/clouds/cloud_noise.h src/clouds/cloud_noise.cpp)
 target_sources(engine PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/basic_vs.h ${CMAKE_CURRENT_BINARY_DIR}/basic_ps.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_vs.h ${CMAKE_CURRENT_BINARY_DIR}/fullscreen_ps.h ${CMAKE_CURRENT_BINARY_DIR}/outline_vs.h ${CMAKE_CURRENT_BINARY_DIR}/outline_ps.h ${CMAKE_CURRENT_BINARY_DIR}/sky_vs.h ${CMAKE_CURRENT_BINARY_DIR}/sky_ps.h ${CMAKE_CURRENT_BINARY_DIR}/grass_vs.h ${CMAKE_CURRENT_BINARY_DIR}/grass_ps.h)
 target_include_directories(engine PRIVATE src ${CMAKE_CURRENT_BINARY_DIR} ${cgltf_SOURCE_DIR} ${stb_SOURCE_DIR})
 target_link_libraries(engine PRIVATE SDL3::SDL3-static imgui_lib glm::glm Jolt)
