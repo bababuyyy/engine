@@ -245,7 +245,7 @@ float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
 float clima_type_teto = 0.80f;
 float cloud_curvatura = 0.000025f; // M2.5-24G-6: horizonte honesto
 float cloud_fade_ini = 0.45f;
-float cloud_passo_far = 2.0f; // M2.5-24J-2 (A18): crescimento do passo no longe (0 = passo fixo)
+float cloud_passo_far = 0.0f; // M2.5-24J-2b (A18): crescimento do passo no longe (0 = passo fixo; LIGAR e decisao de retina)
 
 bool sol_automatico = true;
 bool sol_hora_manual = false;  // M2.5-24G-5: override de apresentacao (nao persiste de proposito)

@@ -274,9 +274,10 @@ PSOutput PSMain(PSInput input)
             // concretizacao da casa; a fonte nao fixa numero).
             bool modo_caro = false;
             int zeros_seguidos = 0;
+            bool deu_passo_barato = true; // 24J-2b: recuo so e permitido depois de ANDAR barato
 
             [loop] // M2.5-24J-2: marcha com ESTADO (barato/caro) - loop dinamico
-            for (int i = 0; i < (int) passos; ++i)
+            for (int i = 0; i < (int) (passos * 3.0f); ++i) // 24J-2b: orcamento de ITERACOES (3x Passos); amostras caras continuam ~Passos
             {
                 float3 p = cam_pos + dir * t;
 
@@ -293,6 +294,7 @@ PSOutput PSMain(PSInput input)
 
                 if (p_c.y < h_min || p_c.y > h_max)
                 {
+                    deu_passo_barato = true; // 24J-2b: movimento real - recuo seguro
                     t += sz * 2.0f; // fora da camada: passo largo de graca
                     continue;
                 }
@@ -306,9 +308,14 @@ PSOutput PSMain(PSInput input)
                     {
                         modo_caro = true;
                         zeros_seguidos = 0;
-                        t = max(t - sz * 2.0f, t_min); // "we take one step back" (Nutshell)
+                        if (deu_passo_barato) // 24J-2b: so recua se a marcha barata andou ate aqui
+                        {
+                            t = max(t - sz * 2.0f, t_min); // "we take one step back" (Nutshell)
+                        }
+                        deu_passo_barato = false;
                         continue;
                     }
+                    deu_passo_barato = true;
                     t += sz * 2.0f; // passo largo: "reduces the number of samples by half"
                     continue;
                 }
