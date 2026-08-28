@@ -264,7 +264,7 @@ PSOutput PSMain(PSInput input)
             float step_sz = (t_max - t_min) / passos;
             int2 px = int2(input.pos.xy) % 4;
             float dither = bayer[px.y * 4 + px.x];
-            float t = t_min + step_sz * dither;
+            float t = t_min + step_sz * 2.0f * dither; // 24J-2c: jitter cobre o quantum BARATO (2 passos) - fases decorrelacionadas
 
             float2 wdisp = wind_dir * time * cloud_speed * -200.0f;
 
@@ -310,7 +310,7 @@ PSOutput PSMain(PSInput input)
                         zeros_seguidos = 0;
                         if (deu_passo_barato) // 24J-2b: so recua se a marcha barata andou ate aqui
                         {
-                            t = max(t - sz * 2.0f, t_min); // "we take one step back" (Nutshell)
+                            t = max(t - sz * (2.0f - dither), t_min); // 24J-2c: "one step back" com jitter - pixels vizinhos nao realinham
                         }
                         deu_passo_barato = false;
                         continue;

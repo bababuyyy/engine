@@ -2600,7 +2600,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Escala do Ruido", &cloud_escala, 0.001f, 0.02f, "%.4f");
         ImGui::SliderFloat("Sombra de nuvem", &shadow_str, 0.0f, 1.0f);
         ImGui::SliderFloat("Velocidade", &cloud_speed, 0.0f, 3.0f);
-        ImGui::SliderInt("Passos", &cloud_passos, 8, 48);
+        ImGui::SliderInt("Passos", &cloud_passos, 8, 120); // 24J-2c: teto do Nutshell ("maximum of 120 samples at the horizon")
         ImGui::SliderFloat("Powder", &cloud_powder_str, 0.0f, 1.0f);
         ImGui::SliderFloat("G frontal", &cloud_hg_g_frontal, 0.5f, 0.85f);
         ImGui::SliderFloat("Ambiente da nuvem", &cloud_ambient_str, 0.0f, 2.0f);
