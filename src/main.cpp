@@ -153,7 +153,7 @@ struct FsParams { // M2.5-24H: shafts volumetricos
     float sun_color[3];  float shaft_samples;
     float tex_size[2];   float wind_off[2];
     float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
-    float tonemap_shoulder; float exposure; float shaft_cloud_occ; float pad_i2; // 24I-2: exposicao
+    float tonemap_shoulder; float exposure; float shaft_cloud_occ; float cloud_mid; // 24I-3: altura media da camada
 };
 static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
 
@@ -3352,7 +3352,7 @@ int main(int argc, char* argv[]) {
             fs_params.tonemap_shoulder = tonemap_shoulder;
             fs_params.exposure = exposure;
             fs_params.shaft_cloud_occ = shaft_cloud_occ;
-            fs_params.pad_i2 = 0.0f;
+            fs_params.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
             // Anular shafts nas views de debug para nao sujar a validacao
             fs_params.shaft_intensity = (view_mode == 0) ? ray_strength : 0.0f;
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;

@@ -47,7 +47,7 @@ cbuffer FsBlock : register(b0, space3)
     float tonemap_shoulder; // M2.5-24I
     float exposure;         // M2.5-24I-2
     float shaft_cloud_occ;
-    float pad_i2;
+    float cloud_mid;        // M2.5-24I-3
 };
 
 static const float bayer[16] =
@@ -121,9 +121,12 @@ float4 PSMain(PSInput input) : SV_Target0
                 vis = shadow_map.SampleCmpLevelZero(shadow_cmp, suv, lndc.z - 0.0015f);
             }
 
-            // Sombra de nuvem: o MESMO weather map do ceu (sincronia por construcao)
-            float cov = saturate((weather_map.SampleLevel(weather_samp, (p.xz + wind_off) * 0.0002f, 0).r - 0.22f) / 0.55f);
-            // M2.5-24I-2: oclusao quase-binaria - raio SO onde a nuvem deixa (contraste e o segredo)
+            // M2.5-24I-3: a nuvem que tapa este ponto NAO e a de cima dele - e a que esta
+            // ENTRE ele e o sol. Projetar a amostra ate a camada na direcao solar.
+            float sun_y = max(to_sun.y, 0.06f);
+            float t_layer = clamp((cloud_mid - p.y) / sun_y, 0.0f, 4000.0f);
+            float2 cpos = p.xz + to_sun.xz * t_layer;
+            float cov = saturate((weather_map.SampleLevel(weather_samp, (cpos + wind_off) * 0.0002f, 0).r - 0.22f) / 0.55f);
             vis *= saturate(1.0f - shaft_cloud_occ * cov * saturate(cloud_cover * 1.5f));
 
             // Integral conservadora de energia (Hillaire 2015, verbatim adaptado)
