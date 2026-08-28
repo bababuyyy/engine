@@ -242,6 +242,8 @@ float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
 float clima_type_teto = 0.80f;
 
 bool sol_automatico = true;
+bool sol_hora_manual = false;  // M2.5-24G-5: override de apresentacao (nao persiste de proposito)
+float sol_hora = 12.0f;
 float arco_inclinacao = 25.0f;
 float sun_yaw = 45.0f;
 float sun_pitch = -45.0f;
@@ -2564,6 +2566,9 @@ int main(int argc, char* argv[]) {
 
         ImGui::Separator();
         ImGui::Checkbox("Sol automatico", &sol_automatico);
+        ImGui::SameLine();
+        ImGui::Checkbox("Hora manual", &sol_hora_manual);
+        if (sol_hora_manual) ImGui::SliderFloat("Hora do dia", &sol_hora, 0.0f, 24.0f, "%.1fh");
         if (sol_automatico) {
             ImGui::SliderFloat("Inclinacao do arco", &arco_inclinacao, 0.0f, 45.0f);
         }
@@ -2774,6 +2779,7 @@ int main(int argc, char* argv[]) {
 
             if (sol_automatico) {
                 float t_frac = (g_hours * 60.0f + g_minutes) / 1440.0f;
+                if (sol_hora_manual) t_frac = sol_hora / 24.0f; // M2.5-24G-5: so a LUZ obedece; o tick segue vivo
                 float theta = (t_frac - 0.25f) * 2.0f * 3.14159265f;
                 float phi = glm::radians(arco_inclinacao);
 
