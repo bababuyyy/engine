@@ -136,7 +136,7 @@ struct SkyParams {
     float erosao_str;       float cloud_silhouette; float cloud_bands; float cloud_ambient_str; // 24E-3: ocupa o antigo pad_a
     float sky_ambient_color[3];               float detail_str;
     float cloud_shadow_color[3];              float curl_str;
-    float silver_k;         float silver_spread;    float pad_e4[2]; // 24E-4: anexado no fim (224B)
+    float silver_k;         float silver_spread;    float clima_cov_teto;   float clima_type_teto; // 24G-3: tetos do clima (ex-pads, 224B)
 };
 
 struct ObjIdParams {
@@ -238,6 +238,8 @@ float cloud_ambient_str = 1.0f; // M2.5-24E-3: energia propria da nuvem
 static_assert(sizeof(SkyParams) % 16 == 0, "SkyParams: alinhamento de 16 bytes quebrado");
 float cloud_silver_k = 0.0f;      // M2.5-24E-4: silver lining (0 = fisica pura)
 float cloud_silver_spread = 0.3f;
+float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
+float clima_type_teto = 0.80f;
 
 bool sol_automatico = true;
 float arco_inclinacao = 25.0f;
@@ -315,6 +317,8 @@ auto save_tuning = []() {
     f << "cloud_ambient_str=" << cloud_ambient_str << "\n";
     f << "cloud_silver_k=" << cloud_silver_k << "\n";
     f << "cloud_silver_spread=" << cloud_silver_spread << "\n";
+    f << "clima_cov_teto=" << clima_cov_teto << "\n";
+    f << "clima_type_teto=" << clima_type_teto << "\n";
     f << "sol_automatico=" << (sol_automatico ? "1" : "0") << "\n";
     f << "arco_inclinacao=" << arco_inclinacao << "\n";
     f << "sun_yaw=" << sun_yaw << "\n";
@@ -392,6 +396,8 @@ auto load_tuning = []() {
             else if (key == "cloud_ambient_str") cloud_ambient_str = std::stof(val);
             else if (key == "cloud_silver_k") cloud_silver_k = std::stof(val);
             else if (key == "cloud_silver_spread") cloud_silver_spread = std::stof(val);
+            else if (key == "clima_cov_teto") clima_cov_teto = std::stof(val);
+            else if (key == "clima_type_teto") clima_type_teto = std::stof(val);
             else if (key == "sol_automatico") sol_automatico = (val == "1");
             else if (key == "arco_inclinacao") arco_inclinacao = std::stof(val);
             else if (key == "sun_yaw") sun_yaw = std::stof(val);
@@ -2553,6 +2559,8 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Silver spread", &cloud_silver_spread, 0.05f, 0.5f);
         ImGui::SliderFloat("Camada: base", &cloud_h_min, 60.0f, 200.0f);
         ImGui::SliderFloat("Camada: topo", &cloud_h_max, 150.0f, 500.0f);
+        ImGui::SliderFloat("Clima: teto cobertura", &clima_cov_teto, 0.2f, 1.0f);
+        ImGui::SliderFloat("Clima: teto tipo", &clima_type_teto, 0.0f, 1.0f);
 
         ImGui::Separator();
         ImGui::Checkbox("Sol automatico", &sol_automatico);
@@ -2977,7 +2985,8 @@ int main(int argc, char* argv[]) {
             sky_params.curl_str = cloud_curl_str;
             sky_params.silver_k = cloud_silver_k;
             sky_params.silver_spread = cloud_silver_spread;
-            sky_params.pad_e4[0] = 0.0f; sky_params.pad_e4[1] = 0.0f;
+            sky_params.clima_cov_teto = clima_cov_teto;
+            sky_params.clima_type_teto = clima_type_teto;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;

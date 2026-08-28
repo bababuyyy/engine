@@ -248,27 +248,46 @@ namespace clouds {
             }
             return lerpf(lerpf(c[0][0], c[1][0], u), lerpf(c[0][1], c[1][1], u), v);
         }
+
+        // M2.5-24G-4: Worley 2D periodico invertido (1 no centro da celula) - as ILHAS do Nubis
+        static float worley2_inv(float px, float py, int cells, uint32_t seed) {
+            int X0 = (int)std::floor(px), Y0 = (int)std::floor(py);
+            float min_d2 = 1e9f;
+            for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                int cx = X0 + dx, cy = Y0 + dy;
+                int wx = ((cx % cells) + cells) % cells;
+                int wy = ((cy % cells) + cells) % cells;
+                U3 h = pcg3d({ (uint32_t)wx, (uint32_t)wy, seed });
+                float fx = cx + u2f(h.x), fy = cy + u2f(h.y);
+                float ddx = px - fx, ddy = py - fy;
+                float d2 = ddx * ddx + ddy * ddy;
+                if (d2 < min_d2) min_d2 = d2;
+            }
+            float d = std::sqrt(min_d2);
+            return 1.0f - (d < 1.0f ? d : 1.0f);
+        }
     }
 
     std::vector<uint8_t> generate_weather_map(int w, int h) {
         std::string cache_dir = "cache";
-        std::string cache_file = cache_dir + "/weather_map_v1.bin";
+        std::string cache_file = cache_dir + "/weather_map_v2.bin";
 
         struct Header {
-            char magic[4] = { 'W','T','H','1' };
+            char magic[4] = { 'W','T','H','2' };
             int w, h, pad;
-        } expected_header{ {'W','T','H','1'}, w, h, 0 };
+        } expected_header{ {'W','T','H','2'}, w, h, 0 };
 
         std::ifstream in(cache_file, std::ios::binary);
         if (in.is_open()) {
             Header read_h;
             in.read(reinterpret_cast<char*>(&read_h), sizeof(Header));
             if (read_h.w == w && read_h.h == h &&
-                read_h.magic[0] == 'W' && read_h.magic[3] == '1') {
+                read_h.magic[0] == 'W' && read_h.magic[3] == '2') {
                 std::vector<uint8_t> data((size_t)w * h * 4);
                 in.read(reinterpret_cast<char*>(data.data()), data.size());
                 if (in) {
-                    std::cout << "[WEATHER] Cache v1 carregado: " << cache_file << "\n";
+                    std::cout << "[WEATHER] Cache v2 carregado: " << cache_file << "\n";
                     return data;
                 }
             }
@@ -288,9 +307,18 @@ namespace clouds {
             for (int x = 0; x < w; ++x) {
                 float nx = (float)x / w, ny = (float)y / h;
 
-                float cov = 0.0f;
+                // Tecido conectado (Perlin-like fbm) - as formacoes que se ligam
+                float base = 0.0f;
                 for (int o = 0; o < 4; ++o)
-                    cov += cov_w[o] * vnoise2_periodic(nx * cov_freq[o], ny * cov_freq[o], cov_freq[o], 100u + o);
+                    base += cov_w[o] * vnoise2_periodic(nx * cov_freq[o], ny * cov_freq[o], cov_freq[o], 100u + o);
+
+                // M2.5-24G-4: ILHAS celulares em duas escalas (o canal Perlin-Worley do Nubis 2017)
+                float cell1 = worley2_inv(nx * 6.0f, ny * 6.0f, 6, 300u);
+                float cell2 = worley2_inv(nx * 13.0f, ny * 13.0f, 13, 301u);
+                float islands = cell1 * 0.65f + cell2 * 0.35f;
+
+                // Mistura: tecido + ilhas = ceu povoado em varias escalas, com veus nos vaos
+                float cov = base * 0.55f + islands * 0.45f;
 
                 float typ = 0.0f;
                 for (int o = 0; o < 2; ++o)
@@ -298,10 +326,11 @@ namespace clouds {
 
                 cov = cov < 0.0f ? 0.0f : (cov > 1.0f ? 1.0f : cov);
                 typ = typ < 0.0f ? 0.0f : (typ > 1.0f ? 1.0f : typ);
+                float isl = islands < 0.0f ? 0.0f : (islands > 1.0f ? 1.0f : islands);
                 size_t idx = ((size_t)y * w + x) * 4;
                 data[idx + 0] = (uint8_t)(cov * 255.0f);
                 data[idx + 1] = (uint8_t)(typ * 255.0f);
-                data[idx + 2] = 0;
+                data[idx + 2] = (uint8_t)(isl * 255.0f); // B = ilhas puras (reserva para o futuro)
                 data[idx + 3] = 255;
             }
         }

@@ -62,8 +62,8 @@ cbuffer SkyBlock : register(b0, space3)
     float curl_str; // M2.5-24C: Forca da distorcao do curl noise
     float cloud_silver_k;      // M2.5-24E-4
     float cloud_silver_spread;
-    float pad_e4a;
-    float pad_e4b;
+    float clima_cov_teto;  // M2.5-24G-3: teto de cobertura (embriao da maquina de clima)
+    float clima_type_teto; // M2.5-24G-3: teto de tipo
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -154,8 +154,9 @@ float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_det
     // M2.5-24G-1: coverage do weather map assado (tile = 5000u de mundo).
     // M2.5-24G-2: canal G = TIPO POR REGIAO; o slider "Tipo de Nuvem" vira vies global.
     float4 weather = weather_map.SampleLevel(weather_samp, (p.xz + wdisp) * 0.0002f, 0);
-    float wcov = saturate((weather.r - 0.32f) / 0.36f);
-    float wtype = saturate(weather.g + (cloud_type - 0.5f));
+    // M2.5-24G-3: tetos do clima ceifam os extremos do mapa (tempestade so quando o clima mandar)
+    float wcov = min(saturate((weather.r - 0.32f) / 0.36f), clima_cov_teto);
+    float wtype = min(saturate(weather.g + (cloud_type - 0.5f)), clima_type_teto);
     float4 active_grad = grad_for_type(wtype);
     float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
     float prof = get_height_fraction(active_grad, hf);
@@ -225,7 +226,8 @@ PSOutput PSMain(PSInput input)
 
     // M2.5-24G-2: o gradiente por tipo agora e POR AMOSTRA (regional), dentro do avaliador.
 
-    if (dir.y > 0.01f || (cam_pos.y >= h_min && cam_pos.y <= h_max))
+    // M2.5-24G-3: abs() = camera ACIMA da camada olhando para baixo tambem marcha (fix voo alto)
+    if (abs(dir.y) > 0.01f || (cam_pos.y >= h_min && cam_pos.y <= h_max))
     {
         float t_min = (h_min - cam_pos.y) / dir.y;
         float t_max = (h_max - cam_pos.y) / dir.y;
