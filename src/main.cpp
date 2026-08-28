@@ -153,6 +153,7 @@ struct FsParams { // M2.5-24H: shafts volumetricos
     float sun_color[3];  float shaft_samples;
     float tex_size[2];   float wind_off[2];
     float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
+    float tonemap_shoulder; float pad_i[3]; // M2.5-24I: HDR (224B)
 };
 static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
 
@@ -269,6 +270,7 @@ float out_crease_brighten = 1.25f;
 bool draw_bloom = true;
 float bloom_intensity = 0.25f;
 float bloom_threshold = 0.75f;
+float tonemap_shoulder = 0.75f; // M2.5-24I: inicio do ombro (abaixo = cores intactas)
 
 bool draw_grass = true;
 float grass_scale = 1.0f;
@@ -342,6 +344,7 @@ auto save_tuning = []() {
     f << "draw_bloom=" << (draw_bloom ? "1" : "0") << "\n";
     f << "bloom_intensity=" << bloom_intensity << "\n";
     f << "bloom_threshold=" << bloom_threshold << "\n";
+    f << "tonemap_shoulder=" << tonemap_shoulder << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
     f << "out_crease_low=" << out_crease_low << "\n";
@@ -425,6 +428,7 @@ auto load_tuning = []() {
             else if (key == "draw_bloom") draw_bloom = (val == "1");
             else if (key == "bloom_intensity") bloom_intensity = std::stof(val);
             else if (key == "bloom_threshold") bloom_threshold = std::stof(val);
+            else if (key == "tonemap_shoulder") tonemap_shoulder = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
             else if (key == "out_crease_low") out_crease_low = std::stof(val);
@@ -891,7 +895,7 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUTextureCreateInfo scene_color_info = {};
     scene_color_info.type = SDL_GPU_TEXTURETYPE_2D;
-    scene_color_info.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    scene_color_info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT; // M2.5-24I: HDR
     scene_color_info.width = (uint32_t)internal_w;
     scene_color_info.height = (uint32_t)internal_h;
     scene_color_info.layer_count_or_depth = 1;
@@ -913,7 +917,7 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUTextureCreateInfo comp_color_info = {};
     comp_color_info.type = SDL_GPU_TEXTURETYPE_2D;
-    comp_color_info.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    comp_color_info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT; // M2.5-24I: HDR
     comp_color_info.width = (uint32_t)internal_w;
     comp_color_info.height = (uint32_t)internal_h;
     comp_color_info.layer_count_or_depth = 1;
@@ -1632,7 +1636,7 @@ int main(int argc, char* argv[]) {
     pipe_info.vertex_input_state.vertex_buffer_descriptions = vb_desc;
 
     SDL_GPUColorTargetDescription color_descs[2] = {};
-    color_descs[0].format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    color_descs[0].format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT; // M2.5-24I: cena em HDR (basic+sky+grass)
     color_descs[1].format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     pipe_info.target_info.num_color_targets = 2;
     pipe_info.target_info.color_target_descriptions = color_descs;
@@ -1697,7 +1701,7 @@ int main(int argc, char* argv[]) {
     if (!grass_pipeline) { SDL_Log("FALHA grass_pipeline: %s", SDL_GetError()); return 1; }
 
     SDL_GPUColorTargetDescription out_color_desc = {};
-    out_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    out_color_desc.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT; // M2.5-24I: composite HDR
 
     SDL_GPUGraphicsPipelineCreateInfo out_pipe_info = {};
     out_pipe_info.vertex_shader = out_vs;
@@ -1735,7 +1739,7 @@ int main(int argc, char* argv[]) {
     b_pipe_info.target_info.num_color_targets = 1;
 
     SDL_GPUColorTargetDescription b_target_desc = {};
-    b_target_desc.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    b_target_desc.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT; // M2.5-24I
     b_pipe_info.target_info.color_target_descriptions = &b_target_desc;
 
     b_pipe_info.fragment_shader = bloom_thresh_ps;
@@ -2615,7 +2619,8 @@ int main(int argc, char* argv[]) {
         ImGui::Text("Dual-Kawase Bloom");
         ImGui::Checkbox("Bloom", &draw_bloom);
         ImGui::SliderFloat("Bloom: Forca", &bloom_intensity, 0.0f, 1.0f);
-        ImGui::SliderFloat("Bloom: Limiar", &bloom_threshold, 0.4f, 1.0f);
+        ImGui::SliderFloat("Bloom: Limiar", &bloom_threshold, 0.4f, 2.5f); // 24I: alcance HDR
+        ImGui::SliderFloat("Tonemap: ombro", &tonemap_shoulder, 0.5f, 0.95f);
 
         ImGui::Separator();
         ImGui::SliderInt("Cortes", &toon_cuts, 2, 5);
@@ -2683,7 +2688,7 @@ int main(int argc, char* argv[]) {
 
             SDL_GPUTextureCreateInfo b_tex_info = {};
             b_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
-            b_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+            b_tex_info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT; // M2.5-24I: bloom HDR
             b_tex_info.layer_count_or_depth = 1;
             b_tex_info.num_levels = 1;
             b_tex_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
@@ -3336,6 +3341,8 @@ int main(int argc, char* argv[]) {
             fs_params.shaft_sigma = shaft_sigma;
             fs_params.cloud_cover = draw_clouds ? cloud_cobertura : 0.0f;
             fs_params.shadow_str_fs = shadow_str;
+            fs_params.tonemap_shoulder = tonemap_shoulder;
+            fs_params.pad_i[0] = 0.0f; fs_params.pad_i[1] = 0.0f; fs_params.pad_i[2] = 0.0f;
             // Anular shafts nas views de debug para nao sujar a validacao
             fs_params.shaft_intensity = (view_mode == 0) ? ray_strength : 0.0f;
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;

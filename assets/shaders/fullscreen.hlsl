@@ -44,6 +44,10 @@ cbuffer FsBlock : register(b0, space3)
     float cloud_cover;
     float shadow_str;
     float bloom_intensity;
+    float tonemap_shoulder; // M2.5-24I
+    float pad_i0;
+    float pad_i1;
+    float pad_i2;
 };
 
 static const float bayer[16] =
@@ -134,6 +138,13 @@ float4 PSMain(PSInput input) : SV_Target0
     }
 
     final_color.rgb += tex_bloom.Sample(samp, input.uv).rgb * bloom_intensity; // M2.5-23: o florescer
+    // M2.5-24I: tonemap de ombro exponencial - abaixo do ombro as cores ficam INTACTAS
+    // (toon preservado); acima, rolloff filmico continuo (derivada 1 no ombro).
+    float3 tc = final_color.rgb;
+    float ts = tonemap_shoulder;
+    float3 over = max(tc - ts, 0.0f);
+    final_color.rgb = min(tc, ts) + (1.0f - ts) * (1.0f - exp(-over / max(1.0f - ts, 1e-4f)));
+
     float dth = frac(sin(dot(input.uv, float2(12.9898f, 78.233f))) * 43758.5453f);
     final_color.rgb += (dth - 0.5f) / 255.0f; // de-banding do 8-bit (estagio final, padrao HDRP)
     return final_color;
