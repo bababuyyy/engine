@@ -252,6 +252,47 @@ float cloud_fade_ini = 0.45f;
 float cloud_passo_far = 0.0f; // M2.5-24J-2b (A18): crescimento do passo no longe (0 = passo fixo; LIGAR e decisao de retina)
 
 bool sol_automatico = true;
+// ============================================================================
+// M2.5-25-1 (S1+S2): transmitancia do sol atraves da atmosfera.
+// Fonte: Hillaire, "A Scalable and Production-Ready Sky and Atmosphere
+// Rendering Technique" (EGSR 2020) - Tabela 1 (coeficientes) + secao 5.2
+// (marcha de 40 passos). Unidades internas: km. FISICA COM FONTE = CODIGO
+// BLINDADO - nenhum destes numeros vira slider (doutrina da casa).
+// ============================================================================
+static glm::vec3 sun_transmittance(float cos_zenith)
+{
+    const glm::vec3 kRayleighS(5.802e-3f, 13.558e-3f, 33.1e-3f); // por km (Tabela 1)
+    const float     kMieS = 3.996e-3f, kMieA = 4.40e-3f;         // por km
+    const glm::vec3 kOzoneA(0.650e-3f, 1.881e-3f, 0.085e-3f);    // por km (so absorve)
+    const float kRg = 6360.0f, kRt = 6460.0f;                    // raios (km)
+
+    float s = std::clamp(cos_zenith, -1.0f, 1.0f);
+    float c = std::sqrt(std::max(0.0f, 1.0f - s * s));
+    glm::vec3 pos(0.0f, kRg + 0.2f, 0.0f);                       // observador ~200m
+    glm::vec3 dir(c, s, 0.0f);
+
+    float b = glm::dot(pos, dir);
+    float disc_top = b * b - (glm::dot(pos, pos) - kRt * kRt);
+    if (disc_top < 0.0f) return glm::vec3(0.0f);
+    float t_top = -b + std::sqrt(disc_top);
+
+    float disc_g = b * b - (glm::dot(pos, pos) - kRg * kRg);
+    if (disc_g >= 0.0f && (-b - std::sqrt(disc_g)) > 0.0f) return glm::vec3(0.0f); // chao bloqueia
+
+    glm::vec3 od(0.0f);
+    const int kSteps = 40; // Hillaire 5.2
+    float dt = t_top / (float)kSteps;
+    for (int i = 0; i < kSteps; ++i)
+    {
+        glm::vec3 p = pos + dir * ((i + 0.5f) * dt);
+        float h = glm::length(p) - kRg;
+        float dr = std::exp(-h / 8.0f);                                        // Rayleigh
+        float dm = std::exp(-h / 1.2f);                                        // Mie
+        float dz = std::max(0.0f, 1.0f - std::fabs(h - 25.0f) / 15.0f);        // Ozonio (tenda)
+        od += (kRayleighS * dr + glm::vec3(kMieS + kMieA) * dm + kOzoneA * dz) * dt;
+    }
+    return glm::vec3(std::exp(-od.x), std::exp(-od.y), std::exp(-od.z));
+}
 bool sol_hora_manual = false;  // M2.5-24G-5: override de apresentacao (nao persiste de proposito)
 float sol_hora = 12.0f;
 float arco_inclinacao = 25.0f;
@@ -2896,6 +2937,12 @@ int main(int argc, char* argv[]) {
             }
 
             // A luz vem DO sol PARA O CHAO (convencao da iluminacao do cenario mantida)
+            // M2.5-25-1: sol fisico por hora do dia (Hillaire 2020) + interim noturno neutro (ate a lua do S7)
+            glm::vec3 t_sol = sun_transmittance(to_sun_vec.y);
+            {
+                float noite_w = std::clamp(-to_sun_vec.y / 0.1f, 0.0f, 1.0f);
+                t_sol = t_sol * (1.0f - noite_w) + glm::vec3(noite_w); // "Lua minima" continua neutra
+            }
             glm::vec3 s_dir = -to_sun_vec;
 
             glm::vec3 c_cloud_day(0.95f, 0.95f, 0.95f);
@@ -3009,9 +3056,9 @@ int main(int argc, char* argv[]) {
             sky_params.horizon_color[1] = c_horizon.y;
             sky_params.horizon_color[2] = c_horizon.z;
             sky_params.pad2 = 0.0f;
-            sky_params.sun_color[0] = sun_color_arr[0] * effective_intensity;
-            sky_params.sun_color[1] = sun_color_arr[1] * effective_intensity;
-            sky_params.sun_color[2] = sun_color_arr[2] * effective_intensity;
+            sky_params.sun_color[0] = sun_color_arr[0] * t_sol.x * effective_intensity; // 25-1
+            sky_params.sun_color[1] = sun_color_arr[1] * t_sol.y * effective_intensity;
+            sky_params.sun_color[2] = sun_color_arr[2] * t_sol.z * effective_intensity;
             sky_params.pad3 = 0.0f;
 
             sky_params.cam_pos[0] = cam_pos.x;
@@ -3072,9 +3119,9 @@ int main(int argc, char* argv[]) {
             sun_params.dir[1] = s_dir.y;
             sun_params.dir[2] = s_dir.z;
             sun_params.ambient = effective_ambient;
-            sun_params.color[0] = sun_color_arr[0] * sun_intensity;
-            sun_params.color[1] = sun_color_arr[1] * sun_intensity;
-            sun_params.color[2] = sun_color_arr[2] * sun_intensity;
+            sun_params.color[0] = sun_color_arr[0] * t_sol.x * sun_intensity; // 25-1
+            sun_params.color[1] = sun_color_arr[1] * t_sol.y * sun_intensity;
+            sun_params.color[2] = sun_color_arr[2] * t_sol.z * sun_intensity;
             sun_params.cam_pos[0] = cam_pos.x;
             sun_params.cam_pos[1] = cam_pos.y;
             sun_params.cam_pos[2] = cam_pos.z;
@@ -3378,9 +3425,9 @@ int main(int argc, char* argv[]) {
             fs_params.to_sun[0] = to_sun_vec.x; fs_params.to_sun[1] = to_sun_vec.y; fs_params.to_sun[2] = to_sun_vec.z;
             fs_params.shaft_g = shaft_g;
             float shaft_gate = std::clamp((to_sun_vec.y + 0.02f) / 0.14f, 0.0f, 1.0f);
-            fs_params.sun_color[0] = sun_color_arr[0] * effective_intensity * shaft_gate;
-            fs_params.sun_color[1] = sun_color_arr[1] * effective_intensity * shaft_gate;
-            fs_params.sun_color[2] = sun_color_arr[2] * effective_intensity * shaft_gate;
+            fs_params.sun_color[0] = sun_color_arr[0] * t_sol.x * effective_intensity * shaft_gate; // 25-1
+            fs_params.sun_color[1] = sun_color_arr[1] * t_sol.y * effective_intensity * shaft_gate;
+            fs_params.sun_color[2] = sun_color_arr[2] * t_sol.z * effective_intensity * shaft_gate;
             fs_params.shaft_samples = (float)ray_samples;
             fs_params.tex_size[0] = (float)internal_w;
             fs_params.tex_size[1] = (float)internal_h;
