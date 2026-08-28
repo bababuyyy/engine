@@ -105,7 +105,7 @@ static const float bayer[16] =
 float hg_phase(float cos_theta, float g)
 {
     float g2 = g * g;
-    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 3.14159265f);
+    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 12.5663706f);
 }
 
 float get_height_fraction(float4 grad, float hf)
