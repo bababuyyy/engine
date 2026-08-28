@@ -2564,22 +2564,18 @@ int main(int argc, char* argv[]) {
         ImGui::Begin("Sol");
         // M2.5-24I-6: um clique aplica os valores COM FONTE (Nubis/Frostbite/Koschmieder).
         // Antidoto da calibracao fossilizada: tuning velho nunca mais engole estacao nova.
-        if (ImGui::Button("Defaults da Pesquisa")) {
-            cloud_cobertura = 0.42f; cloud_densidade = 2.5f; cloud_escala = 0.005f;
-            cloud_passos = 24; cloud_absorcao = 1.0f; cloud_hg_g_frontal = 0.65f;
-            cloud_powder_str = 0.5f; cloud_type_blend = 0.5f; cloud_erosao_str = 0.45f;
-            cloud_silhouette = 0.12f; cloud_bands = 3.0f; cloud_detail_str = 0.35f;
-            cloud_curl_str = 0.4f; cloud_ambient_str = 1.0f;
-            cloud_silver_k = 0.6f; cloud_silver_spread = 0.25f;
-            cloud_h_min = 140.0f; cloud_h_max = 320.0f;
-            clima_cov_teto = 0.85f; clima_type_teto = 0.80f;
-            cloud_cap = 1600.0f; cloud_curvatura = 0.00003f; cloud_fade_ini = 0.45f;
-            shadow_str = 0.7f; sun_intensity = 2.5f; sun_ambient = 0.5f;
-            ray_strength = 1.2f; ray_samples = 24; shaft_g = 0.55f;
-            shaft_sigma = 0.0006f; shaft_cloud_occ = 0.95f;
-            tonemap_shoulder = 0.75f; exposure = 0.6f;
-            bloom_intensity = 0.25f; bloom_threshold = 1.1f; fog_density = 0.006f;
-            app_log.add("Defaults da Pesquisa aplicados. Clique Salvar Config para persistir.");
+        // M2.5-24I-6b: o botao toca SOMENTE valores com fonte (fisica). Arte -
+        // escala, cobertura, silhueta, densidade, alturas, cores - e territorio
+        // do diretor e NUNCA e resetada por estacao (licao do ceu de pipoca).
+        if (ImGui::Button("Fisica da Pesquisa")) {
+            shaft_sigma = 0.0006f;   // Koschmieder: OD 0.1-0.4 em 500u
+            shaft_g = 0.55f;         // linhagem Killzone p/ shafts
+            shaft_cloud_occ = 0.95f; // T ~ 0.05 sob nuvem (quase-binario)
+            tonemap_shoulder = 0.75f;
+            bloom_threshold = 1.1f;  // so highlights HDR reais
+            cloud_absorcao = 1.0f;   // Beer canonico
+            cloud_powder_str = 0.5f; // Schneider 2015
+            app_log.add("Fisica da Pesquisa aplicada (arte intacta). Salvar Config p/ persistir.");
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(valores com fonte)");
