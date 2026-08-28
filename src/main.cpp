@@ -246,7 +246,7 @@ float cloud_silver_k = 0.0f;      // M2.5-24E-4: silver lining (0 = fisica pura)
 float cloud_ms_str = 1.0f;        // M2.5-24J-3: forca do brilho interno MS (retina; a fonte da a forma, nao o numero)
 float cloud_ms_g2 = 0.2f;         // M2.5-24J-3: fase secundaria "mais isotropica" (retina; 0 = isotropica pura)
 float cloud_iso_str = 0.12f;      // M2.5-24J-7: 3o termo de fase, isotropico (era o 0.12 fixo; 0.12 = comportamento anterior)
-float sky_gain = 30.0f;           // M2.5-25-2: CONVERSAO DE UNIDADES (o paper e fotometrico, ~120klx; nosso sun_intensity e arbitrario). NAO esta na fonte -> retina.
+float sky_gain = 3.0f;           // M2.5-25-2: CONVERSAO DE UNIDADES (o paper e fotometrico, ~120klx; nosso sun_intensity e arbitrario). NAO esta na fonte -> retina.
 int atmo_debug_mode = 0;          // M2.5-25-2: 0=off, 1=LUT de transmitancia, 2=LUT de multi-scattering
 float cloud_silver_spread = 0.3f;
 float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
@@ -2729,7 +2729,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Brilho interno (MS)", &cloud_ms_str, 0.0f, 2.0f);
         ImGui::SliderFloat("Fase do MS (g2)", &cloud_ms_g2, 0.0f, 0.6f);
         ImGui::SliderFloat("Luz isotropica", &cloud_iso_str, 0.0f, 0.5f);
-        ImGui::SliderFloat("Ganho do ceu (unidades)", &sky_gain, 0.0f, 200.0f);
+        ImGui::SliderFloat("Ganho do ceu (equilibrio ceu x cena)", &sky_gain, 0.0f, 20.0f, "%.2f"); // 25-4b
         ImGui::SliderInt("Debug atmosfera", &atmo_debug_mode, 0, 2);
         ImGui::SliderFloat("Silver spread", &cloud_silver_spread, 0.05f, 0.5f);
         ImGui::SliderFloat("Camada: base", &cloud_h_min, 60.0f, 200.0f);
@@ -2781,7 +2781,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Tonemap: ombro", &tonemap_shoulder, 0.5f, 0.95f);
         ImGui::SliderFloat("Exposicao", &exposure, 0.1f, 4.0f);
         ImGui::Checkbox("Exposicao automatica", &auto_exposure); // M2.5-25-4
-        ImGui::SliderFloat("Chave (cinza medio)", &exposure_key, 0.02f, 0.6f, "%.3f");
+        ImGui::SliderFloat("Chave (cinza medio)", &exposure_key, 0.01f, 0.25f, "%.3f"); // 25-4b: regua honesta
         ImGui::SliderFloat("Compensacao (EV)", &exposure_bias_ev, -4.0f, 4.0f, "%.2f");
         ImGui::SliderFloat("Adaptacao (1/s)", &exposure_speed, 0.1f, 8.0f);
         ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
