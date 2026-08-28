@@ -724,6 +724,18 @@ int main(int argc, char* argv[]) {
     detail_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
     SDL_GPUTexture* cloud_detail_tex = SDL_CreateGPUTexture(device, &detail_tex_info);
 
+    // M2.5-24G-1: Weather Map 512x512 RGBA (R=coverage, G=tipo regional)
+    SDL_GPUTextureCreateInfo weather_tex_info = {};
+    weather_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+    weather_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    weather_tex_info.width = 512;
+    weather_tex_info.height = 512;
+    weather_tex_info.layer_count_or_depth = 1;
+    weather_tex_info.num_levels = 1;
+    weather_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* weather_tex = SDL_CreateGPUTexture(device, &weather_tex_info);
+    if (!weather_tex) { SDL_Log("FALHA weather_tex: %s", SDL_GetError()); return 1; }
+
     SDL_GPUSamplerCreateInfo cloud_samp_info = {};
     cloud_samp_info.min_filter = SDL_GPU_FILTER_LINEAR;
     cloud_samp_info.mag_filter = SDL_GPU_FILTER_LINEAR;
@@ -756,11 +768,22 @@ int main(int argc, char* argv[]) {
     SDL_GPUTextureRegion det_tex_reg = { cloud_detail_tex, 0, 0, 0, 0, 0, 32, 32, 32 };
     SDL_UploadToGPUTexture(init_pass, &det_tex_loc, &det_tex_reg, false);
 
+    std::vector<uint8_t> weather_data = clouds::generate_weather_map(512, 512);
+    SDL_GPUTransferBufferCreateInfo w_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)weather_data.size() };
+    SDL_GPUTransferBuffer* weather_tb = SDL_CreateGPUTransferBuffer(device, &w_tb_info);
+    void* weather_map_ptr = SDL_MapGPUTransferBuffer(device, weather_tb, false);
+    memcpy(weather_map_ptr, weather_data.data(), weather_data.size());
+    SDL_UnmapGPUTransferBuffer(device, weather_tb);
+    SDL_GPUTextureTransferInfo w_tex_loc = { weather_tb, 0, 512, 512 };
+    SDL_GPUTextureRegion w_tex_reg = { weather_tex, 0, 0, 0, 0, 0, 512, 512, 1 };
+    SDL_UploadToGPUTexture(init_pass, &w_tex_loc, &w_tex_reg, false);
+
     SDL_EndGPUCopyPass(init_pass);
     SDL_SubmitGPUCommandBuffer(init_cmd);
     SDL_ReleaseGPUTransferBuffer(device, fallback_tb);
     SDL_ReleaseGPUTransferBuffer(device, cloud_tb);
     SDL_ReleaseGPUTransferBuffer(device, det_tb);
+    SDL_ReleaseGPUTransferBuffer(device, weather_tb);
     SDL_Log("BOOT: nuvens ok, seguindo p/ ceu");
 
     std::vector<float> dome_vertices;
@@ -3023,7 +3046,7 @@ int main(int argc, char* argv[]) {
                 SDL_BindGPUIndexBuffer(scene_pass, &sky_ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
                 SDL_GPUTextureSamplerBinding sky_samps[3] = {
-                    { fallback_tex, sampler },
+                    { weather_tex, sampler }, // M2.5-24G-1: weather map no t0 do ceu
                     { cloud_tex, cloud_sampler },
                     { cloud_detail_tex, cloud_sampler }
                 };
@@ -3369,6 +3392,7 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUTexture(device, normal_id);
     SDL_ReleaseGPUTexture(device, cloud_tex);
     SDL_ReleaseGPUTexture(device, cloud_detail_tex);
+    SDL_ReleaseGPUTexture(device, weather_tex);
 
     SDL_ReleaseGPUGraphicsPipeline(device, grass_pipeline);
     SDL_ReleaseGPUShader(device, grass_vs);

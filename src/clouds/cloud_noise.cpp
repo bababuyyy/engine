@@ -226,4 +226,101 @@ namespace clouds {
         }
         return data;
     }
+
+    // ---------- M2.5-24G-1: Weather Map 2D tileavel ----------
+    // R = coverage (fbm 4 oitavas, mesma personalidade do wfbm em shader: pesos .5/.25/.15/.10)
+    // G = tipo regional (fbm suave 2 oitavas; consumido a partir do 24G-2)
+    // B = A = reservados (precipitacao / futuro)
+    // Tileavel por construcao (value noise periodico via pcg3d) -> sampler REPEAT
+    // faz wrap perfeito em qualquer coordenada: imune a degradacao do tempo acelerado.
+    namespace {
+        static float vnoise2_periodic(float px, float py, int period, uint32_t seed) {
+            int X0 = (int)std::floor(px), Y0 = (int)std::floor(py);
+            float fx = px - X0, fy = py - Y0;
+            float u = fade_q(fx), v = fade_q(fy);
+            float c[2][2];
+            for (int ci = 0; ci < 2; ++ci)
+            for (int cj = 0; cj < 2; ++cj) {
+                int xi = ((X0 + ci) % period + period) % period;
+                int yj = ((Y0 + cj) % period + period) % period;
+                U3 h = pcg3d({ (uint32_t)xi, (uint32_t)yj, seed });
+                c[ci][cj] = u2f(h.x);
+            }
+            return lerpf(lerpf(c[0][0], c[1][0], u), lerpf(c[0][1], c[1][1], u), v);
+        }
+    }
+
+    std::vector<uint8_t> generate_weather_map(int w, int h) {
+        std::string cache_dir = "cache";
+        std::string cache_file = cache_dir + "/weather_map_v1.bin";
+
+        struct Header {
+            char magic[4] = { 'W','T','H','1' };
+            int w, h, pad;
+        } expected_header{ {'W','T','H','1'}, w, h, 0 };
+
+        std::ifstream in(cache_file, std::ios::binary);
+        if (in.is_open()) {
+            Header read_h;
+            in.read(reinterpret_cast<char*>(&read_h), sizeof(Header));
+            if (read_h.w == w && read_h.h == h &&
+                read_h.magic[0] == 'W' && read_h.magic[3] == '1') {
+                std::vector<uint8_t> data((size_t)w * h * 4);
+                in.read(reinterpret_cast<char*>(data.data()), data.size());
+                if (in) {
+                    std::cout << "[WEATHER] Cache v1 carregado: " << cache_file << "\n";
+                    return data;
+                }
+            }
+        }
+
+        std::cout << "[WEATHER] Gerando weather map (" << w << "x" << h << ")...\n";
+        auto t0 = std::chrono::steady_clock::now();
+        std::vector<uint8_t> data((size_t)w * h * 4);
+
+        // O tile cobre 4 unidades do espaco do antigo wfbm (freqs 4/9/20/47 ~ 1/2.3/5.1/11.7 x4)
+        const int   cov_freq[4] = { 4, 9, 20, 47 };
+        const float cov_w[4] = { 0.5f, 0.25f, 0.15f, 0.10f };
+        const int   typ_freq[2] = { 3, 7 };
+        const float typ_w[2] = { 0.65f, 0.35f };
+
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                float nx = (float)x / w, ny = (float)y / h;
+
+                float cov = 0.0f;
+                for (int o = 0; o < 4; ++o)
+                    cov += cov_w[o] * vnoise2_periodic(nx * cov_freq[o], ny * cov_freq[o], cov_freq[o], 100u + o);
+
+                float typ = 0.0f;
+                for (int o = 0; o < 2; ++o)
+                    typ += typ_w[o] * vnoise2_periodic(nx * typ_freq[o], ny * typ_freq[o], typ_freq[o], 200u + o);
+
+                cov = cov < 0.0f ? 0.0f : (cov > 1.0f ? 1.0f : cov);
+                typ = typ < 0.0f ? 0.0f : (typ > 1.0f ? 1.0f : typ);
+                size_t idx = ((size_t)y * w + x) * 4;
+                data[idx + 0] = (uint8_t)(cov * 255.0f);
+                data[idx + 1] = (uint8_t)(typ * 255.0f);
+                data[idx + 2] = 0;
+                data[idx + 3] = 255;
+            }
+        }
+
+        auto t1 = std::chrono::steady_clock::now();
+        std::cout << "[WEATHER] Concluido em " << std::chrono::duration<double>(t1 - t0).count() << "s\n";
+
+        std::filesystem::create_directories(cache_dir);
+        std::ofstream out(cache_file, std::ios::binary);
+        if (out.is_open()) {
+            out.write(reinterpret_cast<const char*>(&expected_header), sizeof(Header));
+            out.write(reinterpret_cast<const char*>(data.data()), data.size());
+        }
+
+        // Fatia de diagnostico do canal R (retina + referencia para o futuro mapa PINTADO)
+        std::vector<uint8_t> slice((size_t)w * h);
+        for (size_t i = 0; i < slice.size(); ++i) slice[i] = data[i * 4];
+        dump_pgm((cache_dir + "/weather_coverage.pgm").c_str(), slice, w, h);
+
+        return data;
+    }
 }

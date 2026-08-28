@@ -66,6 +66,8 @@ cbuffer SkyBlock : register(b0, space3)
     float pad_e4b;
 };
 
+Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
+SamplerState weather_samp : register(s0, space2); // sampler REPEAT: wrap perfeito, imune a precisao do tempo acelerado
 Texture3D<float> cloud_noise : register(t1, space2);
 Texture3D<float> cloud_detail : register(t2, space2); // M2.5-24C: Swiss Cheese Detail 32^3
 SamplerState cloud_samp : register(s1, space2);
@@ -136,7 +138,9 @@ float SampleCloudDensity(float3 p, float2 wdisp, float4 active_grad, float dist_
     float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
     float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
 
-    float wcov = saturate((wfbm((p.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
+    // M2.5-24G-1: coverage vem do weather map assado (tile = 5000u de mundo).
+    // O wrap do sampler REPEAT substitui o wfbm em runtime (custo: 1 fetch).
+    float wcov = saturate((weather_map.SampleLevel(weather_samp, (p.xz + wdisp) * 0.0002f, 0).r - 0.32f) / 0.36f);
     float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
     float prof = get_height_fraction(active_grad, hf);
 
