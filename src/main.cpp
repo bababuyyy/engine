@@ -145,16 +145,16 @@ struct ObjIdParams {
     float pad[3];
 };
 
-struct FsParams {
-    float tex_size[2];
-    float sun_screen[2];
-    float ray_color[3];
-    float ray_intensity;
-    float ray_decay;
-    float ray_samples;
-    float bloom_intensity;
-    float pad[1];
+struct FsParams { // M2.5-24H: shafts volumetricos
+    float inv_viewproj[16];
+    float light_vp[16];
+    float cam_pos[3];    float shaft_intensity;
+    float to_sun[3];     float shaft_g;
+    float sun_color[3];  float shaft_samples;
+    float tex_size[2];   float wind_off[2];
+    float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
 };
+static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
 
 struct BloomParams {
     float texel[2];
@@ -256,6 +256,8 @@ float sun_intensity = 1.2f;
 float ray_strength = 0.6f;
 float ray_decay = 0.97f;
 int ray_samples = 48;
+float shaft_g = 0.75f;      // M2.5-24H: fase HG dos shafts
+float shaft_sigma = 0.010f; // M2.5-24H: densidade do ar na marcha
 
 float out_z_cutoff = 0.005f;
 float out_grazing_scale = 4.0f;
@@ -335,6 +337,8 @@ auto save_tuning = []() {
     f << "ray_strength=" << ray_strength << "\n";
     f << "ray_decay=" << ray_decay << "\n";
     f << "ray_samples=" << ray_samples << "\n";
+    f << "shaft_g=" << shaft_g << "\n";
+    f << "shaft_sigma=" << shaft_sigma << "\n";
     f << "draw_bloom=" << (draw_bloom ? "1" : "0") << "\n";
     f << "bloom_intensity=" << bloom_intensity << "\n";
     f << "bloom_threshold=" << bloom_threshold << "\n";
@@ -416,6 +420,8 @@ auto load_tuning = []() {
             else if (key == "ray_strength") ray_strength = std::stof(val);
             else if (key == "ray_decay") ray_decay = std::stof(val);
             else if (key == "ray_samples") ray_samples = std::stoi(val);
+            else if (key == "shaft_g") shaft_g = std::stof(val);
+            else if (key == "shaft_sigma") shaft_sigma = std::stof(val);
             else if (key == "draw_bloom") draw_bloom = (val == "1");
             else if (key == "bloom_intensity") bloom_intensity = std::stof(val);
             else if (key == "bloom_threshold") bloom_threshold = std::stof(val);
@@ -500,7 +506,7 @@ int main(int argc, char* argv[]) {
     fs_ps_info.entrypoint = "PSMain";
     fs_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     fs_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    fs_ps_info.num_samplers = 3;
+    fs_ps_info.num_samplers = 6; // M2.5-24H: + depth, shadow map, weather
     fs_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* fs_ps = SDL_CreateGPUShader(device, &fs_ps_info);
     if (!fs_ps) return 1;
@@ -2599,10 +2605,11 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Bias", &obj_shadow_bias, 0.0005f, 0.01f, "%.4f");
 
         ImGui::Separator();
-        ImGui::Text("God Rays (Screen-Space)");
+        ImGui::Text("Sun Shafts Volumetricos (24H)");
         ImGui::SliderFloat("Forca dos raios", &ray_strength, 0.0f, 2.0f);
-        ImGui::SliderFloat("Decay", &ray_decay, 0.9f, 0.99f, "%.3f");
-        ImGui::SliderInt("Amostras", &ray_samples, 16, 64);
+        ImGui::SliderInt("Amostras", &ray_samples, 8, 32);
+        ImGui::SliderFloat("Fase g", &shaft_g, 0.3f, 0.9f);
+        ImGui::SliderFloat("Sigma (densidade do ar)", &shaft_sigma, 0.001f, 0.05f, "%.3f");
 
         ImGui::Separator();
         ImGui::Text("Dual-Kawase Bloom");
@@ -3311,19 +3318,27 @@ int main(int argc, char* argv[]) {
             float r_fade = std::clamp(dot_sun_cam * 2.0f, 0.0f, 1.0f);
 
             FsParams fs_params;
+            glm::mat4 inv_vp = glm::inverse(mvp);
+            memcpy(fs_params.inv_viewproj, glm::value_ptr(inv_vp), 64);
+            memcpy(fs_params.light_vp, glm::value_ptr(light_vp), 64);
+            fs_params.cam_pos[0] = cam_pos.x; fs_params.cam_pos[1] = cam_pos.y; fs_params.cam_pos[2] = cam_pos.z;
+            fs_params.to_sun[0] = to_sun_vec.x; fs_params.to_sun[1] = to_sun_vec.y; fs_params.to_sun[2] = to_sun_vec.z;
+            fs_params.shaft_g = shaft_g;
+            float shaft_gate = std::clamp((to_sun_vec.y + 0.02f) / 0.14f, 0.0f, 1.0f);
+            fs_params.sun_color[0] = sun_color_arr[0] * effective_intensity * shaft_gate;
+            fs_params.sun_color[1] = sun_color_arr[1] * effective_intensity * shaft_gate;
+            fs_params.sun_color[2] = sun_color_arr[2] * effective_intensity * shaft_gate;
+            fs_params.shaft_samples = (float)ray_samples;
             fs_params.tex_size[0] = (float)internal_w;
             fs_params.tex_size[1] = (float)internal_h;
-            fs_params.sun_screen[0] = sun_screen_pos.x;
-            fs_params.sun_screen[1] = sun_screen_pos.y;
-            fs_params.ray_color[0] = sun_color_arr[0];
-            fs_params.ray_color[1] = sun_color_arr[1];
-            fs_params.ray_color[2] = sun_color_arr[2];
-            // Anular god rays nas views de debig de normal/sem outline para nao sujar a validacao
-            fs_params.ray_intensity = (view_mode == 0) ? (ray_strength * r_fade) : 0.0f;
-            fs_params.ray_decay = ray_decay;
-            fs_params.ray_samples = (float)ray_samples;
+            fs_params.wind_off[0] = cos(w_rad) * sun_params.cloud_time * -200.0f;
+            fs_params.wind_off[1] = sin(w_rad) * sun_params.cloud_time * -200.0f;
+            fs_params.shaft_sigma = shaft_sigma;
+            fs_params.cloud_cover = draw_clouds ? cloud_cobertura : 0.0f;
+            fs_params.shadow_str_fs = shadow_str;
+            // Anular shafts nas views de debug para nao sujar a validacao
+            fs_params.shaft_intensity = (view_mode == 0) ? ray_strength : 0.0f;
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
-            fs_params.pad[0] = 0.0f;
 
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &fs_params, sizeof(FsParams));
 
@@ -3332,12 +3347,15 @@ int main(int argc, char* argv[]) {
             else if (view_mode == 2) upscale_source = scene_color;
 
             // O Pass Fullscreen agora bebe da id_mask pra calcular a oclusão volumetrica da luz e da cor unificada do bloom kawase
-            SDL_GPUTextureSamplerBinding fs_samp_binds[3] = {
+            SDL_GPUTextureSamplerBinding fs_samp_binds[6] = {
                 { upscale_source, upscale_sampler },
                 { normal_id, upscale_sampler },
-                { bloom_tex_a ? bloom_tex_a : fallback_tex, upscale_sampler }
+                { bloom_tex_a ? bloom_tex_a : fallback_tex, upscale_sampler },
+                { depth_texture, point_sampler },
+                { shadow_map, shadow_cmp },
+                { weather_tex, sampler }
             };
-            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 3);
+            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 6);
 
             SDL_DrawGPUPrimitives(fs_pass, 3, 1, 0, 0);
             SDL_EndGPURenderPass(fs_pass);
