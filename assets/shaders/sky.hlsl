@@ -66,7 +66,7 @@ cbuffer SkyBlock : register(b0, space3)
     float clima_type_teto; // M2.5-24G-3: teto de tipo
     float cloud_curvatura; // M2.5-24G-6: horizonte honesto (camada desce ao longe)
     float fade_ini;        // M2.5-24G-6: inicio do fade (fracao do cap)
-    float pad_h1;
+    float passo_far; // M2.5-24J-2 (A18): ocupa o antigo pad_h1
     float pad_h2;
 };
 
@@ -150,23 +150,34 @@ float4 grad_for_type(float ct)
 // dist_frac  = saturate(t/cap) na camera; 0.0 na marcha de luz (comportamento atual preservado)
 // apply_detail = erosao de detalhe so na camera (padrao Nubis: luz usa versao barata)
 // out_dim_profile = perfil dimensional (prof * coverage), consumido pelo ambient 24E-3
-float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_detail, out float out_dim_profile)
+// M2.5-24J-2 (A17): o contorno NAO-detalhado da nuvem (Nutshell: "we skip all the
+// noise" - so coverage + gradiente de altura, NENHUMA textura 3D). E o probe da
+// marcha barata E a fonte do perfil dentro do avaliador: um campo so (24F-1).
+// M2.5-24G-1: coverage do weather map assado (tile = 5000u de mundo).
+// M2.5-24G-2: canal G = TIPO POR REGIAO; o slider "Tipo de Nuvem" vira vies global.
+// M2.5-24G-3/4: tetos do clima ceifam os extremos; janela com respiro.
+float CloudDimProfile(float3 p, float2 wdisp)
 {
-    float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
-    float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
-
-    // M2.5-24G-1: coverage do weather map assado (tile = 5000u de mundo).
-    // M2.5-24G-2: canal G = TIPO POR REGIAO; o slider "Tipo de Nuvem" vira vies global.
     float4 weather = weather_map.SampleLevel(weather_samp, (p.xz + wdisp) * 0.0002f, 0);
-    // M2.5-24G-3: tetos do clima ceifam os extremos do mapa (tempestade so quando o clima mandar)
-    // M2.5-24G-4: janela com respiro - veus parciais sobrevivem nos vaos entre as massas
     float wcov = min(saturate((weather.r - 0.22f) / 0.55f), clima_cov_teto);
     float wtype = min(saturate(weather.g + (cloud_type - 0.5f)), clima_type_teto);
     float4 active_grad = grad_for_type(wtype);
     float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
     float prof = get_height_fraction(active_grad, hf);
+    return prof * saturate(cobertura * wcov);
+}
 
-    out_dim_profile = prof * saturate(cobertura * wcov);
+float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_detail, out float out_dim_profile)
+{
+    float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
+    float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
+
+    // M2.5-24J-2 (A17): o perfil dimensional vem da funcao unica CloudDimProfile -
+    // o probe barato da marcha le o MESMO campo (invariante 24F-1 preservado).
+    out_dim_profile = CloudDimProfile(p, wdisp);
+    float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
+
+
 
     // M2.5-24F-2: formula do Nubis 2022 (Schneider): saturate(noise - (1 - dimensional_profile)).
     // O perfil dimensional INTEIRO entra no limiar; o noise nao e mais multiplicado pelo perfil.
@@ -257,7 +268,14 @@ PSOutput PSMain(PSInput input)
 
             float2 wdisp = wind_dir * time * cloud_speed * -200.0f;
 
-            [unroll(48)]
+            // M2.5-24J-2 (A17, Nutshell): marcha BARATA (contorno sem noise, passo 2x)
+            // ate tocar nuvem; recua 1 passo e liga o modo CARO. Amostras caras zeradas
+            // seguidas = "no longer in the cloud" -> volta ao barato (contador 6 =
+            // concretizacao da casa; a fonte nao fixa numero).
+            bool modo_caro = false;
+            int zeros_seguidos = 0;
+
+            [loop] // M2.5-24J-2: marcha com ESTADO (barato/caro) - loop dinamico
             for (int i = 0; i < (int) passos; ++i)
             {
                 float3 p = cam_pos + dir * t;
@@ -267,9 +285,31 @@ PSOutput PSMain(PSInput input)
                 float3 p_c = p;
                 p_c.y += dot(dxz, dxz) * cloud_curvatura;
 
+                if (t >= t_max) break; // 24J-2: o passo adaptativo pode cruzar o teto do slab
+
+                // M2.5-24J-2 (A18, Nubis 2022: step = near + far_offset * dist): o passo
+                // cresce LINEAR com a distancia; "Passo no longe" 0 = passo fixo de antes.
+                float sz = step_sz * (1.0f + passo_far * saturate(t / cap));
+
                 if (p_c.y < h_min || p_c.y > h_max)
                 {
-                    t += step_sz;
+                    t += sz * 2.0f; // fora da camada: passo largo de graca
+                    continue;
+                }
+
+                if (!modo_caro)
+                {
+                    // A17: amostra BARATA - "we skip all the noise": so coverage+perfil.
+                    // Teste SEM PERDA: d_raw <= perfil e o recorte zera abaixo de "Silhueta",
+                    // logo perfil <= cloud_silhouette garante amostra cara = 0.
+                    if (CloudDimProfile(p_c, wdisp) > cloud_silhouette)
+                    {
+                        modo_caro = true;
+                        zeros_seguidos = 0;
+                        t = max(t - sz * 2.0f, t_min); // "we take one step back" (Nutshell)
+                        continue;
+                    }
+                    t += sz * 2.0f; // passo largo: "reduces the number of samples by half"
                     continue;
                 }
 
@@ -281,6 +321,7 @@ PSOutput PSMain(PSInput input)
 
                 if (d > 0.0f)
                 {
+                    zeros_seguidos = 0;
                     // M2.5-24F-5: passos exponenciais (Frostbite) + amostra longa (Schneider 2015:
                     // "the last sample is placed far away to capture shadows cast by distant clouds")
                     float dens_sol = 0.0f;
@@ -318,8 +359,13 @@ PSOutput PSMain(PSInput input)
 
                     float3 direct_term = (luz * phase_val + 0.12f) * sun_color * sun_intensity;
 
-                    radiance += T * (1.0f - exp(-d * step_sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
-                    T *= exp(-d * step_sz * absorcao);
+                    radiance += T * (1.0f - exp(-d * sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
+                    T *= exp(-d * sz * absorcao);
+                }
+                else
+                {
+                    zeros_seguidos++; // A17: "when we detect that we are no longer in the cloud"
+                    if (zeros_seguidos >= 6) { modo_caro = false; }
                 }
 
                 if (T < 0.05f)
@@ -327,7 +373,7 @@ PSOutput PSMain(PSInput input)
                     T = 0.0f;
                     break;
                 }
-                t += step_sz;
+                t += sz;
             }
         }
     }

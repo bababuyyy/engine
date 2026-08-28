@@ -137,7 +137,7 @@ struct SkyParams {
     float sky_ambient_color[3];               float detail_str;
     float cloud_shadow_color[3];              float curl_str;
     float silver_k;         float silver_spread;    float clima_cov_teto;   float clima_type_teto; // 24G-3: tetos do clima (ex-pads)
-    float curvatura;        float fade_ini;         float pad_h[2]; // 24G-6: horizonte honesto (240B)
+    float curvatura;        float fade_ini;         float passo_far; float pad_h[1]; // 24G-6: horizonte honesto (240B)
 };
 
 struct ObjIdParams {
@@ -245,6 +245,7 @@ float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
 float clima_type_teto = 0.80f;
 float cloud_curvatura = 0.000025f; // M2.5-24G-6: horizonte honesto
 float cloud_fade_ini = 0.45f;
+float cloud_passo_far = 2.0f; // M2.5-24J-2 (A18): crescimento do passo no longe (0 = passo fixo)
 
 bool sol_automatico = true;
 bool sol_hora_manual = false;  // M2.5-24G-5: override de apresentacao (nao persiste de proposito)
@@ -334,6 +335,7 @@ auto save_tuning = []() {
     f << "clima_type_teto=" << clima_type_teto << "\n";
     f << "cloud_curvatura=" << cloud_curvatura << "\n";
     f << "cloud_fade_ini=" << cloud_fade_ini << "\n";
+    f << "cloud_passo_far=" << cloud_passo_far << "\n";
     f << "sol_automatico=" << (sol_automatico ? "1" : "0") << "\n";
     f << "arco_inclinacao=" << arco_inclinacao << "\n";
     f << "sun_yaw=" << sun_yaw << "\n";
@@ -421,6 +423,7 @@ auto load_tuning = []() {
             else if (key == "clima_type_teto") clima_type_teto = std::stof(val);
             else if (key == "cloud_curvatura") cloud_curvatura = std::stof(val);
             else if (key == "cloud_fade_ini") cloud_fade_ini = std::stof(val);
+            else if (key == "cloud_passo_far") cloud_passo_far = std::stof(val);
             else if (key == "sol_automatico") sol_automatico = (val == "1");
             else if (key == "arco_inclinacao") arco_inclinacao = std::stof(val);
             else if (key == "sun_yaw") sun_yaw = std::stof(val);
@@ -2610,6 +2613,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Alcance (cap)", &cloud_cap, 300.0f, 3000.0f);
         ImGui::SliderFloat("Curvatura", &cloud_curvatura, 0.0f, 0.0001f, "%.6f");
         ImGui::SliderFloat("Fade inicio", &cloud_fade_ini, 0.2f, 0.9f);
+        ImGui::SliderFloat("Passo no longe", &cloud_passo_far, 0.0f, 4.0f, "%.2f");
 
         ImGui::Separator();
         ImGui::Checkbox("Sol automatico", &sol_automatico);
@@ -3047,7 +3051,7 @@ int main(int argc, char* argv[]) {
             sky_params.clima_type_teto = clima_type_teto;
             sky_params.curvatura = cloud_curvatura;
             sky_params.fade_ini = cloud_fade_ini;
-            sky_params.pad_h[0] = 0.0f; sky_params.pad_h[1] = 0.0f;
+            sky_params.passo_far = cloud_passo_far; sky_params.pad_h[0] = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
