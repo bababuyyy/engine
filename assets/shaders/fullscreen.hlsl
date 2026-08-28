@@ -49,7 +49,7 @@ cbuffer FsBlock : register(b0, space3)
     float shaft_cloud_occ;
     float cloud_mid;        // M2.5-24I-3
     float shaft_debug;      // M2.5-24I-4
-    float pad_j0;
+    float shaft_height_falloff; // M2.5-24J (B6): ocupa o antigo pad_j0
     float pad_j1;
     float pad_j2;
 };
@@ -137,10 +137,13 @@ float4 PSMain(PSInput input) : SV_Target0
             vis *= 1.0f - shaft_cloud_occ * presenca;
 
             // Integral conservadora de energia (Hillaire 2015, verbatim adaptado)
-            float3 S = sun_color * (phase_v * shaft_sigma * vis);
-            float3 Sint = (S - S * exp(-shaft_sigma * step_len)) / max(shaft_sigma, 1e-5f);
+            // M2.5-24J (B6): a densidade do ar cai exponencialmente com a ALTURA (Wronski 2014, sl.36-37):
+            // o raio nasce denso perto do chao e morre antes de virar veu no ceu. falloff 0 = ar uniforme.
+            float sigma_h = shaft_sigma * exp(-max(p.y, 0.0f) * shaft_height_falloff);
+            float3 S = sun_color * (phase_v * sigma_h * vis);
+            float3 Sint = (S - S * exp(-sigma_h * step_len)) / max(sigma_h, 1e-5f);
             scat += T * Sint;
-            T *= exp(-shaft_sigma * step_len);
+            T *= exp(-sigma_h * step_len);
 
             t += step_len;
         }

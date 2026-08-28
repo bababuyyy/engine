@@ -154,7 +154,7 @@ struct FsParams { // M2.5-24H: shafts volumetricos
     float tex_size[2];   float wind_off[2];
     float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
     float tonemap_shoulder; float exposure; float shaft_cloud_occ; float cloud_mid; // 24I-3: altura media da camada
-    float shaft_debug;      float pad_j[3]; // 24I-4: vista de depuracao (240B)
+    float shaft_debug;      float shaft_height_falloff; float pad_j[2]; // 24I-4: vista de depuracao (240B)
 };
 static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
 
@@ -259,6 +259,7 @@ float ray_strength = 0.6f;
 float ray_decay = 0.97f;
 int ray_samples = 48;
 float shaft_g = 0.55f;      // M2.5-24I-5: 0.5-0.7 = faixa da pesquisa para shafts
+float shaft_height_falloff = 0.015f; // M2.5-24J (B6): queda exp. da densidade do ar com a altura (1/u); 0 = ar uniforme
 float shaft_sigma = 0.0006f; // M2.5-24I-5: OD 0.1-0.4 em 500u (Koschmieder) - antes estava 5x leitoso
 
 float out_z_cutoff = 0.005f;
@@ -344,6 +345,7 @@ auto save_tuning = []() {
     f << "ray_samples=" << ray_samples << "\n";
     f << "shaft_g=" << shaft_g << "\n";
     f << "shaft_sigma=" << shaft_sigma << "\n";
+    f << "shaft_height_falloff=" << shaft_height_falloff << "\n";
     f << "draw_bloom=" << (draw_bloom ? "1" : "0") << "\n";
     f << "bloom_intensity=" << bloom_intensity << "\n";
     f << "bloom_threshold=" << bloom_threshold << "\n";
@@ -430,6 +432,7 @@ auto load_tuning = []() {
             else if (key == "ray_samples") ray_samples = std::stoi(val);
             else if (key == "shaft_g") shaft_g = std::stof(val);
             else if (key == "shaft_sigma") shaft_sigma = std::stof(val);
+            else if (key == "shaft_height_falloff") shaft_height_falloff = std::stof(val);
             else if (key == "draw_bloom") draw_bloom = (val == "1");
             else if (key == "bloom_intensity") bloom_intensity = std::stof(val);
             else if (key == "bloom_threshold") bloom_threshold = std::stof(val);
@@ -2638,6 +2641,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderInt("Amostras", &ray_samples, 8, 32);
         ImGui::SliderFloat("Fase g", &shaft_g, 0.3f, 0.9f);
         ImGui::SliderFloat("Sigma (densidade do ar)", &shaft_sigma, 0.0002f, 0.02f, "%.4f");
+        ImGui::SliderFloat("Queda por altura", &shaft_height_falloff, 0.0f, 0.05f, "%.4f");
 
         ImGui::Separator();
         ImGui::Text("Dual-Kawase Bloom");
@@ -3372,7 +3376,7 @@ int main(int argc, char* argv[]) {
             fs_params.shaft_cloud_occ = shaft_cloud_occ;
             fs_params.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
             fs_params.shaft_debug = (view_mode == 3) ? 1.0f : 0.0f;
-            fs_params.pad_j[0] = 0.0f; fs_params.pad_j[1] = 0.0f; fs_params.pad_j[2] = 0.0f;
+            fs_params.shaft_height_falloff = shaft_height_falloff; fs_params.pad_j[0] = 0.0f; fs_params.pad_j[1] = 0.0f;
             // Anular shafts nas views de debug para nao sujar a validacao
             fs_params.shaft_intensity = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f;
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
