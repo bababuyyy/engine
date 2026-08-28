@@ -67,7 +67,8 @@ cbuffer SkyBlock : register(b0, space3)
     float cloud_curvatura; // M2.5-24G-6: horizonte honesto (camada desce ao longe)
     float fade_ini;        // M2.5-24G-6: inicio do fade (fracao do cap)
     float passo_far; // M2.5-24J-2 (A18): ocupa o antigo pad_h1
-    float pad_h2;
+    float cloud_ms_str; // M2.5-24J-3: ocupa o antigo pad_h2
+    float cloud_ms_g2;  // M2.5-24J-3
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -350,8 +351,16 @@ PSOutput PSMain(PSInput input)
                         dens_sol += d_far * densidade * 24.0f;
                     }
 
-                    // M2.5-24E-2: multi-scatter dual-exp (Schneider, Nubis 2017)
-                    float luz = max(exp(-dens_sol * absorcao), 0.7f * exp(-0.25f * dens_sol * absorcao));
+                    // M2.5-24J-3: Direct Scattering na forma Nubis3 (Schneider 2023, pt3, verbatim):
+                    //   Direct = (Transmittance x Primary Phase) + (MS x Secondary Phase)
+                    //   ms_volume = dimensional_profile * exp(-dens_sol * Remap(sun_dot, 0, 0.9, 0.25, ValueRemap(depth, .., 0.05, 0.25)))
+                    // Adaptacao da casa (sem SDF de voxel): profundidade ~ perfil dimensional
+                    // (a MESMA variavel que o Nubis3 usa como base do ms_volume). Constantes de
+                    // extincao 0.25 / 0.05-0.25 e janela sun_dot 0->0.9 = fonte. ms_str/g2 = retina.
+                    float t_sun = exp(-dens_sol * absorcao);
+                    float k_ms = lerp(0.25f, lerp(0.25f, 0.05f, saturate(dim_profile)), saturate(cos_sun / 0.9f));
+                    float ms_vol = saturate(dim_profile) * exp(-dens_sol * absorcao * k_ms);
+                    float luz = t_sun * phase_val + ms_vol * cloud_ms_str * hg_phase(cos_sun, cloud_ms_g2);
                     float powder = 1.0f - exp(-2.0f * dens_sol);
                     luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
 
@@ -364,7 +373,7 @@ PSOutput PSMain(PSInput input)
                     float amb_scat = pow(saturate(1.0f - dim_profile), 0.5f);
                     float3 ambient_term = sky_ambient_color * (amb_scat * cloud_ambient_str);
 
-                    float3 direct_term = (luz * phase_val + 0.12f) * sun_color * sun_intensity;
+                    float3 direct_term = (luz + 0.12f) * sun_color * sun_intensity; // 24J-3: fases ja dentro de luz (forma Nubis3)
 
                     radiance += T * (1.0f - exp(-d * sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
                     T *= exp(-d * sz * absorcao);
