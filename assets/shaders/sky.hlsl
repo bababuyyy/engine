@@ -209,7 +209,11 @@ float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_det
     // M2.5-24F-3: recorte no DOMINIO DA DENSIDADE (V7): a borda nasce aqui, antes
     // da integracao - luz e alpha leem o mesmo campo, franja fantasma impossivel.
     // O slider "Silhueta" agora e o piso de recorte da densidade.
-    return smoothstep(cloud_silhouette, cloud_silhouette + 0.18f, d_raw);
+    // M2.5-24J-4 (V5, GPU Pro 7 verbatim): "remapping prevents a loss of too much
+    // density at the core" - remap linear preserva a gradacao do miolo; a janela
+    // estreita de 0.18 esmagava tudo acima dela em 1.0 (plato = silhueta dura).
+    // O piso "Silhueta" permanece: zero abaixo dele (fantasma 24F-3 segue morto).
+    return saturate((d_raw - cloud_silhouette) / max(1.0f - cloud_silhouette, 1e-4f));
 }
 
 PSOutput PSMain(PSInput input)
