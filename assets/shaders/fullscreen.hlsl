@@ -45,8 +45,8 @@ cbuffer FsBlock : register(b0, space3)
     float shadow_str;
     float bloom_intensity;
     float tonemap_shoulder; // M2.5-24I
-    float pad_i0;
-    float pad_i1;
+    float exposure;         // M2.5-24I-2
+    float shaft_cloud_occ;
     float pad_i2;
 };
 
@@ -123,7 +123,8 @@ float4 PSMain(PSInput input) : SV_Target0
 
             // Sombra de nuvem: o MESMO weather map do ceu (sincronia por construcao)
             float cov = saturate((weather_map.SampleLevel(weather_samp, (p.xz + wind_off) * 0.0002f, 0).r - 0.22f) / 0.55f);
-            vis *= 1.0f - shadow_str * saturate(cloud_cover) * cov;
+            // M2.5-24I-2: oclusao quase-binaria - raio SO onde a nuvem deixa (contraste e o segredo)
+            vis *= saturate(1.0f - shaft_cloud_occ * cov * saturate(cloud_cover * 1.5f));
 
             // Integral conservadora de energia (Hillaire 2015, verbatim adaptado)
             float3 S = sun_color * (phase_v * shaft_sigma * vis);
@@ -138,6 +139,8 @@ float4 PSMain(PSInput input) : SV_Target0
     }
 
     final_color.rgb += tex_bloom.Sample(samp, input.uv).rgb * bloom_intensity; // M2.5-23: o florescer
+    final_color.rgb *= exposure; // M2.5-24I-2: exposicao antes do ombro (o par da intensidade)
+
     // M2.5-24I: tonemap de ombro exponencial - abaixo do ombro as cores ficam INTACTAS
     // (toon preservado); acima, rolloff filmico continuo (derivada 1 no ombro).
     float3 tc = final_color.rgb;

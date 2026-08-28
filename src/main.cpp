@@ -153,7 +153,7 @@ struct FsParams { // M2.5-24H: shafts volumetricos
     float sun_color[3];  float shaft_samples;
     float tex_size[2];   float wind_off[2];
     float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
-    float tonemap_shoulder; float pad_i[3]; // M2.5-24I: HDR (224B)
+    float tonemap_shoulder; float exposure; float shaft_cloud_occ; float pad_i2; // 24I-2: exposicao
 };
 static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
 
@@ -257,8 +257,8 @@ float sun_intensity = 1.2f;
 float ray_strength = 0.6f;
 float ray_decay = 0.97f;
 int ray_samples = 48;
-float shaft_g = 0.75f;      // M2.5-24H: fase HG dos shafts
-float shaft_sigma = 0.010f; // M2.5-24H: densidade do ar na marcha
+float shaft_g = 0.40f;      // M2.5-24H/24I-2: fase HG dos shafts (0.2-0.5 = linhagem Killzone)
+float shaft_sigma = 0.004f; // M2.5-24H/24I-2: ar limpo = 0.002-0.006
 
 float out_z_cutoff = 0.005f;
 float out_grazing_scale = 4.0f;
@@ -271,6 +271,8 @@ bool draw_bloom = true;
 float bloom_intensity = 0.25f;
 float bloom_threshold = 0.75f;
 float tonemap_shoulder = 0.75f; // M2.5-24I: inicio do ombro (abaixo = cores intactas)
+float exposure = 1.0f;          // M2.5-24I-2: a chave do HDR (Lagarde 2014 via Hillaire)
+float shaft_cloud_occ = 0.85f;  // M2.5-24I-2: contraste quase-binario das colunas
 
 bool draw_grass = true;
 float grass_scale = 1.0f;
@@ -345,6 +347,8 @@ auto save_tuning = []() {
     f << "bloom_intensity=" << bloom_intensity << "\n";
     f << "bloom_threshold=" << bloom_threshold << "\n";
     f << "tonemap_shoulder=" << tonemap_shoulder << "\n";
+    f << "exposure=" << exposure << "\n";
+    f << "shaft_cloud_occ=" << shaft_cloud_occ << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
     f << "out_crease_low=" << out_crease_low << "\n";
@@ -429,6 +433,8 @@ auto load_tuning = []() {
             else if (key == "bloom_intensity") bloom_intensity = std::stof(val);
             else if (key == "bloom_threshold") bloom_threshold = std::stof(val);
             else if (key == "tonemap_shoulder") tonemap_shoulder = std::stof(val);
+            else if (key == "exposure") exposure = std::stof(val);
+            else if (key == "shaft_cloud_occ") shaft_cloud_occ = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
             else if (key == "out_crease_low") out_crease_low = std::stof(val);
@@ -2621,6 +2627,8 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Bloom: Forca", &bloom_intensity, 0.0f, 1.0f);
         ImGui::SliderFloat("Bloom: Limiar", &bloom_threshold, 0.4f, 2.5f); // 24I: alcance HDR
         ImGui::SliderFloat("Tonemap: ombro", &tonemap_shoulder, 0.5f, 0.95f);
+        ImGui::SliderFloat("Exposicao", &exposure, 0.1f, 4.0f);
+        ImGui::SliderFloat("Shaft: oclusao de nuvem", &shaft_cloud_occ, 0.0f, 1.0f);
 
         ImGui::Separator();
         ImGui::SliderInt("Cortes", &toon_cuts, 2, 5);
@@ -3342,7 +3350,9 @@ int main(int argc, char* argv[]) {
             fs_params.cloud_cover = draw_clouds ? cloud_cobertura : 0.0f;
             fs_params.shadow_str_fs = shadow_str;
             fs_params.tonemap_shoulder = tonemap_shoulder;
-            fs_params.pad_i[0] = 0.0f; fs_params.pad_i[1] = 0.0f; fs_params.pad_i[2] = 0.0f;
+            fs_params.exposure = exposure;
+            fs_params.shaft_cloud_occ = shaft_cloud_occ;
+            fs_params.pad_i2 = 0.0f;
             // Anular shafts nas views de debug para nao sujar a validacao
             fs_params.shaft_intensity = (view_mode == 0) ? ray_strength : 0.0f;
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
