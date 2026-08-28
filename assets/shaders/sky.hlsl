@@ -280,6 +280,7 @@ PSOutput PSMain(PSInput input)
             bool modo_caro = false;
             int zeros_seguidos = 0;
             bool deu_passo_barato = true; // 24J-2b: recuo so e permitido depois de ANDAR barato
+            int amostras_caras = 0; // 24J-5: orcamento de amostras CARAS (= Passos); o 3x e so p/ sondas
 
             [loop] // M2.5-24J-2: marcha com ESTADO (barato/caro) - loop dinamico
             for (int i = 0; i < (int) (passos * 3.0f); ++i) // 24J-2b: orcamento de ITERACOES (3x Passos); amostras caras continuam ~Passos
@@ -325,6 +326,8 @@ PSOutput PSMain(PSInput input)
                     continue;
                 }
 
+                amostras_caras++;
+                if (amostras_caras > (int) passos) break; // 24J-5: teto = Passos (devolve o FPS com densidade baixa)
                 float dim_profile;
                 float d_raw = SampleCloudDensity(p_c, wdisp, saturate(t / cap), true, dim_profile);
 
