@@ -70,6 +70,10 @@ cbuffer SkyBlock : register(b0, space3)
     float cloud_ms_str; // M2.5-24J-3: ocupa o antigo pad_h2
     float cloud_ms_g2;  // M2.5-24J-3
     float cloud_iso_str; // M2.5-24J-7: ocupa o pad_k[0]
+    float sky_gain;      // M2.5-25-2: conversao de unidades
+    float atmo_debug;    // M2.5-25-2: 0=off, 1=transmitancia, 2=multi-scattering
+    float3 sun_illum;    // M2.5-25-2: iluminancia CRUA (offset 256 - float3 alinhado)
+    float pad_l;
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -77,6 +81,10 @@ SamplerState weather_samp : register(s0, space2); // sampler REPEAT: wrap perfei
 Texture3D<float> cloud_noise : register(t1, space2);
 Texture3D<float> cloud_detail : register(t2, space2); // M2.5-24C: Swiss Cheese Detail 32^3
 SamplerState cloud_samp : register(s1, space2);
+
+Texture2D trans_lut : register(t3, space2); // M2.5-25-2: Transmittance LUT 256x64 (Hillaire Â§5.2)
+Texture2D ms_lut : register(t4, space2);    // M2.5-25-2: Multiple-scattering LUT 32x32 (Â§5.5)
+SamplerState lut_samp : register(s2, space2);
 
 struct PSOutput
 {
@@ -217,25 +225,135 @@ float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_det
     return saturate((d_raw - cloud_silhouette) / max(1.0f - cloud_silhouette, 1e-4f));
 }
 
+// ============================================================================
+// M2.5-25-2: A ATMOSFERA FISICA (Hillaire, EGSR 2020)
+// Tabela 1 (coeficientes) + Â§3 (equacao de espalhamento) + Â§5.2 (Transmittance
+// LUT) + Â§5.5 (Psi_ms). Integral conservadora de energia do Hillaire 2015 sl.28.
+// Unidades internas: km. FISICA COM FONTE = CODIGO BLINDADO.
+// ============================================================================
+static const float3 kRayS = float3(5.802e-3f, 13.558e-3f, 33.1e-3f);
+static const float  kMieS = 3.996e-3f;
+static const float  kMieA = 4.40e-3f;
+static const float3 kOzoA = float3(0.650e-3f, 1.881e-3f, 0.085e-3f);
+static const float  kRg = 6360.0f;
+static const float  kRt = 6460.0f;
+
+float3 atmo_sigma_t(float h)
+{
+    float dr = exp(-h / 8.0f);
+    float dm = exp(-h / 1.2f);
+    float dz = max(0.0f, 1.0f - abs(h - 25.0f) / 15.0f);
+    return kRayS * dr + (kMieS + kMieA) * dm + kOzoA * dz;
+}
+
+// MESMA parametrizacao do assador (src/sky/atmosphere.cpp) - contrato de casa
+float2 atmo_trans_uv(float h, float mu)
+{
+    float s = (mu < 0.0f ? -1.0f : 1.0f) * sqrt(abs(mu));
+    return float2(saturate(0.5f + 0.5f * s), saturate(h / (kRt - kRg)));
+}
+
+float atmo_ray_sphere(float3 p, float3 d, float r)
+{
+    float b = dot(p, d);
+    float c = dot(p, p) - r * r;
+    float disc = b * b - c;
+    if (disc < 0.0f) return -1.0f;
+    disc = sqrt(disc);
+    float t0 = -b - disc;
+    float t1 = -b + disc;
+    if (t1 < 0.0f) return -1.0f;
+    return (t0 < 0.0f) ? t1 : t0;
+}
+
+float3 atmo_sky(float3 dir)
+{
+    // mundo: 1 unidade ~ 1 metro -> km
+    float3 p0 = float3(0.0f, kRg + max(cam_pos.y, 0.0f) * 0.001f, 0.0f);
+
+    float t_top = atmo_ray_sphere(p0, dir, kRt);
+    if (t_top <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
+
+    float t_max = t_top;
+    {
+        float b = dot(p0, dir);
+        float c = dot(p0, p0) - kRg * kRg;
+        float disc = b * b - c;
+        if (disc >= 0.0f)
+        {
+            float tg = -b - sqrt(disc);
+            if (tg > 0.0f) t_max = tg; // o chao corta a marcha
+        }
+    }
+
+    float cos_theta = dot(dir, to_sun);
+    // Rayleigh (Â§4): 3(1+cos^2)/16pi
+    float pr = 3.0f * (1.0f + cos_theta * cos_theta) / (16.0f * 3.14159265f);
+    // Mie (Â§4): Cornette-Shanks, g = 0.8 por padrao
+    const float g = 0.8f;
+    float pm = (3.0f / (8.0f * 3.14159265f)) * ((1.0f - g * g) * (1.0f + cos_theta * cos_theta)) /
+               ((2.0f + g * g) * pow(max(1.0f + g * g - 2.0f * g * cos_theta, 1e-4f), 1.5f));
+
+    const int N = 20; // Tabela 2
+    float dt = t_max / (float)N;
+    float3 L = float3(0.0f, 0.0f, 0.0f);
+    float3 T = float3(1.0f, 1.0f, 1.0f);
+
+    [loop]
+    for (int i = 0; i < N; ++i)
+    {
+        float3 x = p0 + dir * ((i + 0.5f) * dt);
+        float r = length(x);
+        float h = r - kRg;
+
+        float dr_ = exp(-h / 8.0f);
+        float dm_ = exp(-h / 1.2f);
+        float3 ss_r = kRayS * dr_;
+        float3 ss_m = kMieS * dm_;
+        float3 st = atmo_sigma_t(h);
+
+        float mu_s = dot(x / r, to_sun);
+        float3 Tsun = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(h, mu_s), 0).rgb;
+        // Psi_ms: Â§5.5.2 verbatim (u = 0.5+0.5cos(theta_s), v = altitude)
+        float3 psi = ms_lut.SampleLevel(lut_samp, float2(saturate(0.5f + 0.5f * mu_s), saturate(h / (kRt - kRg))), 0).rgb;
+
+        // Eq. 11: Lscat = sigma_s * (T*S*fase + Psi_ms) * E
+        float3 S = (ss_r * pr + ss_m * pm) * Tsun + (ss_r + ss_m) * psi;
+        float3 e = exp(-st * dt);
+        float3 Sint = (S - S * e) / max(st, 1e-7f); // Hillaire 2015 sl.28
+        L += T * Sint;
+        T *= e;
+    }
+
+    return L * sun_illum;
+}
 PSOutput PSMain(PSInput input)
 {
     float3 dir = normalize(input.dir);
 
     float h = saturate(dir.y);
-    float3 ceu = lerp(horizon_color, zenith_color, pow(h, 0.6f));
+    // M2.5-25-2: o domo procedural MORREU (lerp horizonte->zenite + paleta do
+    // crepusculo). O ceu agora e a atmosfera fisica de Hillaire 2020. O ganho e
+    // conversao de UNIDADES (o paper e fotometrico; nosso sun_intensity e
+    // arbitrario) - unico numero desta estacao que nao esta na fonte.
+    float3 ceu = atmo_sky(dir) * sky_gain;
 
     float cos_sun = dot(dir, to_sun);
 
+    // Â§5.3 / S6: o disco do sol e composto SEPARADO. O halo fake ao redor dele
+    // foi REMOVIDO - o halo agora nasce do espalhamento de Mie na marcha.
     float sun_core = smoothstep(0.9985f, 0.9995f, cos_sun);
     sun_core = pow(sun_core, 0.6f);
-    float3 sun_disk = sun_color * sun_core * 0.75f;
+    float3 astro = sun_color * sun_core * 0.75f;
 
-    float angle = acos(saturate(cos_sun));
-    float halo_str = lerp(1.0f, 2.5f, 1.0f - saturate(dir.y * 4.0f));
-    float3 sun_halo = sun_color * exp(-angle / 0.04f) * 0.5f +
-                      sun_color * exp(-angle / 0.15f) * 0.15f * halo_str;
-
-    float3 astro = sun_disk + sun_halo;
+    // Vista de depuracao das LUTs (salvaguarda de atribuicao desta estacao)
+    if (atmo_debug > 0.5f)
+    {
+        float2 duv = float2(frac(atan2(dir.z, dir.x) * 0.15915494f + 0.5f), saturate(dir.y));
+        ceu = (atmo_debug > 1.5f) ? ms_lut.SampleLevel(lut_samp, duv, 0).rgb * 20.0f
+                                  : trans_lut.SampleLevel(lut_samp, duv, 0).rgb;
+        astro = float3(0.0f, 0.0f, 0.0f);
+    }
 
     // M2.5-24E-4: soma convexa normalizada + silver lining artistico via max (Nubis 2017); k=0 = fisica pura
     float phase_base = lerp(hg_phase(cos_sun, hg_g_frontal), hg_phase(cos_sun, -0.2f), 0.5f);

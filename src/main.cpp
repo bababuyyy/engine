@@ -47,6 +47,7 @@ typedef unsigned char BYTE;
 #include "shadow_vs.h"
 #include "shadow_ps.h"
 #include "clouds/cloud_noise.h"
+#include "sky/atmosphere.h" // M2.5-25-2: LUTs da atmosfera (Hillaire 2020)
 
 // ============================================================================
 
@@ -138,7 +139,8 @@ struct SkyParams {
     float cloud_shadow_color[3];              float curl_str;
     float silver_k;         float silver_spread;    float clima_cov_teto;   float clima_type_teto; // 24G-3: tetos do clima (ex-pads)
     float curvatura;        float fade_ini;         float passo_far; float cloud_ms_str; // 24G-6 + 24J-3
-    float cloud_ms_g2;      float cloud_iso_str; float pad_k[2]; // 24J-3 + 24J-7 (256B)
+    float cloud_ms_g2;      float cloud_iso_str; float sky_gain;  float atmo_debug; // 24J-3 + 24J-7 + 25-2
+    float sun_illum[3];     float pad_l; // 25-2: iluminancia CRUA do sol (a marcha faz a propria atenuacao) (272B)
 };
 
 struct ObjIdParams {
@@ -244,6 +246,8 @@ float cloud_silver_k = 0.0f;      // M2.5-24E-4: silver lining (0 = fisica pura)
 float cloud_ms_str = 1.0f;        // M2.5-24J-3: forca do brilho interno MS (retina; a fonte da a forma, nao o numero)
 float cloud_ms_g2 = 0.2f;         // M2.5-24J-3: fase secundaria "mais isotropica" (retina; 0 = isotropica pura)
 float cloud_iso_str = 0.12f;      // M2.5-24J-7: 3o termo de fase, isotropico (era o 0.12 fixo; 0.12 = comportamento anterior)
+float sky_gain = 30.0f;           // M2.5-25-2: CONVERSAO DE UNIDADES (o paper e fotometrico, ~120klx; nosso sun_intensity e arbitrario). NAO esta na fonte -> retina.
+int atmo_debug_mode = 0;          // M2.5-25-2: 0=off, 1=LUT de transmitancia, 2=LUT de multi-scattering
 float cloud_silver_spread = 0.3f;
 float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
 float clima_type_teto = 0.80f;
@@ -378,6 +382,7 @@ auto save_tuning = []() {
     f << "cloud_ms_str=" << cloud_ms_str << "\n";
     f << "cloud_ms_g2=" << cloud_ms_g2 << "\n";
     f << "cloud_iso_str=" << cloud_iso_str << "\n";
+    f << "sky_gain=" << sky_gain << "\n";
     f << "cloud_silver_spread=" << cloud_silver_spread << "\n";
     f << "clima_cov_teto=" << clima_cov_teto << "\n";
     f << "clima_type_teto=" << clima_type_teto << "\n";
@@ -469,6 +474,7 @@ auto load_tuning = []() {
             else if (key == "cloud_ms_str") cloud_ms_str = std::stof(val);
             else if (key == "cloud_ms_g2") cloud_ms_g2 = std::stof(val);
             else if (key == "cloud_iso_str") cloud_iso_str = std::stof(val);
+            else if (key == "sky_gain") sky_gain = std::stof(val);
             else if (key == "cloud_silver_spread") cloud_silver_spread = std::stof(val);
             else if (key == "clima_cov_teto") clima_cov_teto = std::stof(val);
             else if (key == "clima_type_teto") clima_type_teto = std::stof(val);
@@ -616,7 +622,7 @@ int main(int argc, char* argv[]) {
     sky_ps_info.entrypoint = "PSMain";
     sky_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     sky_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    sky_ps_info.num_samplers = 3; // M2.5-24C: O ceu adere a textura de detalhe 32^3
+    sky_ps_info.num_samplers = 5; // M2.5-25-2: + LUT de transmitancia (t3) e de multi-scattering (t4)
     sky_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_ps = SDL_CreateGPUShader(device, &sky_ps_info);
     if (!sky_ps) { SDL_Log("FALHA sky_ps: %s", SDL_GetError()); return 1; }
@@ -824,6 +830,24 @@ int main(int argc, char* argv[]) {
     weather_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
     SDL_GPUTexture* weather_tex = SDL_CreateGPUTexture(device, &weather_tex_info);
     if (!weather_tex) { SDL_Log("FALHA weather_tex: %s", SDL_GetError()); return 1; }
+    // M2.5-25-2: LUTs da atmosfera (Hillaire 2020, Tabela 2). RGBA16F: a
+    // transmitancia e o Psi_ms tem faixa dinamica que UNORM8 destruiria.
+    SDL_GPUTextureCreateInfo trans_tex_info = {};
+    trans_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+    trans_tex_info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    trans_tex_info.width = atmo::kTransW;
+    trans_tex_info.height = atmo::kTransH;
+    trans_tex_info.layer_count_or_depth = 1;
+    trans_tex_info.num_levels = 1;
+    trans_tex_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    SDL_GPUTexture* trans_tex = SDL_CreateGPUTexture(device, &trans_tex_info);
+    if (!trans_tex) { SDL_Log("FALHA trans_tex: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUTextureCreateInfo ms_tex_info = trans_tex_info;
+    ms_tex_info.width = atmo::kMsW;
+    ms_tex_info.height = atmo::kMsH;
+    SDL_GPUTexture* ms_tex = SDL_CreateGPUTexture(device, &ms_tex_info);
+    if (!ms_tex) { SDL_Log("FALHA ms_tex: %s", SDL_GetError()); return 1; }
 
     SDL_GPUSamplerCreateInfo cloud_samp_info = {};
     cloud_samp_info.min_filter = SDL_GPU_FILTER_LINEAR;
@@ -834,6 +858,16 @@ int main(int argc, char* argv[]) {
     cloud_samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
     SDL_GPUSampler* cloud_sampler = SDL_CreateGPUSampler(device, &cloud_samp_info);
     if (!cloud_sampler) { SDL_Log("FALHA cloud_sampler: %s", SDL_GetError()); return 1; }
+    // M2.5-25-2: sampler das LUTs da atmosfera - CLAMP obrigatorio (LUT nao repete)
+    SDL_GPUSamplerCreateInfo lut_samp_info = {};
+    lut_samp_info.min_filter = SDL_GPU_FILTER_LINEAR;
+    lut_samp_info.mag_filter = SDL_GPU_FILTER_LINEAR;
+    lut_samp_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    lut_samp_info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    lut_samp_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    lut_samp_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    SDL_GPUSampler* lut_sampler = SDL_CreateGPUSampler(device, &lut_samp_info);
+    if (!lut_sampler) { SDL_Log("FALHA lut_sampler: %s", SDL_GetError()); return 1; }
 
     std::vector<uint8_t> cloud_data = clouds::generate_cloud_noise(128, 32, 128);
     SDL_GPUTransferBufferCreateInfo c_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)cloud_data.size() };
@@ -866,6 +900,26 @@ int main(int argc, char* argv[]) {
     SDL_GPUTextureTransferInfo w_tex_loc = { weather_tb, 0, 512, 512 };
     SDL_GPUTextureRegion w_tex_reg = { weather_tex, 0, 0, 0, 0, 0, 512, 512, 1 };
     SDL_UploadToGPUTexture(init_pass, &w_tex_loc, &w_tex_reg, false);
+    // M2.5-25-2: assa (ou le do cache) as LUTs da atmosfera e sobe para a GPU
+    std::vector<uint8_t> trans_data = atmo::generate_transmittance_lut();
+    SDL_GPUTransferBufferCreateInfo tr_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)trans_data.size() };
+    SDL_GPUTransferBuffer* trans_tb = SDL_CreateGPUTransferBuffer(device, &tr_tb_info);
+    void* trans_ptr = SDL_MapGPUTransferBuffer(device, trans_tb, false);
+    memcpy(trans_ptr, trans_data.data(), trans_data.size());
+    SDL_UnmapGPUTransferBuffer(device, trans_tb);
+    SDL_GPUTextureTransferInfo tr_tex_loc = { trans_tb, 0, atmo::kTransW, atmo::kTransH };
+    SDL_GPUTextureRegion tr_tex_reg = { trans_tex, 0, 0, 0, 0, 0, atmo::kTransW, atmo::kTransH, 1 };
+    SDL_UploadToGPUTexture(init_pass, &tr_tex_loc, &tr_tex_reg, false);
+
+    std::vector<uint8_t> ms_data = atmo::generate_multiscatter_lut();
+    SDL_GPUTransferBufferCreateInfo ms_tb_info = { SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, (uint32_t)ms_data.size() };
+    SDL_GPUTransferBuffer* ms_tb = SDL_CreateGPUTransferBuffer(device, &ms_tb_info);
+    void* ms_ptr = SDL_MapGPUTransferBuffer(device, ms_tb, false);
+    memcpy(ms_ptr, ms_data.data(), ms_data.size());
+    SDL_UnmapGPUTransferBuffer(device, ms_tb);
+    SDL_GPUTextureTransferInfo ms_tex_loc = { ms_tb, 0, atmo::kMsW, atmo::kMsH };
+    SDL_GPUTextureRegion ms_tex_reg = { ms_tex, 0, 0, 0, 0, 0, atmo::kMsW, atmo::kMsH, 1 };
+    SDL_UploadToGPUTexture(init_pass, &ms_tex_loc, &ms_tex_reg, false);
 
     SDL_EndGPUCopyPass(init_pass);
     SDL_SubmitGPUCommandBuffer(init_cmd);
@@ -873,6 +927,8 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUTransferBuffer(device, cloud_tb);
     SDL_ReleaseGPUTransferBuffer(device, det_tb);
     SDL_ReleaseGPUTransferBuffer(device, weather_tb);
+    SDL_ReleaseGPUTransferBuffer(device, trans_tb);
+    SDL_ReleaseGPUTransferBuffer(device, ms_tb);
     SDL_Log("BOOT: nuvens ok, seguindo p/ ceu");
 
     std::vector<float> dome_vertices;
@@ -2659,6 +2715,8 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Brilho interno (MS)", &cloud_ms_str, 0.0f, 2.0f);
         ImGui::SliderFloat("Fase do MS (g2)", &cloud_ms_g2, 0.0f, 0.6f);
         ImGui::SliderFloat("Luz isotropica", &cloud_iso_str, 0.0f, 0.5f);
+        ImGui::SliderFloat("Ganho do ceu (unidades)", &sky_gain, 0.0f, 200.0f);
+        ImGui::SliderInt("Debug atmosfera", &atmo_debug_mode, 0, 2);
         ImGui::SliderFloat("Silver spread", &cloud_silver_spread, 0.05f, 0.5f);
         ImGui::SliderFloat("Camada: base", &cloud_h_min, 60.0f, 200.0f);
         ImGui::SliderFloat("Camada: topo", &cloud_h_max, 150.0f, 500.0f);
@@ -3112,7 +3170,12 @@ int main(int argc, char* argv[]) {
             sky_params.curvatura = cloud_curvatura;
             sky_params.fade_ini = cloud_fade_ini;
             sky_params.passo_far = cloud_passo_far; sky_params.cloud_ms_str = cloud_ms_str; sky_params.cloud_ms_g2 = cloud_ms_g2;
-            sky_params.cloud_iso_str = cloud_iso_str; sky_params.pad_k[0] = 0.0f; sky_params.pad_k[1] = 0.0f;
+            sky_params.cloud_iso_str = cloud_iso_str;
+            sky_params.sky_gain = sky_gain; sky_params.atmo_debug = (float)atmo_debug_mode;
+            // 25-2: SEM t_sol aqui - a marcha da atmosfera calcula a propria transmitancia
+            sky_params.sun_illum[0] = sun_color_arr[0] * effective_intensity;
+            sky_params.sun_illum[1] = sun_color_arr[1] * effective_intensity;
+            sky_params.sun_illum[2] = sun_color_arr[2] * effective_intensity; sky_params.pad_l = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
@@ -3182,12 +3245,14 @@ int main(int argc, char* argv[]) {
                 SDL_GPUBufferBinding sky_ib_bind = { dome_index_buffer, 0 };
                 SDL_BindGPUIndexBuffer(scene_pass, &sky_ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
-                SDL_GPUTextureSamplerBinding sky_samps[3] = {
+                SDL_GPUTextureSamplerBinding sky_samps[5] = {
                     { weather_tex, sampler }, // M2.5-24G-1: weather map no t0 do ceu
                     { cloud_tex, cloud_sampler },
-                    { cloud_detail_tex, cloud_sampler }
+                    { cloud_detail_tex, cloud_sampler },
+                    { trans_tex, lut_sampler }, // M2.5-25-2: t3 = transmitancia
+                    { ms_tex, lut_sampler }     // M2.5-25-2: t4 = multi-scattering
                 };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, sky_samps, 3);
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, sky_samps, 5);
 
                 SDL_DrawGPUIndexedPrimitives(scene_pass, dome_indices.size(), 1, 0, 0, 0);
             }
@@ -3549,6 +3614,9 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUTexture(device, cloud_tex);
     SDL_ReleaseGPUTexture(device, cloud_detail_tex);
     SDL_ReleaseGPUTexture(device, weather_tex);
+    SDL_ReleaseGPUTexture(device, trans_tex);
+    SDL_ReleaseGPUTexture(device, ms_tex);
+    SDL_ReleaseGPUSampler(device, lut_sampler);
 
     SDL_ReleaseGPUGraphicsPipeline(device, grass_pipeline);
     SDL_ReleaseGPUShader(device, grass_vs);
