@@ -69,6 +69,7 @@ cbuffer SkyBlock : register(b0, space3)
     float passo_far; // M2.5-24J-2 (A18): ocupa o antigo pad_h1
     float cloud_ms_str; // M2.5-24J-3: ocupa o antigo pad_h2
     float cloud_ms_g2;  // M2.5-24J-3
+    float cloud_iso_str; // M2.5-24J-7: ocupa o pad_k[0]
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -380,7 +381,7 @@ PSOutput PSMain(PSInput input)
                     float amb_scat = pow(saturate(1.0f - dim_profile), 0.5f);
                     float3 ambient_term = sky_ambient_color * (amb_scat * cloud_ambient_str);
 
-                    float3 direct_term = (luz + 0.12f) * sun_color * sun_intensity; // 24J-3: fases ja dentro de luz (forma Nubis3)
+                    float3 direct_term = (luz + cloud_iso_str) * sun_color * sun_intensity; // 24J-7: 3o termo isotropico (linhagem Nubis; peso = retina)
 
                     radiance += T * (1.0f - exp(-d * sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
                     T *= exp(-d * sz * absorcao);

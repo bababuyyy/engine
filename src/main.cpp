@@ -138,7 +138,7 @@ struct SkyParams {
     float cloud_shadow_color[3];              float curl_str;
     float silver_k;         float silver_spread;    float clima_cov_teto;   float clima_type_teto; // 24G-3: tetos do clima (ex-pads)
     float curvatura;        float fade_ini;         float passo_far; float cloud_ms_str; // 24G-6 + 24J-3
-    float cloud_ms_g2;      float pad_k[3]; // 24J-3: direct scattering Nubis3 (256B)
+    float cloud_ms_g2;      float cloud_iso_str; float pad_k[2]; // 24J-3 + 24J-7 (256B)
 };
 
 struct ObjIdParams {
@@ -243,6 +243,7 @@ static_assert(sizeof(SkyParams) % 16 == 0, "SkyParams: alinhamento de 16 bytes q
 float cloud_silver_k = 0.0f;      // M2.5-24E-4: silver lining (0 = fisica pura)
 float cloud_ms_str = 1.0f;        // M2.5-24J-3: forca do brilho interno MS (retina; a fonte da a forma, nao o numero)
 float cloud_ms_g2 = 0.2f;         // M2.5-24J-3: fase secundaria "mais isotropica" (retina; 0 = isotropica pura)
+float cloud_iso_str = 0.12f;      // M2.5-24J-7: 3o termo de fase, isotropico (era o 0.12 fixo; 0.12 = comportamento anterior)
 float cloud_silver_spread = 0.3f;
 float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
 float clima_type_teto = 0.80f;
@@ -335,6 +336,7 @@ auto save_tuning = []() {
     f << "cloud_silver_k=" << cloud_silver_k << "\n";
     f << "cloud_ms_str=" << cloud_ms_str << "\n";
     f << "cloud_ms_g2=" << cloud_ms_g2 << "\n";
+    f << "cloud_iso_str=" << cloud_iso_str << "\n";
     f << "cloud_silver_spread=" << cloud_silver_spread << "\n";
     f << "clima_cov_teto=" << clima_cov_teto << "\n";
     f << "clima_type_teto=" << clima_type_teto << "\n";
@@ -425,6 +427,7 @@ auto load_tuning = []() {
             else if (key == "cloud_silver_k") cloud_silver_k = std::stof(val);
             else if (key == "cloud_ms_str") cloud_ms_str = std::stof(val);
             else if (key == "cloud_ms_g2") cloud_ms_g2 = std::stof(val);
+            else if (key == "cloud_iso_str") cloud_iso_str = std::stof(val);
             else if (key == "cloud_silver_spread") cloud_silver_spread = std::stof(val);
             else if (key == "clima_cov_teto") clima_cov_teto = std::stof(val);
             else if (key == "clima_type_teto") clima_type_teto = std::stof(val);
@@ -2614,6 +2617,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Silver lining", &cloud_silver_k, 0.0f, 1.5f);
         ImGui::SliderFloat("Brilho interno (MS)", &cloud_ms_str, 0.0f, 2.0f);
         ImGui::SliderFloat("Fase do MS (g2)", &cloud_ms_g2, 0.0f, 0.6f);
+        ImGui::SliderFloat("Luz isotropica", &cloud_iso_str, 0.0f, 0.5f);
         ImGui::SliderFloat("Silver spread", &cloud_silver_spread, 0.05f, 0.5f);
         ImGui::SliderFloat("Camada: base", &cloud_h_min, 60.0f, 200.0f);
         ImGui::SliderFloat("Camada: topo", &cloud_h_max, 150.0f, 500.0f);
@@ -3061,7 +3065,7 @@ int main(int argc, char* argv[]) {
             sky_params.curvatura = cloud_curvatura;
             sky_params.fade_ini = cloud_fade_ini;
             sky_params.passo_far = cloud_passo_far; sky_params.cloud_ms_str = cloud_ms_str; sky_params.cloud_ms_g2 = cloud_ms_g2;
-            sky_params.pad_k[0] = 0.0f; sky_params.pad_k[1] = 0.0f; sky_params.pad_k[2] = 0.0f;
+            sky_params.cloud_iso_str = cloud_iso_str; sky_params.pad_k[0] = 0.0f; sky_params.pad_k[1] = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
