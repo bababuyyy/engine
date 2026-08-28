@@ -64,6 +64,10 @@ cbuffer SkyBlock : register(b0, space3)
     float cloud_silver_spread;
     float clima_cov_teto;  // M2.5-24G-3: teto de cobertura (embriao da maquina de clima)
     float clima_type_teto; // M2.5-24G-3: teto de tipo
+    float cloud_curvatura; // M2.5-24G-6: horizonte honesto (camada desce ao longe)
+    float fade_ini;        // M2.5-24G-6: inicio do fade (fracao do cap)
+    float pad_h1;
+    float pad_h2;
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -258,16 +262,21 @@ PSOutput PSMain(PSInput input)
             {
                 float3 p = cam_pos + dir * t;
 
-                if (p.y < h_min || p.y > h_max)
+                // M2.5-24G-6: curvatura fake - aproximacao barata da casca esferica do Nubis
+                float2 dxz = p.xz - cam_pos.xz;
+                float3 p_c = p;
+                p_c.y += dot(dxz, dxz) * cloud_curvatura;
+
+                if (p_c.y < h_min || p_c.y > h_max)
                 {
                     t += step_sz;
                     continue;
                 }
 
                 float dim_profile;
-                float d_raw = SampleCloudDensity(p, wdisp, saturate(t / cap), true, dim_profile);
+                float d_raw = SampleCloudDensity(p_c, wdisp, saturate(t / cap), true, dim_profile);
 
-                float fade = 1.0f - smoothstep(cap * 0.8f, cap, t - t_min);
+                float fade = 1.0f - smoothstep(cap * fade_ini, cap, t - t_min);
                 float d = d_raw * densidade * fade;
 
                 if (d > 0.0f)
@@ -280,14 +289,14 @@ PSOutput PSMain(PSInput input)
                     for (int j = 0; j < 4; ++j)
                     {
                         float t_s = (j == 0) ? 6.0f : ((j == 1) ? 15.0f : ((j == 2) ? 30.0f : 60.0f));
-                        float3 p_sol = p + to_sun * t_s;
+                        float3 p_sol = p_c + to_sun * t_s;
                         float dim_unused;
                         float d_sol = SampleCloudDensity(p_sol, wdisp, 0.0f, false, dim_unused);
                         dens_sol += d_sol * densidade * (t_s - prev_ts);
                         prev_ts = t_s;
                     }
                     {
-                        float3 p_far = p + to_sun * 150.0f;
+                        float3 p_far = p_c + to_sun * 150.0f;
                         float dim_unused2;
                         float d_far = SampleCloudDensity(p_far, wdisp, 0.0f, false, dim_unused2);
                         dens_sol += d_far * densidade * 24.0f;
@@ -326,7 +335,7 @@ PSOutput PSMain(PSInput input)
     // M2.5-24F-3: corte pos-integral REMOVIDO (V7 do tribunal: nenhuma referencia
     // de producao remapeia o alpha final; a borda pertence ao dominio da densidade).
 
-    float fog_air = saturate(cloud_dist / 900.0f) * 0.65f;
+    float fog_air = saturate(cloud_dist / (cap * 1.2f)) * 0.85f;
 
     float3 final_color = lerp(radiance, horizon_color * (1.0f - T), fog_air) + T * (ceu + astro);
     final_color = min(max(final_color, 0.0f), 8.0f);
