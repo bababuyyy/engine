@@ -4,3 +4,4 @@ build/
 Testing/
 cache/
 engine_src.zip
+apply-*.ps1
