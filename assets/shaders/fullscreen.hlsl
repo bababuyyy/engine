@@ -131,7 +131,10 @@ float4 PSMain(PSInput input) : SV_Target0
             float t_layer = clamp((cloud_mid - p.y) / sun_y, 0.0f, 4000.0f);
             float2 cpos = p.xz + to_sun.xz * t_layer;
             float cov = saturate((weather_map.SampleLevel(weather_samp, (cpos + wind_off) * 0.0002f, 0).r - 0.22f) / 0.55f);
-            vis *= saturate(1.0f - shaft_cloud_occ * cov * saturate(cloud_cover * 1.5f));
+            // M2.5-24I-5: presenca = onde a densidade NASCE (cobertura x campo), mapeada
+            // quase-binaria (pesquisa: T ~ 0.02-0.1 sob nuvem; media global e anti-padrao)
+            float presenca = smoothstep(0.12f, 0.30f, saturate(cloud_cover) * cov);
+            vis *= 1.0f - shaft_cloud_occ * presenca;
 
             // Integral conservadora de energia (Hillaire 2015, verbatim adaptado)
             float3 S = sun_color * (phase_v * shaft_sigma * vis);

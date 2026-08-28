@@ -258,8 +258,8 @@ float sun_intensity = 1.2f;
 float ray_strength = 0.6f;
 float ray_decay = 0.97f;
 int ray_samples = 48;
-float shaft_g = 0.40f;      // M2.5-24H/24I-2: fase HG dos shafts (0.2-0.5 = linhagem Killzone)
-float shaft_sigma = 0.004f; // M2.5-24H/24I-2: ar limpo = 0.002-0.006
+float shaft_g = 0.55f;      // M2.5-24I-5: 0.5-0.7 = faixa da pesquisa para shafts
+float shaft_sigma = 0.0006f; // M2.5-24I-5: OD 0.1-0.4 em 500u (Koschmieder) - antes estava 5x leitoso
 
 float out_z_cutoff = 0.005f;
 float out_grazing_scale = 4.0f;
@@ -273,7 +273,7 @@ float bloom_intensity = 0.25f;
 float bloom_threshold = 0.75f;
 float tonemap_shoulder = 0.75f; // M2.5-24I: inicio do ombro (abaixo = cores intactas)
 float exposure = 1.0f;          // M2.5-24I-2: a chave do HDR (Lagarde 2014 via Hillaire)
-float shaft_cloud_occ = 0.85f;  // M2.5-24I-2: contraste quase-binario das colunas
+float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
 
 bool draw_grass = true;
 float grass_scale = 1.0f;
@@ -2620,7 +2620,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Forca dos raios", &ray_strength, 0.0f, 2.0f);
         ImGui::SliderInt("Amostras", &ray_samples, 8, 32);
         ImGui::SliderFloat("Fase g", &shaft_g, 0.3f, 0.9f);
-        ImGui::SliderFloat("Sigma (densidade do ar)", &shaft_sigma, 0.001f, 0.05f, "%.3f");
+        ImGui::SliderFloat("Sigma (densidade do ar)", &shaft_sigma, 0.0002f, 0.02f, "%.4f");
 
         ImGui::Separator();
         ImGui::Text("Dual-Kawase Bloom");
