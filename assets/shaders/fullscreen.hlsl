@@ -7,30 +7,58 @@ struct PSInput
 PSInput VSMain(uint vertexID : SV_VertexID)
 {
     PSInput output;
-    
+
     // Geracao processual otimizada do triangulo unificado para Fullscreen Quad
     output.uv = float2((vertexID << 1) & 2, vertexID & 2);
     output.pos = float4(output.uv * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
-    
+
     return output;
 }
 
 Texture2D tex_color : register(t0, space2);
-Texture2D tex_norm_id : register(t1, space2); // Adicionado para servir de gate oclusor pros God Rays
+Texture2D tex_norm_id : register(t1, space2);
 Texture2D tex_bloom : register(t2, space2); // M2.5-23: resultado da piramide dual-Kawase
 SamplerState samp : register(s0, space2);
 
+// M2.5-24H: insumos da marcha volumetrica (Wronski 2014 / Hillaire 2015 / Killzone GPU Pro 5)
+Texture2D tex_depth : register(t3, space2);
+SamplerState samp_point : register(s3, space2);
+Texture2D shadow_map : register(t4, space2);
+SamplerComparisonState shadow_cmp : register(s4, space2);
+Texture2D weather_map : register(t5, space2);
+SamplerState weather_samp : register(s5, space2);
+
 cbuffer FsBlock : register(b0, space3)
 {
+    float4x4 inv_viewproj;
+    float4x4 light_vp;
+    float3 cam_pos;
+    float shaft_intensity;
+    float3 to_sun;
+    float shaft_g;
+    float3 sun_color;
+    float shaft_samples;
     float2 tex_size;
-    float2 sun_screen;
-    float3 ray_color;
-    float ray_intensity;
-    float ray_decay;
-    float ray_samples;
+    float2 wind_off;
+    float shaft_sigma;
+    float cloud_cover;
+    float shadow_str;
     float bloom_intensity;
-    float pad_r;
 };
+
+static const float bayer[16] =
+{
+    0.0f / 16.0f, 8.0f / 16.0f, 2.0f / 16.0f, 10.0f / 16.0f,
+    12.0f / 16.0f, 4.0f / 16.0f, 14.0f / 16.0f, 6.0f / 16.0f,
+    3.0f / 16.0f, 11.0f / 16.0f, 1.0f / 16.0f, 9.0f / 16.0f,
+    15.0f / 16.0f, 7.0f / 16.0f, 13.0f / 16.0f, 5.0f / 16.0f
+};
+
+float hg_phase(float cos_theta, float g)
+{
+    float g2 = g * g;
+    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 12.5663706f);
+}
 
 float4 PSMain(PSInput input) : SV_Target0
 {
@@ -39,44 +67,70 @@ float4 PSMain(PSInput input) : SV_Target0
     float2 tx = input.uv * tex_size - 0.5 * box;
     float2 off = smoothstep(1.0 - box, 1.0, frac(tx));
     float2 fuv = (floor(tx) + 0.5 + off) / tex_size;
-    
+
     float4 final_color = tex_color.Sample(samp, fuv);
-    
-    // M2.5-20: God Rays Aditivos via Radial Blur Screen-Space
-    // Somente opera se os raios n�o estiverem desbotados de vez (costas viradas pro sol)
-    if (ray_intensity > 0.001f)
+
+    // ========================================================================
+    // M2.5-24H: SUN SHAFTS VOLUMETRICOS
+    // Marcha por pixel da camera ate o depth (arquitetura minima de Wronski 2014
+    // p.14-15 / linhagem Killzone Shadow Fall), com a integral conservadora de
+    // energia do Hillaire 2015 (slide 28): Sint = (S - S*exp(-sigma*dt)) / sigma.
+    // Sombra do sol via shadow map + sombra de nuvem via weather map: os raios
+    // vazam pelos buracos das nuvens e aterrissam no mundo (paralaxe real).
+    // Aditivo por decisao (v1): o fog analitico da cena permanece; unificacao
+    // completa da nevoa e estacao futura (WeatherContext).
+    // ========================================================================
+    if (shaft_intensity > 0.001f)
     {
-        float2 texcoord = input.uv;
-        float2 delta = (texcoord - sun_screen) * (1.0f / ray_samples);
-        float illumination_decay = 1.0f;
-        float3 ray_accum = float3(0.0f, 0.0f, 0.0f);
-        
-        int n_samples = (int) ray_samples;
-        
-        for (int i = 0; i < n_samples; ++i)
+        float depth = tex_depth.SampleLevel(samp_point, input.uv, 0).r;
+        float4 ndc = float4(input.uv.x * 2.0f - 1.0f, -(input.uv.y * 2.0f - 1.0f), depth, 1.0f);
+        float4 wp = mul(inv_viewproj, ndc);
+        float3 world = wp.xyz / max(abs(wp.w), 1e-6f) * sign(wp.w);
+
+        float3 ray = world - cam_pos;
+        float dist = min(length(ray), 480.0f);
+        float3 rdir = normalize(ray);
+
+        int n = clamp((int) shaft_samples, 4, 32);
+        float step_len = dist / n;
+
+        int2 px = int2(input.pos.xy) % 4;
+        float t = step_len * bayer[px.y * 4 + px.x];
+
+        float phase_v = hg_phase(dot(rdir, to_sun), shaft_g);
+
+        float T = 1.0f;
+        float3 scat = float3(0.0f, 0.0f, 0.0f);
+
+        [loop]
+        for (int i = 0; i < n; ++i)
         {
-            texcoord -= delta;
-            
-            // Guard Band
-            if (texcoord.x < 0.0f || texcoord.x > 1.0f || texcoord.y < 0.0f || texcoord.y > 1.0f)
+            float3 p = cam_pos + rdir * t;
+
+            // Visibilidade do sol: shadow map (fora do mapa = iluminado)
+            float vis = 1.0f;
+            float4 lp = mul(light_vp, float4(p, 1.0f));
+            float3 lndc = lp.xyz / max(abs(lp.w), 1e-6f);
+            float2 suv = float2(lndc.x * 0.5f + 0.5f, -lndc.y * 0.5f + 0.5f);
+            if (suv.x >= 0.0f && suv.x <= 1.0f && suv.y >= 0.0f && suv.y <= 1.0f && lndc.z <= 1.0f)
             {
-                break;
+                vis = shadow_map.SampleCmpLevelZero(shadow_cmp, suv, lndc.z - 0.0015f);
             }
-            
-            // Sampleia cor e id do ponto do blur no buffer atual (sem offsets afiados p/ n gerar artefatos no espaco continuo)
-            float4 sample_col = tex_color.SampleLevel(samp, texcoord, 0);
-            float sample_id = tex_norm_id.SampleLevel(samp, texcoord, 0).a;
-            
-            // Sky-Mask Oclusion sem sujar a geometria
-            // Se ID > 0.5/255 -> objeto/terreno (oclusor, logo intensidade 0), se 0 -> ceu (emissor de luz, extrai a luma)
-            float emissor = (sample_id > (0.5f / 255.0f)) ? 0.0f : 1.0f;
-            float luminance = dot(sample_col.rgb, float3(0.299f, 0.587f, 0.114f));
-            
-            ray_accum += sample_col.rgb * luminance * emissor * illumination_decay;
-            illumination_decay *= ray_decay;
+
+            // Sombra de nuvem: o MESMO weather map do ceu (sincronia por construcao)
+            float cov = saturate((weather_map.SampleLevel(weather_samp, (p.xz + wind_off) * 0.0002f, 0).r - 0.22f) / 0.55f);
+            vis *= 1.0f - shadow_str * saturate(cloud_cover) * cov;
+
+            // Integral conservadora de energia (Hillaire 2015, verbatim adaptado)
+            float3 S = sun_color * (phase_v * shaft_sigma * vis);
+            float3 Sint = (S - S * exp(-shaft_sigma * step_len)) / max(shaft_sigma, 1e-5f);
+            scat += T * Sint;
+            T *= exp(-shaft_sigma * step_len);
+
+            t += step_len;
         }
-        
-        final_color.rgb += (ray_accum / ray_samples) * ray_color * ray_intensity;
+
+        final_color.rgb += scat * shaft_intensity;
     }
 
     final_color.rgb += tex_bloom.Sample(samp, input.uv).rgb * bloom_intensity; // M2.5-23: o florescer

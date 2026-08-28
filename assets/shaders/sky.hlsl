@@ -341,7 +341,8 @@ PSOutput PSMain(PSInput input)
     final_color = min(max(final_color, 0.0f), 8.0f);
 
     PSOutput output;
-    output.color = float4(final_color, 1.0f);
+    // M2.5-24G-7: alpha carrega a transmitancia - nuvem grossa OCLUI god ray no fullscreen
+    output.color = float4(final_color, T);
     output.normal_id = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
 }
