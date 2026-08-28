@@ -154,6 +154,7 @@ struct FsParams { // M2.5-24H: shafts volumetricos
     float tex_size[2];   float wind_off[2];
     float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
     float tonemap_shoulder; float exposure; float shaft_cloud_occ; float cloud_mid; // 24I-3: altura media da camada
+    float shaft_debug;      float pad_j[3]; // 24I-4: vista de depuracao (240B)
 };
 static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
 
@@ -1809,7 +1810,7 @@ int main(int argc, char* argv[]) {
     float sun_color_arr[3] = { 1.0f, 1.0f, 1.0f };
 
     int view_mode = 0;
-    const char* view_modes[] = { "Final", "Normais+ID", "Sem outline" };
+    const char* view_modes[] = { "Final", "Normais+ID", "Sem outline", "Shafts (debug)" };
 
     int toon_cuts = 3;
     float toon_soft = 1.0f;
@@ -2434,7 +2435,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        ImGui::Combo("Vista", &view_mode, view_modes, 3);
+        ImGui::Combo("Vista", &view_mode, view_modes, 4);
 
         ImGui::Text("Instancias: 100000");
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
@@ -3353,8 +3354,10 @@ int main(int argc, char* argv[]) {
             fs_params.exposure = exposure;
             fs_params.shaft_cloud_occ = shaft_cloud_occ;
             fs_params.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
+            fs_params.shaft_debug = (view_mode == 3) ? 1.0f : 0.0f;
+            fs_params.pad_j[0] = 0.0f; fs_params.pad_j[1] = 0.0f; fs_params.pad_j[2] = 0.0f;
             // Anular shafts nas views de debug para nao sujar a validacao
-            fs_params.shaft_intensity = (view_mode == 0) ? ray_strength : 0.0f;
+            fs_params.shaft_intensity = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f;
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
 
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &fs_params, sizeof(FsParams));

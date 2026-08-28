@@ -48,6 +48,10 @@ cbuffer FsBlock : register(b0, space3)
     float exposure;         // M2.5-24I-2
     float shaft_cloud_occ;
     float cloud_mid;        // M2.5-24I-3
+    float shaft_debug;      // M2.5-24I-4
+    float pad_j0;
+    float pad_j1;
+    float pad_j2;
 };
 
 static const float bayer[16] =
@@ -138,6 +142,11 @@ float4 PSMain(PSInput input) : SV_Target0
             t += step_len;
         }
 
+        // M2.5-24I-4: vista de depuracao - SO a marcha, sem cena/bloom/tonemap
+        if (shaft_debug > 0.5f)
+        {
+            return float4(scat * 4.0f, 1.0f);
+        }
         final_color.rgb += scat * shaft_intensity;
     }
 
