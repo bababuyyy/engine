@@ -324,6 +324,12 @@ float bloom_intensity = 0.25f;
 float bloom_threshold = 0.75f;
 float tonemap_shoulder = 0.75f; // M2.5-24I: inicio do ombro (abaixo = cores intactas)
 float exposure = 1.0f;          // M2.5-24I-2: a chave do HDR (Lagarde 2014 via Hillaire)
+// M2.5-25-4: exposicao automatica analitica (ver comentario no calculo, no loop de frame)
+bool  auto_exposure = true;      // desligado = o slider "Exposicao" manda, como antes
+float exposure_key = 0.18f;      // chave / cinza medio (Reinhard) - ARTE, e a unica escolha de gosto aqui
+float exposure_bias_ev = 0.0f;   // compensacao em STOPS (fotografia) - ARTE
+float exposure_speed = 2.0f;     // velocidade da adaptacao do "olho" (1/s)
+float exposure_auto_cur = 1.0f;  // valor suavizado corrente (nao persiste: converge sozinho)
 float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
 
 bool draw_grass = true;
@@ -406,6 +412,10 @@ auto save_tuning = []() {
     f << "bloom_threshold=" << bloom_threshold << "\n";
     f << "tonemap_shoulder=" << tonemap_shoulder << "\n";
     f << "exposure=" << exposure << "\n";
+    f << "auto_exposure=" << (auto_exposure ? 1 : 0) << "\n";
+    f << "exposure_key=" << exposure_key << "\n";
+    f << "exposure_bias_ev=" << exposure_bias_ev << "\n";
+    f << "exposure_speed=" << exposure_speed << "\n";
     f << "shaft_cloud_occ=" << shaft_cloud_occ << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
@@ -498,6 +508,10 @@ auto load_tuning = []() {
             else if (key == "bloom_threshold") bloom_threshold = std::stof(val);
             else if (key == "tonemap_shoulder") tonemap_shoulder = std::stof(val);
             else if (key == "exposure") exposure = std::stof(val);
+            else if (key == "auto_exposure") auto_exposure = (std::stoi(val) != 0);
+            else if (key == "exposure_key") exposure_key = std::stof(val);
+            else if (key == "exposure_bias_ev") exposure_bias_ev = std::stof(val);
+            else if (key == "exposure_speed") exposure_speed = std::stof(val);
             else if (key == "shaft_cloud_occ") shaft_cloud_occ = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
@@ -2766,6 +2780,11 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Bloom: Limiar", &bloom_threshold, 0.4f, 2.5f); // 24I: alcance HDR
         ImGui::SliderFloat("Tonemap: ombro", &tonemap_shoulder, 0.5f, 0.95f);
         ImGui::SliderFloat("Exposicao", &exposure, 0.1f, 4.0f);
+        ImGui::Checkbox("Exposicao automatica", &auto_exposure); // M2.5-25-4
+        ImGui::SliderFloat("Chave (cinza medio)", &exposure_key, 0.02f, 0.6f, "%.3f");
+        ImGui::SliderFloat("Compensacao (EV)", &exposure_bias_ev, -4.0f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Adaptacao (1/s)", &exposure_speed, 0.1f, 8.0f);
+        ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
         ImGui::SliderFloat("Shaft: oclusao de nuvem", &shaft_cloud_occ, 0.0f, 1.0f);
 
         ImGui::Separator();
@@ -3166,6 +3185,38 @@ int main(int argc, char* argv[]) {
                 float fisico = atmo_amb[ci] * sun_color_arr[ci] * effective_intensity * sky_gain;
                 sky_params.sky_ambient_color[ci] = fisico * (1.0f - amb_noite_w) + effective_sky_amb[ci] * amb_noite_w;
             }
+
+            // M2.5-25-4: EXPOSICAO AUTOMATICA ANALITICA.
+            // Pratica de producao: Lagarde & de Rousiers, "Moving Frostbite to PBR"
+            // (2014) - auto-exposure com chave sobre a luminancia media (Reinhard).
+            // ADAPTACAO DA CASA: a Frostbite MEDE o frame anterior; nos CALCULAMOS a
+            // iluminancia do sol e do ceu, porque a temporada 25 nos deu essa fisica.
+            // Sem readback GPU->CPU (regra da doutrina), sem latencia, sem reducao nova.
+            {
+                const float kR = 0.2126f, kG = 0.7152f, kB = 0.0722f; // luma Rec.709
+                float e_sun = (kR * sun_color_arr[0] * t_sol.x +
+                               kG * sun_color_arr[1] * t_sol.y +
+                               kB * sun_color_arr[2] * t_sol.z) *
+                              effective_intensity * std::max(0.0f, to_sun_vec.y);
+                float e_sky = (kR * atmo_amb[0] * sun_color_arr[0] +
+                               kG * atmo_amb[1] * sun_color_arr[1] +
+                               kB * atmo_amb[2] * sun_color_arr[2]) *
+                              effective_intensity * sky_gain * 3.14159265f;
+                // Superficie lambertiana com albedo medio de cena 0.2 (convencao do
+                // cartao cinza da fotografia; premissa da casa, nao numero de fonte):
+                // L = E * albedo / pi
+                float l_avg = (e_sun + e_sky) * 0.2f / 3.14159265f;
+                float alvo = exposure_key / std::max(l_avg, 1e-5f) * std::pow(2.0f, exposure_bias_ev);
+                alvo = std::clamp(alvo, 0.02f, 60.0f);
+
+                static uint64_t exp_last_ms = SDL_GetTicks();
+                uint64_t exp_now_ms = SDL_GetTicks();
+                float exp_dt = std::min((float)(exp_now_ms - exp_last_ms) / 1000.0f, 0.25f);
+                exp_last_ms = exp_now_ms;
+                // adaptacao exponencial do "olho": converge igual em 60 ou 240 fps
+                exposure_auto_cur += (alvo - exposure_auto_cur) *
+                                     (1.0f - std::exp(-exp_dt * std::max(exposure_speed, 0.01f)));
+            }
             sky_params.detail_str = cloud_detail_str;
 
             sky_params.cloud_shadow_color[0] = effective_cloud_shad.r;
@@ -3511,7 +3562,7 @@ int main(int argc, char* argv[]) {
             fs_params.cloud_cover = draw_clouds ? cloud_cobertura : 0.0f;
             fs_params.shadow_str_fs = shadow_str;
             fs_params.tonemap_shoulder = tonemap_shoulder;
-            fs_params.exposure = exposure;
+            fs_params.exposure = auto_exposure ? exposure_auto_cur : exposure; // M2.5-25-4
             fs_params.shaft_cloud_occ = shaft_cloud_occ;
             fs_params.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
             fs_params.shaft_debug = (view_mode == 3) ? 1.0f : 0.0f;
