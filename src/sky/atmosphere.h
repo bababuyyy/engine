@@ -1,6 +1,6 @@
 #pragma once
 // ============================================================================
-// M2.5-25-2 (S1+S2+S3): LUTs da atmosfera fisica.
+// M2.5-25-2/25-3 (S1+S2+S3+S10): LUTs da atmosfera fisica.
 // Fonte: Sebastien Hillaire, "A Scalable and Production-Ready Sky and
 // Atmosphere Rendering Technique", EGSR 2020 (Epic Games) - o Sky Atmosphere
 // da Unreal. PDF nos arquivos do projeto (pt1/pt2), lido na integra.
@@ -28,5 +28,13 @@ constexpr int kMsH = 32;
 // Cache em disco (cache/atmo_luts_v1.bin); assam na primeira execucao.
 std::vector<uint8_t> generate_transmittance_lut();
 std::vector<uint8_t> generate_multiscatter_lut();
+
+// M2.5-25-3 (S10): luminancia MEDIA do hemisferio do ceu, para o termo ambiente
+// das nuvens (Nubis: ambient_scattering * cor do ceu). Valor UNITLESS - quem
+// chama multiplica pela iluminancia do sol e pelo ganho de unidades.
+// Integral de 32 direcoes x 20 passos: custo desprezivel, uma vez por frame.
+// A altitude do observador e fixada no chao: nosso mundo inteiro cabe em < 1 km
+// de uma atmosfera de 100 km, entao a variacao por altura e irrelevante aqui.
+void sky_ambient(float sun_cos_zenith, float out_rgb[3]);
 
 } // namespace atmo

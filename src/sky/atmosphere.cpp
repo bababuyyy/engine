@@ -306,6 +306,76 @@ void ensure_baked()
     cache_save();
 }
 
+// -------------------------------------------------- M2.5-25-3 (S10): ambiente
+// Versao CPU da marcha do ceu (a MESMA fisica do sky.hlsl), usada para calcular
+// a luminancia media do hemisferio que ilumina as nuvens.
+
+V3 sample_ms(float h, float mu_s)
+{
+    float u = std::clamp(0.5f + 0.5f * mu_s, 0.0f, 1.0f);
+    float v = std::clamp(h / (kRt - kRg), 0.0f, 1.0f);
+
+    float fx = u * kMsW - 0.5f, fy = v * kMsH - 0.5f;
+    int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+    float tx = fx - x0, ty = fy - y0;
+    int x1 = std::clamp(x0 + 1, 0, kMsW - 1), y1 = std::clamp(y0 + 1, 0, kMsH - 1);
+    x0 = std::clamp(x0, 0, kMsW - 1); y0 = std::clamp(y0, 0, kMsH - 1);
+
+    V3 top = g_ms[(size_t)y0 * kMsW + x0] * (1.0f - tx) + g_ms[(size_t)y0 * kMsW + x1] * tx;
+    V3 bot = g_ms[(size_t)y1 * kMsW + x0] * (1.0f - tx) + g_ms[(size_t)y1 * kMsW + x1] * tx;
+    return top * (1.0f - ty) + bot * ty;
+}
+
+V3 sky_radiance(const V3& dir, const V3& sun)
+{
+    V3 p0(0.0f, kRg + 0.2f, 0.0f);
+    float t_top = ray_sphere(p0, dir, kRt);
+    if (t_top <= 0.0f) return V3(0.0f);
+
+    float t_max = t_top;
+    {
+        float b = dot3(p0, dir);
+        float c = dot3(p0, p0) - kRg * kRg;
+        float disc = b * b - c;
+        if (disc >= 0.0f)
+        {
+            float tg = -b - std::sqrt(disc);
+            if (tg > 0.0f) t_max = tg;
+        }
+    }
+
+    float ct = dot3(dir, sun);
+    float pr = 3.0f * (1.0f + ct * ct) / (16.0f * kPi);
+    const float g = 0.8f;
+    float pm = (3.0f / (8.0f * kPi)) * ((1.0f - g * g) * (1.0f + ct * ct)) /
+               ((2.0f + g * g) * std::pow(std::max(1.0f + g * g - 2.0f * g * ct, 1e-4f), 1.5f));
+
+    const int N = 20;
+    float dt = t_max / (float)N;
+    V3 L(0.0f), T(1.0f);
+    for (int i = 0; i < N; ++i)
+    {
+        V3 x = p0 + dir * ((i + 0.5f) * dt);
+        float r = len3(x);
+        float h = r - kRg;
+        float dr_, dm_, dz_; densities(h, dr_, dm_, dz_);
+        V3 ss_r = kRayS * dr_;
+        V3 ss_m = V3(kMieS) * dm_;
+        V3 st = sigma_t(h);
+
+        float mu_s = dot3(x * (1.0f / r), sun);
+        V3 Tsun = sample_trans(h, mu_s);
+        V3 psi = sample_ms(h, mu_s);
+
+        V3 S = (ss_r * pr + ss_m * pm) * Tsun + (ss_r + ss_m) * psi;
+        V3 e = expn(st * dt);
+        V3 Sint = (S - S * e) / V3(std::max(st.x, 1e-7f), std::max(st.y, 1e-7f), std::max(st.z, 1e-7f));
+        L += T * Sint;
+        T = T * e;
+    }
+    return L;
+}
+
 } // namespace
 
 std::vector<uint8_t> generate_transmittance_lut()
@@ -324,6 +394,30 @@ std::vector<uint8_t> generate_multiscatter_lut()
     out.reserve((size_t)kMsW * kMsH * 8);
     for (const V3& c : g_ms) push_rgba16f(out, c);
     return out;
+}
+
+void sky_ambient(float sun_cos_zenith, float out_rgb[3])
+{
+    ensure_baked();
+
+    float sc = std::clamp(sun_cos_zenith, -1.0f, 1.0f);
+    V3 sun(std::sqrt(std::max(0.0f, 1.0f - sc * sc)), sc, 0.0f);
+
+    const int kDirs = 32; // hemisferio superior, distribuicao de Fibonacci
+    V3 acc(0.0f);
+    for (int k = 0; k < kDirs; ++k)
+    {
+        float kk = k + 0.5f;
+        float cy = kk / (float)kDirs; // 0..1 = horizonte..zenite
+        float sy = std::sqrt(std::max(0.0f, 1.0f - cy * cy));
+        float th = kPi * (1.0f + std::sqrt(5.0f)) * kk;
+        acc += sky_radiance(V3(std::cos(th) * sy, cy, std::sin(th) * sy), sun);
+    }
+    acc = acc * (1.0f / (float)kDirs);
+
+    out_rgb[0] = acc.x;
+    out_rgb[1] = acc.y;
+    out_rgb[2] = acc.z;
 }
 
 } // namespace atmo

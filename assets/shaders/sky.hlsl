@@ -275,6 +275,7 @@ float3 atmo_sky(float3 dir)
     if (t_top <= 0.0f) return float3(0.0f, 0.0f, 0.0f);
 
     float t_max = t_top;
+    bool hit_ground = false; // M2.5-25-3: o termo Lo precisa saber
     {
         float b = dot(p0, dir);
         float c = dot(p0, p0) - kRg * kRg;
@@ -282,7 +283,7 @@ float3 atmo_sky(float3 dir)
         if (disc >= 0.0f)
         {
             float tg = -b - sqrt(disc);
-            if (tg > 0.0f) t_max = tg; // o chao corta a marcha
+            if (tg > 0.0f) { t_max = tg; hit_ground = true; } // o chao corta a marcha
         }
     }
 
@@ -323,6 +324,18 @@ float3 atmo_sky(float3 dir)
         float3 Sint = (S - S * e) / max(st, 1e-7f); // Hillaire 2015 sl.28
         L += T * Sint;
         T *= e;
+    }
+
+    // M2.5-25-3: o termo T(c,p)*Lo(p,v) da Eq. 1 do Hillaire - resposta difusa do
+    // chao do planeta virtual (albedo 0.3, Â§4). Sem ele, tudo abaixo da linha do
+    // horizonte fica PRETO (a marcha para no chao e nao sobra in-scattering).
+    if (hit_ground)
+    {
+        float3 pg = p0 + dir * t_max;
+        float3 ng = pg / length(pg);
+        float ns = max(0.0f, dot(ng, to_sun));
+        float3 Tg = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(0.0f, dot(ng, to_sun)), 0).rgb;
+        L += T * Tg * ns * (0.3f / 3.14159265f);
     }
 
     return L * sun_illum;

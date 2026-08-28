@@ -3154,9 +3154,18 @@ int main(int argc, char* argv[]) {
             sky_params.cloud_bands = cloud_bands;
             sky_params.cloud_ambient_str = cloud_ambient_str;
 
-            sky_params.sky_ambient_color[0] = effective_sky_amb.r;
-            sky_params.sky_ambient_color[1] = effective_sky_amb.g;
-            sky_params.sky_ambient_color[2] = effective_sky_amb.b;
+            // M2.5-25-3 (S10): a nuvem bebe do CEU FISICO. A paleta hardcoded do
+            // ambiente sai de cena de dia; o crepusculo passa a tingir as nuvens
+            // sozinho, pela mesma atmosfera que pinta o ceu. Mesmo ganho de unidades.
+            // Interim: abaixo do horizonte a paleta antiga volta, ate a lua (S7).
+            float atmo_amb[3];
+            atmo::sky_ambient(to_sun_vec.y, atmo_amb);
+            float amb_noite_w = std::clamp(-to_sun_vec.y / 0.1f, 0.0f, 1.0f);
+            for (int ci = 0; ci < 3; ++ci)
+            {
+                float fisico = atmo_amb[ci] * sun_color_arr[ci] * effective_intensity * sky_gain;
+                sky_params.sky_ambient_color[ci] = fisico * (1.0f - amb_noite_w) + effective_sky_amb[ci] * amb_noite_w;
+            }
             sky_params.detail_str = cloud_detail_str;
 
             sky_params.cloud_shadow_color[0] = effective_cloud_shad.r;
