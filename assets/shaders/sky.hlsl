@@ -105,7 +105,7 @@ static const float bayer[16] =
 float hg_phase(float cos_theta, float g)
 {
     float g2 = g * g;
-    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 12.5663706f);
+    return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 3.14159265f);
 }
 
 float get_height_fraction(float4 grad, float hf)
@@ -116,34 +116,34 @@ float get_height_fraction(float4 grad, float hf)
 PSOutput PSMain(PSInput input)
 {
     float3 dir = normalize(input.dir);
-    
+
     float h = saturate(dir.y);
     float3 ceu = lerp(horizon_color, zenith_color, pow(h, 0.6f));
-    
+
     float cos_sun = dot(dir, to_sun);
-    
+
     float sun_core = smoothstep(0.9985f, 0.9995f, cos_sun);
     sun_core = pow(sun_core, 0.6f);
     float3 sun_disk = sun_color * sun_core * 0.75f;
-    
+
     float angle = acos(saturate(cos_sun));
     float halo_str = lerp(1.0f, 2.5f, 1.0f - saturate(dir.y * 4.0f));
     float3 sun_halo = sun_color * exp(-angle / 0.04f) * 0.5f +
                       sun_color * exp(-angle / 0.15f) * 0.15f * halo_str;
-    
+
     float3 astro = sun_disk + sun_halo;
-    
+
     float phase_val = lerp(hg_phase(cos_sun, hg_g_frontal), hg_phase(cos_sun, -0.2f), 0.5f);
     float sun_angular_gate = saturate(-cos_sun);
-    
+
     float T = 1.0f;
     float3 radiance = float3(0.0f, 0.0f, 0.0f);
     float cloud_dist = 9999.0f;
-    
+
     float4 grad_stratus = float4(0.0f, 0.07f, 0.08f, 0.15f);
     float4 grad_cumulus = float4(0.0f, 0.08f, 0.75f, 0.98f);
     float4 grad_nimbus = float4(0.0f, 0.06f, 0.88f, 1.0f);
-    
+
     float4 active_grad;
     if (cloud_type < 0.5f)
     {
@@ -153,22 +153,22 @@ PSOutput PSMain(PSInput input)
     {
         active_grad = lerp(grad_cumulus, grad_nimbus, (cloud_type - 0.5f) * 2.0f);
     }
-    
+
     if (dir.y > 0.01f || (cam_pos.y >= h_min && cam_pos.y <= h_max))
     {
         float t_min = (h_min - cam_pos.y) / dir.y;
         float t_max = (h_max - cam_pos.y) / dir.y;
-        
+
         if (t_min > t_max)
         {
             float tmp = t_min;
             t_min = t_max;
             t_max = tmp;
         }
-        
+
         t_min = max(t_min, 0.0f);
         t_max = min(t_max, t_min + cap);
-        
+
         if (t_max > t_min)
         {
             cloud_dist = t_min;
@@ -176,55 +176,55 @@ PSOutput PSMain(PSInput input)
             int2 px = int2(input.pos.xy) % 4;
             float dither = bayer[px.y * 4 + px.x];
             float t = t_min + step_sz * dither;
-            
+
             float2 wdisp = wind_dir * time * cloud_speed * -200.0f;
-            
+
             [unroll(48)]
             for (int i = 0; i < (int) passos; ++i)
             {
                 float3 p = cam_pos + dir * t;
-                
+
                 if (p.y < h_min || p.y > h_max)
                 {
                     t += step_sz;
                     continue;
                 }
-                
+
                 float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
                 float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
                 float fade = 1.0f - smoothstep(cap * 0.8f, cap, t - t_min);
-                
+
                 float wcov = saturate((wfbm((p.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
                 float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
-                
+
                 float prof = get_height_fraction(active_grad, hf);
-                
+
                 float d_base = noise_val * prof - (1.0f - cobertura * wcov);
                 float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * saturate(t / cap));
                 float d_raw = saturate(d_base - d_erosao);
-                
+
                 d_raw *= lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf));
-                
+
                 // M2.5-24C: Anti-algodao (Curl warp & Swiss Cheese Erosion da borda)
                 if (d_raw > 0.01f)
                 {
                     float2 cw = float2(
                         vnoise2(p.xz * 0.004f + 17.3f) - 0.5f,
                         vnoise2(p.xz * 0.004f - 31.7f) - 0.5f) * curl_str * 30.0f;
-                    
+
                     float det = cloud_detail.SampleLevel(cloud_samp, frac((p + float3(cw.x, 0.0f, cw.y)) * escala * 6.1f), 0).r;
-                    
+
                     float borda = 1.0f - saturate(d_raw / 0.35f);
                     float det_str_h = detail_str * lerp(1.25f, 0.7f, pow(hf, 0.25f));
-                    
+
                     det_str_h *= (1.0f - 0.65f * saturate(t / cap)); // HZD Nubis
-                    
+
                     d_raw = saturate(d_raw - det * borda * det_str_h);
                 }
-                
+
                 d_raw = smoothstep(0.0f, 0.18f, d_raw);
                 float d = d_raw * densidade * fade;
-                
+
                 if (d > 0.0f)
                 {
                     float dens_sol = 0.0f;
@@ -237,32 +237,32 @@ PSOutput PSMain(PSInput input)
                         float hf_s = saturate((p_sol.y - h_min) / max(h_max - h_min, 1.0f));
                         float prof_s = get_height_fraction(active_grad, hf_s);
                         float wcov_s = saturate((wfbm((p_sol.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
-                        
+
                         float d_s_base = n_sol * prof_s - (1.0f - cobertura * wcov_s);
                         float d_s_erosao = erosao_str * (1.0f - n_sol) * smoothstep(0.35f, 1.0f, hf_s);
                         float d_sol_raw = saturate(d_s_base - d_s_erosao) * lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf_s));
-                        
+
                         dens_sol += smoothstep(0.0f, 0.18f, d_sol_raw) * densidade * step_sol;
                     }
-                    
+
                     float luz = exp(-dens_sol * absorcao);
                     float powder = 1.0f - exp(-2.0f * dens_sol);
                     luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
-                    
+
                     if (cloud_bands >= 2.0f)
                     {
                         luz = (floor(luz * cloud_bands) + smoothstep(0.35f, 0.65f, frac(luz * cloud_bands))) / cloud_bands;
                     }
-                    
+
                     float3 base_ambient = lerp(cloud_shadow_color, sky_ambient_color, 0.4f);
                     float3 ambient_term = base_ambient * sun_ambient * lerp(0.72f, 1.0f, hf);
-                    
+
                     float3 direct_term = (luz * phase_val + 0.12f) * sun_color * sun_intensity;
-                    
+
                     radiance += T * (1.0f - exp(-d * step_sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
                     T *= exp(-d * step_sz * absorcao);
                 }
-                
+
                 if (T < 0.05f)
                 {
                     T = 0.0f;
@@ -272,16 +272,21 @@ PSOutput PSMain(PSInput input)
             }
         }
     }
-    
+
+    // M2.5-24D-b: corte de silhueta com rescale premultiplicado.
+    // O smoothstep corta a OPACIDADE das bordas finas; a radiancia acumulada
+    // precisa encolher na MESMA proporcao, senao a luz da nuvem cortada soma
+    // por cima do ceu restaurado -> silhueta fantasma translucida.
     float alpha = 1.0f - T;
-    alpha = smoothstep(cloud_silhouette, cloud_silhouette + 0.12f, alpha);
-    T = 1.0f - alpha;
-    
+    float alpha_cut = smoothstep(cloud_silhouette, cloud_silhouette + 0.12f, alpha);
+    radiance *= (alpha > 0.001f) ? (alpha_cut / alpha) : 0.0f;
+    T = 1.0f - alpha_cut;
+
     float fog_air = saturate(cloud_dist / 900.0f) * 0.65f;
-    
+
     float3 final_color = lerp(radiance, horizon_color * (1.0f - T), fog_air) + T * (ceu + astro);
     final_color = min(max(final_color, 0.0f), 8.0f);
-    
+
     PSOutput output;
     output.color = float4(final_color, 1.0f);
     output.normal_id = float4(0.0f, 0.0f, 0.0f, 0.0f);
