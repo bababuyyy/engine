@@ -95,8 +95,15 @@ float vnoise2(float2 pp)
 
 float wfbm(float2 pp)
 {
+    // M2.5-24F-4: 4 oitavas rotacionadas (Nubis: "several octaves") - as frequencias
+    // medias que faltavam para o caos; pesos somam 1.0 (mesma faixa de antes).
     float2 pr = float2(pp.x * 0.8f - pp.y * 0.6f, pp.x * 0.6f + pp.y * 0.8f);
-    return vnoise2(pp) * 0.66f + vnoise2(pr * 2.7f) * 0.34f;
+    float2 pr2 = float2(pr.x * 0.8f - pr.y * 0.6f, pr.x * 0.6f + pr.y * 0.8f);
+    float v = vnoise2(pp) * 0.5f;
+    v += vnoise2(pr * 2.3f) * 0.25f;
+    v += vnoise2(pr2 * 5.1f) * 0.15f;
+    v += vnoise2(pp * 11.7f + 31.4f) * 0.10f;
+    return v;
 }
 
 static const float bayer[16] =
@@ -135,8 +142,11 @@ float SampleCloudDensity(float3 p, float2 wdisp, float4 active_grad, float dist_
 
     out_dim_profile = prof * saturate(cobertura * wcov);
 
-    float d_base = noise_val * prof - (1.0f - cobertura * wcov);
-    float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * dist_frac);
+    // M2.5-24F-2: formula do Nubis 2022 (Schneider): saturate(noise - (1 - dimensional_profile)).
+    // O perfil dimensional INTEIRO entra no limiar; o noise nao e mais multiplicado pelo perfil.
+    float d_base = saturate(noise_val - (1.0f - out_dim_profile));
+    // Erosao de topo mantida como tempero, atenuada no miolo (protege o nucleo - emenda do tribunal)
+    float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * dist_frac) * (1.0f - 0.5f * d_base);
     float d_raw = saturate(d_base - d_erosao);
 
     d_raw *= lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf));
@@ -158,7 +168,10 @@ float SampleCloudDensity(float3 p, float2 wdisp, float4 active_grad, float dist_
         d_raw = saturate(d_raw - det * borda * det_str_h);
     }
 
-    return smoothstep(0.0f, 0.18f, d_raw);
+    // M2.5-24F-3: recorte no DOMINIO DA DENSIDADE (V7): a borda nasce aqui, antes
+    // da integracao - luz e alpha leem o mesmo campo, franja fantasma impossivel.
+    // O slider "Silhueta" agora e o piso de recorte da densidade.
+    return smoothstep(cloud_silhouette, cloud_silhouette + 0.18f, d_raw);
 }
 
 PSOutput PSMain(PSInput input)
@@ -248,14 +261,25 @@ PSOutput PSMain(PSInput input)
 
                 if (d > 0.0f)
                 {
+                    // M2.5-24F-5: passos exponenciais (Frostbite) + amostra longa (Schneider 2015:
+                    // "the last sample is placed far away to capture shadows cast by distant clouds")
                     float dens_sol = 0.0f;
-                    float step_sol = 12.0f;
-                    for (int j = 1; j <= 4; ++j)
+                    float prev_ts = 0.0f;
+                    [unroll]
+                    for (int j = 0; j < 4; ++j)
                     {
-                        float3 p_sol = p + to_sun * (j * step_sol);
+                        float t_s = (j == 0) ? 6.0f : ((j == 1) ? 15.0f : ((j == 2) ? 30.0f : 60.0f));
+                        float3 p_sol = p + to_sun * t_s;
                         float dim_unused;
                         float d_sol = SampleCloudDensity(p_sol, wdisp, active_grad, 0.0f, false, dim_unused);
-                        dens_sol += d_sol * densidade * step_sol;
+                        dens_sol += d_sol * densidade * (t_s - prev_ts);
+                        prev_ts = t_s;
+                    }
+                    {
+                        float3 p_far = p + to_sun * 150.0f;
+                        float dim_unused2;
+                        float d_far = SampleCloudDensity(p_far, wdisp, active_grad, 0.0f, false, dim_unused2);
+                        dens_sol += d_far * densidade * 24.0f;
                     }
 
                     // M2.5-24E-2: multi-scatter dual-exp (Schneider, Nubis 2017)
@@ -288,14 +312,8 @@ PSOutput PSMain(PSInput input)
         }
     }
 
-    // M2.5-24D-b: corte de silhueta com rescale premultiplicado.
-    // O smoothstep corta a OPACIDADE das bordas finas; a radiancia acumulada
-    // precisa encolher na MESMA proporcao, senao a luz da nuvem cortada soma
-    // por cima do ceu restaurado -> silhueta fantasma translucida.
-    float alpha = 1.0f - T;
-    float alpha_cut = smoothstep(cloud_silhouette, cloud_silhouette + 0.12f, alpha);
-    radiance *= (alpha > 0.001f) ? (alpha_cut / alpha) : 0.0f;
-    T = 1.0f - alpha_cut;
+    // M2.5-24F-3: corte pos-integral REMOVIDO (V7 do tribunal: nenhuma referencia
+    // de producao remapeia o alpha final; a borda pertence ao dominio da densidade).
 
     float fog_air = saturate(cloud_dist / 900.0f) * 0.65f;
 

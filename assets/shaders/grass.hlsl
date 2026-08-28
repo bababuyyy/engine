@@ -152,8 +152,15 @@ float vnoise2(float2 pp)
 }
 float wfbm(float2 pp)
 {
+    // M2.5-24F-4: 4 oitavas rotacionadas (Nubis: "several octaves") - as frequencias
+    // medias que faltavam para o caos; pesos somam 1.0 (mesma faixa de antes).
     float2 pr = float2(pp.x * 0.8f - pp.y * 0.6f, pp.x * 0.6f + pp.y * 0.8f);
-    return vnoise2(pp) * 0.66f + vnoise2(pr * 2.7f) * 0.34f;
+    float2 pr2 = float2(pr.x * 0.8f - pr.y * 0.6f, pr.x * 0.6f + pr.y * 0.8f);
+    float v = vnoise2(pp) * 0.5f;
+    v += vnoise2(pr * 2.3f) * 0.25f;
+    v += vnoise2(pr2 * 5.1f) * 0.15f;
+    v += vnoise2(pp * 11.7f + 31.4f) * 0.10f;
+    return v;
 }
 
 struct PSOutput
