@@ -133,9 +133,10 @@ struct SkyParams {
     float densidade;        float escala;     float h_min;      float h_max;
     float cap;              float passos;     float absorcao;   float hg_g_frontal;
     float powder_str;       float sun_intensity; float sun_ambient; float cloud_type;
-    float erosao_str;       float cloud_silhouette; float cloud_bands; float pad_a;
+    float erosao_str;       float cloud_silhouette; float cloud_bands; float cloud_ambient_str; // 24E-3: ocupa o antigo pad_a
     float sky_ambient_color[3];               float detail_str;
     float cloud_shadow_color[3];              float curl_str;
+    float silver_k;         float silver_spread;    float pad_e4[2]; // 24E-4: anexado no fim (224B)
 };
 
 struct ObjIdParams {
@@ -233,6 +234,10 @@ float cloud_silhouette = 0.18f;
 float cloud_bands = 3.0f;
 float cloud_detail_str = 0.35f; // M2.5-24C
 float cloud_curl_str = 0.4f;
+float cloud_ambient_str = 1.0f; // M2.5-24E-3: energia propria da nuvem
+static_assert(sizeof(SkyParams) % 16 == 0, "SkyParams: alinhamento de 16 bytes quebrado");
+float cloud_silver_k = 0.0f;      // M2.5-24E-4: silver lining (0 = fisica pura)
+float cloud_silver_spread = 0.3f;
 
 bool sol_automatico = true;
 float arco_inclinacao = 25.0f;
@@ -307,6 +312,9 @@ auto save_tuning = []() {
     f << "cloud_bands=" << cloud_bands << "\n";
     f << "cloud_detail_str=" << cloud_detail_str << "\n";
     f << "cloud_curl_str=" << cloud_curl_str << "\n";
+    f << "cloud_ambient_str=" << cloud_ambient_str << "\n";
+    f << "cloud_silver_k=" << cloud_silver_k << "\n";
+    f << "cloud_silver_spread=" << cloud_silver_spread << "\n";
     f << "sol_automatico=" << (sol_automatico ? "1" : "0") << "\n";
     f << "arco_inclinacao=" << arco_inclinacao << "\n";
     f << "sun_yaw=" << sun_yaw << "\n";
@@ -381,6 +389,9 @@ auto load_tuning = []() {
             else if (key == "cloud_bands") cloud_bands = std::stof(val);
             else if (key == "cloud_detail_str") cloud_detail_str = std::stof(val);
             else if (key == "cloud_curl_str") cloud_curl_str = std::stof(val);
+            else if (key == "cloud_ambient_str") cloud_ambient_str = std::stof(val);
+            else if (key == "cloud_silver_k") cloud_silver_k = std::stof(val);
+            else if (key == "cloud_silver_spread") cloud_silver_spread = std::stof(val);
             else if (key == "sol_automatico") sol_automatico = (val == "1");
             else if (key == "arco_inclinacao") arco_inclinacao = std::stof(val);
             else if (key == "sun_yaw") sun_yaw = std::stof(val);
@@ -2514,6 +2525,9 @@ int main(int argc, char* argv[]) {
         ImGui::SliderInt("Passos", &cloud_passos, 8, 48);
         ImGui::SliderFloat("Powder", &cloud_powder_str, 0.0f, 1.0f);
         ImGui::SliderFloat("G frontal", &cloud_hg_g_frontal, 0.5f, 0.85f);
+        ImGui::SliderFloat("Ambiente da nuvem", &cloud_ambient_str, 0.0f, 2.0f);
+        ImGui::SliderFloat("Silver lining", &cloud_silver_k, 0.0f, 1.5f);
+        ImGui::SliderFloat("Silver spread", &cloud_silver_spread, 0.05f, 0.5f);
 
         ImGui::Separator();
         ImGui::Checkbox("Sol automatico", &sol_automatico);
@@ -2925,7 +2939,7 @@ int main(int argc, char* argv[]) {
 
             sky_params.cloud_silhouette = cloud_silhouette;
             sky_params.cloud_bands = cloud_bands;
-            sky_params.pad_a = 0.0f;
+            sky_params.cloud_ambient_str = cloud_ambient_str;
 
             sky_params.sky_ambient_color[0] = effective_sky_amb.r;
             sky_params.sky_ambient_color[1] = effective_sky_amb.g;
@@ -2936,6 +2950,9 @@ int main(int argc, char* argv[]) {
             sky_params.cloud_shadow_color[1] = effective_cloud_shad.g;
             sky_params.cloud_shadow_color[2] = effective_cloud_shad.b;
             sky_params.curl_str = cloud_curl_str;
+            sky_params.silver_k = cloud_silver_k;
+            sky_params.silver_spread = cloud_silver_spread;
+            sky_params.pad_e4[0] = 0.0f; sky_params.pad_e4[1] = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;

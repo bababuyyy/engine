@@ -55,10 +55,15 @@ cbuffer SkyBlock : register(b0, space3)
     float erosao_str;
     float cloud_silhouette;
     float cloud_bands;
+    float cloud_ambient_str; // M2.5-24E-3: ocupa o padding implicito
     float3 sky_ambient_color;
     float detail_str; // M2.5-24C: Forca do detalhe de borda
     float3 cloud_shadow_color;
     float curl_str; // M2.5-24C: Forca da distorcao do curl noise
+    float cloud_silver_k;      // M2.5-24E-4
+    float cloud_silver_spread;
+    float pad_e4a;
+    float pad_e4b;
 };
 
 Texture3D<float> cloud_noise : register(t1, space2);
@@ -113,6 +118,49 @@ float get_height_fraction(float4 grad, float hf)
     return smoothstep(grad.x, grad.y, hf) * (1.0f - smoothstep(grad.z, grad.w, hf));
 }
 
+// M2.5-24F-1: avaliador UNICO de densidade — marcha de camera, marcha de luz e
+// futuros consumidores (sombras) leem o MESMO campo. Variantes divergentes da
+// densidade ficam impossiveis por construcao (invariante estrutural do tribunal).
+// dist_frac  = saturate(t/cap) na camera; 0.0 na marcha de luz (comportamento atual preservado)
+// apply_detail = erosao de detalhe so na camera (padrao Nubis: luz usa versao barata)
+// out_dim_profile = perfil dimensional (prof * coverage), consumido pelo ambient 24E-3
+float SampleCloudDensity(float3 p, float2 wdisp, float4 active_grad, float dist_frac, bool apply_detail, out float out_dim_profile)
+{
+    float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
+    float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
+
+    float wcov = saturate((wfbm((p.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
+    float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
+    float prof = get_height_fraction(active_grad, hf);
+
+    out_dim_profile = prof * saturate(cobertura * wcov);
+
+    float d_base = noise_val * prof - (1.0f - cobertura * wcov);
+    float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * dist_frac);
+    float d_raw = saturate(d_base - d_erosao);
+
+    d_raw *= lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf));
+
+    // M2.5-24C: Anti-algodao (Curl warp & Swiss Cheese Erosion da borda)
+    if (apply_detail && d_raw > 0.01f)
+    {
+        float2 cw = float2(
+            vnoise2(p.xz * 0.004f + 17.3f) - 0.5f,
+            vnoise2(p.xz * 0.004f - 31.7f) - 0.5f) * curl_str * 30.0f;
+
+        float det = cloud_detail.SampleLevel(cloud_samp, frac((p + float3(cw.x, 0.0f, cw.y)) * escala * 6.1f), 0).r;
+
+        float borda = 1.0f - saturate(d_raw / 0.35f);
+        float det_str_h = detail_str * lerp(1.25f, 0.7f, pow(hf, 0.25f));
+
+        det_str_h *= (1.0f - 0.65f * dist_frac); // HZD Nubis
+
+        d_raw = saturate(d_raw - det * borda * det_str_h);
+    }
+
+    return smoothstep(0.0f, 0.18f, d_raw);
+}
+
 PSOutput PSMain(PSInput input)
 {
     float3 dir = normalize(input.dir);
@@ -133,7 +181,9 @@ PSOutput PSMain(PSInput input)
 
     float3 astro = sun_disk + sun_halo;
 
-    float phase_val = lerp(hg_phase(cos_sun, hg_g_frontal), hg_phase(cos_sun, -0.2f), 0.5f);
+    // M2.5-24E-4: soma convexa normalizada + silver lining artistico via max (Nubis 2017); k=0 = fisica pura
+    float phase_base = lerp(hg_phase(cos_sun, hg_g_frontal), hg_phase(cos_sun, -0.2f), 0.5f);
+    float phase_val = max(phase_base, cloud_silver_k * hg_phase(cos_sun, 0.99f - cloud_silver_spread));
     float sun_angular_gate = saturate(-cos_sun);
 
     float T = 1.0f;
@@ -190,39 +240,10 @@ PSOutput PSMain(PSInput input)
                     continue;
                 }
 
-                float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
-                float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
+                float dim_profile;
+                float d_raw = SampleCloudDensity(p, wdisp, active_grad, saturate(t / cap), true, dim_profile);
+
                 float fade = 1.0f - smoothstep(cap * 0.8f, cap, t - t_min);
-
-                float wcov = saturate((wfbm((p.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
-                float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
-
-                float prof = get_height_fraction(active_grad, hf);
-
-                float d_base = noise_val * prof - (1.0f - cobertura * wcov);
-                float d_erosao = erosao_str * (1.0f - noise_val) * smoothstep(0.35f, 1.0f, hf) * (1.0f - 0.75f * saturate(t / cap));
-                float d_raw = saturate(d_base - d_erosao);
-
-                d_raw *= lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf));
-
-                // M2.5-24C: Anti-algodao (Curl warp & Swiss Cheese Erosion da borda)
-                if (d_raw > 0.01f)
-                {
-                    float2 cw = float2(
-                        vnoise2(p.xz * 0.004f + 17.3f) - 0.5f,
-                        vnoise2(p.xz * 0.004f - 31.7f) - 0.5f) * curl_str * 30.0f;
-
-                    float det = cloud_detail.SampleLevel(cloud_samp, frac((p + float3(cw.x, 0.0f, cw.y)) * escala * 6.1f), 0).r;
-
-                    float borda = 1.0f - saturate(d_raw / 0.35f);
-                    float det_str_h = detail_str * lerp(1.25f, 0.7f, pow(hf, 0.25f));
-
-                    det_str_h *= (1.0f - 0.65f * saturate(t / cap)); // HZD Nubis
-
-                    d_raw = saturate(d_raw - det * borda * det_str_h);
-                }
-
-                d_raw = smoothstep(0.0f, 0.18f, d_raw);
                 float d = d_raw * densidade * fade;
 
                 if (d > 0.0f)
@@ -232,20 +253,13 @@ PSOutput PSMain(PSInput input)
                     for (int j = 1; j <= 4; ++j)
                     {
                         float3 p_sol = p + to_sun * (j * step_sol);
-                        float3 uvw_sol = frac((p_sol + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
-                        float n_sol = cloud_noise.SampleLevel(cloud_samp, uvw_sol, 0).r;
-                        float hf_s = saturate((p_sol.y - h_min) / max(h_max - h_min, 1.0f));
-                        float prof_s = get_height_fraction(active_grad, hf_s);
-                        float wcov_s = saturate((wfbm((p_sol.xz + wdisp) * 0.0008f) - 0.32f) / 0.36f);
-
-                        float d_s_base = n_sol * prof_s - (1.0f - cobertura * wcov_s);
-                        float d_s_erosao = erosao_str * (1.0f - n_sol) * smoothstep(0.35f, 1.0f, hf_s);
-                        float d_sol_raw = saturate(d_s_base - d_s_erosao) * lerp(0.6f, 1.0f, smoothstep(0.0f, 0.25f, hf_s));
-
-                        dens_sol += smoothstep(0.0f, 0.18f, d_sol_raw) * densidade * step_sol;
+                        float dim_unused;
+                        float d_sol = SampleCloudDensity(p_sol, wdisp, active_grad, 0.0f, false, dim_unused);
+                        dens_sol += d_sol * densidade * step_sol;
                     }
 
-                    float luz = exp(-dens_sol * absorcao);
+                    // M2.5-24E-2: multi-scatter dual-exp (Schneider, Nubis 2017)
+                    float luz = max(exp(-dens_sol * absorcao), 0.7f * exp(-0.25f * dens_sol * absorcao));
                     float powder = 1.0f - exp(-2.0f * dens_sol);
                     luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
 
@@ -254,8 +268,9 @@ PSOutput PSMain(PSInput input)
                         luz = (floor(luz * cloud_bands) + smoothstep(0.35f, 0.65f, frac(luz * cloud_bands))) / cloud_bands;
                     }
 
-                    float3 base_ambient = lerp(cloud_shadow_color, sky_ambient_color, 0.4f);
-                    float3 ambient_term = base_ambient * sun_ambient * lerp(0.72f, 1.0f, hf);
+                    // M2.5-24E-3: Nubis ambient scattering (Schneider 2022) - maximo na casca, cai no miolo
+                    float amb_scat = pow(saturate(1.0f - dim_profile), 0.5f);
+                    float3 ambient_term = sky_ambient_color * (amb_scat * cloud_ambient_str);
 
                     float3 direct_term = (luz * phase_val + 0.12f) * sun_color * sun_intensity;
 
