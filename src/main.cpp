@@ -464,7 +464,7 @@ int main(int argc, char* argv[]) {
     ps_info.entrypoint = "PSMain";
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    ps_info.num_samplers = 3;
+    ps_info.num_samplers = 4; // M2.5-24G-2: + weather map
     ps_info.num_uniform_buffers = 2;
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
@@ -548,7 +548,7 @@ int main(int argc, char* argv[]) {
     grass_ps_info.entrypoint = "PSMain";
     grass_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     grass_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    grass_ps_info.num_samplers = 3;
+    grass_ps_info.num_samplers = 4; // M2.5-24G-2: + weather map
     grass_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* grass_ps = SDL_CreateGPUShader(device, &grass_ps_info);
     if (!grass_ps) return 1;
@@ -2551,6 +2551,8 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Ambiente da nuvem", &cloud_ambient_str, 0.0f, 2.0f);
         ImGui::SliderFloat("Silver lining", &cloud_silver_k, 0.0f, 1.5f);
         ImGui::SliderFloat("Silver spread", &cloud_silver_spread, 0.05f, 0.5f);
+        ImGui::SliderFloat("Camada: base", &cloud_h_min, 60.0f, 200.0f);
+        ImGui::SliderFloat("Camada: topo", &cloud_h_max, 150.0f, 500.0f);
 
         ImGui::Separator();
         ImGui::Checkbox("Sol automatico", &sol_automatico);
@@ -3070,12 +3072,14 @@ int main(int argc, char* argv[]) {
             SDL_BindGPUVertexBuffers(scene_pass, 1, &inst_bind_floor, 1);
 
             auto bind_3_samps = [&](SDL_GPUTexture* color_tex) {
-                SDL_GPUTextureSamplerBinding samps[3] = {
+                // M2.5-24G-2: 4o par = weather map (sombra de nuvem sincronizada com o ceu)
+                SDL_GPUTextureSamplerBinding samps[4] = {
                     { color_tex ? color_tex : fallback_tex, sampler },
                     { shadow_map, shadow_cmp },
-                    { shadow_map, shadow_diag }
+                    { shadow_map, shadow_diag },
+                    { weather_tex, sampler }
                 };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, samps, 3);
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, samps, 4);
                 };
 
             bind_3_samps(fallback_tex);

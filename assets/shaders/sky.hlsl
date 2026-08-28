@@ -127,20 +127,36 @@ float get_height_fraction(float4 grad, float hf)
     return smoothstep(grad.x, grad.y, hf) * (1.0f - smoothstep(grad.z, grad.w, hf));
 }
 
+// M2.5-24G-2: gradiente vertical por tipo (stratus -> cumulus -> nimbus)
+float4 grad_for_type(float ct)
+{
+    float4 grad_stratus = float4(0.0f, 0.07f, 0.08f, 0.15f);
+    float4 grad_cumulus = float4(0.0f, 0.08f, 0.75f, 0.98f);
+    float4 grad_nimbus = float4(0.0f, 0.06f, 0.88f, 1.0f);
+    if (ct < 0.5f)
+    {
+        return lerp(grad_stratus, grad_cumulus, ct * 2.0f);
+    }
+    return lerp(grad_cumulus, grad_nimbus, (ct - 0.5f) * 2.0f);
+}
+
 // M2.5-24F-1: avaliador UNICO de densidade — marcha de camera, marcha de luz e
 // futuros consumidores (sombras) leem o MESMO campo. Variantes divergentes da
 // densidade ficam impossiveis por construcao (invariante estrutural do tribunal).
 // dist_frac  = saturate(t/cap) na camera; 0.0 na marcha de luz (comportamento atual preservado)
 // apply_detail = erosao de detalhe so na camera (padrao Nubis: luz usa versao barata)
 // out_dim_profile = perfil dimensional (prof * coverage), consumido pelo ambient 24E-3
-float SampleCloudDensity(float3 p, float2 wdisp, float4 active_grad, float dist_frac, bool apply_detail, out float out_dim_profile)
+float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_detail, out float out_dim_profile)
 {
     float3 uvw = frac((p + float3(wdisp.x, 0.0f, wdisp.y)) * escala);
     float noise_val = cloud_noise.SampleLevel(cloud_samp, uvw, 0).r;
 
-    // M2.5-24G-1: coverage vem do weather map assado (tile = 5000u de mundo).
-    // O wrap do sampler REPEAT substitui o wfbm em runtime (custo: 1 fetch).
-    float wcov = saturate((weather_map.SampleLevel(weather_samp, (p.xz + wdisp) * 0.0002f, 0).r - 0.32f) / 0.36f);
+    // M2.5-24G-1: coverage do weather map assado (tile = 5000u de mundo).
+    // M2.5-24G-2: canal G = TIPO POR REGIAO; o slider "Tipo de Nuvem" vira vies global.
+    float4 weather = weather_map.SampleLevel(weather_samp, (p.xz + wdisp) * 0.0002f, 0);
+    float wcov = saturate((weather.r - 0.32f) / 0.36f);
+    float wtype = saturate(weather.g + (cloud_type - 0.5f));
+    float4 active_grad = grad_for_type(wtype);
     float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
     float prof = get_height_fraction(active_grad, hf);
 
@@ -207,19 +223,7 @@ PSOutput PSMain(PSInput input)
     float3 radiance = float3(0.0f, 0.0f, 0.0f);
     float cloud_dist = 9999.0f;
 
-    float4 grad_stratus = float4(0.0f, 0.07f, 0.08f, 0.15f);
-    float4 grad_cumulus = float4(0.0f, 0.08f, 0.75f, 0.98f);
-    float4 grad_nimbus = float4(0.0f, 0.06f, 0.88f, 1.0f);
-
-    float4 active_grad;
-    if (cloud_type < 0.5f)
-    {
-        active_grad = lerp(grad_stratus, grad_cumulus, cloud_type * 2.0f);
-    }
-    else
-    {
-        active_grad = lerp(grad_cumulus, grad_nimbus, (cloud_type - 0.5f) * 2.0f);
-    }
+    // M2.5-24G-2: o gradiente por tipo agora e POR AMOSTRA (regional), dentro do avaliador.
 
     if (dir.y > 0.01f || (cam_pos.y >= h_min && cam_pos.y <= h_max))
     {
@@ -258,7 +262,7 @@ PSOutput PSMain(PSInput input)
                 }
 
                 float dim_profile;
-                float d_raw = SampleCloudDensity(p, wdisp, active_grad, saturate(t / cap), true, dim_profile);
+                float d_raw = SampleCloudDensity(p, wdisp, saturate(t / cap), true, dim_profile);
 
                 float fade = 1.0f - smoothstep(cap * 0.8f, cap, t - t_min);
                 float d = d_raw * densidade * fade;
@@ -275,14 +279,14 @@ PSOutput PSMain(PSInput input)
                         float t_s = (j == 0) ? 6.0f : ((j == 1) ? 15.0f : ((j == 2) ? 30.0f : 60.0f));
                         float3 p_sol = p + to_sun * t_s;
                         float dim_unused;
-                        float d_sol = SampleCloudDensity(p_sol, wdisp, active_grad, 0.0f, false, dim_unused);
+                        float d_sol = SampleCloudDensity(p_sol, wdisp, 0.0f, false, dim_unused);
                         dens_sol += d_sol * densidade * (t_s - prev_ts);
                         prev_ts = t_s;
                     }
                     {
                         float3 p_far = p + to_sun * 150.0f;
                         float dim_unused2;
-                        float d_far = SampleCloudDensity(p_far, wdisp, active_grad, 0.0f, false, dim_unused2);
+                        float d_far = SampleCloudDensity(p_far, wdisp, 0.0f, false, dim_unused2);
                         dens_sol += d_far * densidade * 24.0f;
                     }
 

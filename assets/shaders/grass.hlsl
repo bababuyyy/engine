@@ -54,16 +54,16 @@ float gust(float2 pos_xz, float t)
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    
+
     float tuft_hash = frac(sin(dot(input.inst_pos.xz, float2(12.9898f, 78.233f))) * 43758.5453f);
     float tuft_h = lerp(0.75f, 1.25f, frac(tuft_hash * 13.37f));
     float clump_hash = frac(sin(dot(floor(input.inst_pos.xz / 2.5f), float2(12.9898f, 78.233f))) * 43758.5453f);
     float clump_h = lerp(0.8f, 1.2f, clump_hash);
     float total_h = tuft_h * clump_h;
-    
+
     float3 vpos = input.pos * scale;
     vpos.y *= total_h;
-    
+
     float angle = tuft_hash * 6.283185f;
     float s = sin(angle);
     float c = cos(angle);
@@ -71,34 +71,34 @@ PSInput VSMain(VSInput input)
     float z = vpos.x * s + vpos.z * c;
     vpos.x = x;
     vpos.z = z;
-    
+
     float h01 = input.uv.y;
-    
+
     float wind_weight = h01 * h01;
     float phase = tuft_hash * 6.283185f;
     float g = gust(input.inst_pos.xz, time + phase * 0.1f);
     float w_mag = wind_strength * g;
-    
+
     vpos.x += wind_dir.x * w_mag * wind_weight;
     vpos.z += wind_dir.y * w_mag * wind_weight;
-    
+
     float3 world_pos = vpos + input.inst_pos;
     output.pos = mul(mvp, float4(world_pos, 1.0f));
     output.uv = input.uv;
     output.world_pos = world_pos;
-    
+
     float3 sec_green = input.inst_color * float3(0.85f, 1.15f, 0.7f);
     float color_shift = frac(tuft_hash * 42.0f) * 0.15f;
     output.inst_color = lerp(input.inst_color, sec_green, color_shift);
-    
+
     float3 rotated_n;
     rotated_n.x = input.normal.x * c - input.normal.z * s;
     rotated_n.y = input.normal.y;
     rotated_n.z = input.normal.x * s + input.normal.z * c;
     output.local_normal = rotated_n;
-    
+
     output.h01 = h01;
-    
+
     return output;
 }
 
@@ -108,6 +108,9 @@ SamplerState samp : register(s0, space2);
 Texture2D shadow_map : register(t1, space2);
 SamplerComparisonState shadow_cmp : register(s1, space2);
 SamplerState shadow_diag : register(s2, space2);
+
+Texture2D weather_map : register(t3, space2);   // M2.5-24G-2: o MESMO weather do ceu
+SamplerState weather_samp : register(s3, space2);
 
 cbuffer SunBlock : register(b0, space3)
 {
@@ -181,11 +184,11 @@ PSOutput PSMain(PSInput input)
     float3 topo = input.inst_color * f_topo;
     float3 albedo = lerp(base, topo, input.h01);
     albedo *= lerp(0.35f, 1.0f, input.h01);
-    
+
     float3 N = normalize(lerp(normalize(input.local_normal), float3(0.0f, 1.0f, 0.0f), input.h01 * 0.6f));
-    
+
     float day_gate = smoothstep(-0.02f, 0.12f, -sun_dir.y);
-    
+
     if (debug_shadows > 0.5f && input.pos.x < 256.0f && input.pos.y < 256.0f)
     {
         float d = shadow_map.SampleLevel(shadow_diag, input.pos.xy / 256.0f, 0).r;
@@ -194,7 +197,7 @@ PSOutput PSMain(PSInput input)
         dbg.normal_id = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return dbg;
     }
-    
+
     // M2.5-24: Grama operando sob Sombra de Objeto
     float obj_shadow = 1.0f;
     if (day_gate > 0.0f)
@@ -203,12 +206,12 @@ PSOutput PSMain(PSInput input)
         float3 proj_ndc = proj.xyz / proj.w;
         float2 shadow_uv = float2(proj_ndc.x * 0.5f + 0.5f, -proj_ndc.y * 0.5f + 0.5f);
         float shadow_z = proj_ndc.z;
-        
+
         if (shadow_uv.x >= 0.0f && shadow_uv.x <= 1.0f && shadow_uv.y >= 0.0f && shadow_uv.y <= 1.0f && shadow_z <= 1.0f)
         {
             float fade = smoothstep(0.0f, 0.05f, shadow_uv.x) * smoothstep(1.0f, 0.95f, shadow_uv.x) *
                          smoothstep(0.0f, 0.05f, shadow_uv.y) * smoothstep(1.0f, 0.95f, shadow_uv.y);
-            
+
             float shadow_val = 0.0f;
             float2 off = 1.0f / 2048.0f;
             for (int y = -1; y <= 1; ++y)
@@ -222,30 +225,31 @@ PSOutput PSMain(PSInput input)
             obj_shadow = lerp(1.0f, lerp(1.0f, shadow_val, obj_shadow_str * day_gate), fade);
         }
     }
-    
+
     float ndl = saturate(dot(N, -sun_dir));
     float t_hl = ndl * 0.5f + 0.5f;
-    
+
+    // M2.5-24G-2: sombra de nuvem le o MESMO weather map do ceu (sincronia por construcao)
     float2 sh_off = wind_dir_ps * cloud_time * -200.0f;
-    float sh_env = saturate((wfbm((input.world_pos.xz + sh_off) * 0.0008f) - 0.32f) / 0.36f);
-    float sh_det = saturate((wfbm((input.world_pos.xz + sh_off) * 0.006f) - 0.35f) / 0.30f);
+    float sh_env = saturate((weather_map.SampleLevel(weather_samp, (input.world_pos.xz + sh_off) * 0.0002f, 0).r - 0.32f) / 0.36f);
+    float sh_det = saturate((weather_map.SampleLevel(weather_samp, (input.world_pos.xz + sh_off) * 0.0015f, 0).r - 0.35f) / 0.30f);
     float sombra_de_nuvem = 1.0f - shadow_str * sh_det * saturate(cloud_cover) * lerp(0.45f, 1.0f, sh_env);
-    
+
     float final_shadow = max(obj_shadow * sombra_de_nuvem, 0.12f); // piso anti-buraco-preto (dupla sombra)
-    
+
     float3 lit_pre = sun_color * (ambient + (1.0f - ambient) * t_hl * final_shadow);
     float3 lit = albedo * lit_pre;
-    
+
     float3 view_dir = normalize(input.world_pos - ps_cam_pos);
     float back = pow(saturate(dot(view_dir, -sun_dir)), 4.0f) * input.h01;
     lit += albedo * sun_color * back * grass_backlight * final_shadow * day_gate;
-    
+
     float3 half_vec = normalize(-sun_dir + (-view_dir));
     float spec = pow(saturate(dot(N, half_vec)), 24.0f) * input.h01 * grass_specular;
     lit += sun_color * spec * final_shadow * day_gate;
-    
+
     float3 final_color = lerp(lit, float3(fog_color_r, fog_color_g, fog_color_b), fog_f);
-    
+
     PSOutput output;
     output.color = float4(final_color, 1.0f);
     output.normal_id = float4(float3(0.0f, 1.0f, 0.0f) * 0.5f + 0.5f, 5.0f / 255.0f);

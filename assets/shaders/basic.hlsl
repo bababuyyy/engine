@@ -32,14 +32,14 @@ PSInput VSMain(VSInput input)
 {
     PSInput output;
     float4 world_pos = float4(input.pos + input.inst_pos, 1.0f);
-    
+
     output.pos = mul(mvp, world_pos);
     output.color = input.color * input.inst_color;
     output.uv = input.uv;
-    
+
     output.normal = input.normal;
     output.world_pos = world_pos.xyz;
-    
+
     return output;
 }
 
@@ -49,6 +49,9 @@ SamplerState samp : register(s0, space2);
 Texture2D shadow_map : register(t1, space2);
 SamplerComparisonState shadow_cmp : register(s1, space2);
 SamplerState shadow_diag : register(s2, space2);
+
+Texture2D weather_map : register(t3, space2);   // M2.5-24G-2: o MESMO weather do ceu
+SamplerState weather_samp : register(s3, space2);
 
 cbuffer SunBlock : register(b0, space3)
 {
@@ -113,13 +116,13 @@ float wfbm(float2 pp)
 PSOutput PSMain(PSInput input)
 {
     PSOutput output;
-    
+
     float4 tex_color = tex.Sample(samp, input.uv);
     float3 albedo = input.color * tex_color.rgb;
     float3 N = normalize(input.normal);
-    
+
     float day_gate = smoothstep(-0.02f, 0.12f, -sun_dir.y);
-    
+
     // M2.5-24: Modo de Diagnostico Direto da Sombra (Exclusivo na UI)
     if (debug_shadows > 0.5f && input.pos.x < 256.0f && input.pos.y < 256.0f)
     {
@@ -128,7 +131,7 @@ PSOutput PSMain(PSInput input)
         output.normal_id = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return output;
     }
-    
+
     // M2.5-24: Computacao da Sombra Projetada (PCF 3x3 com Clamp)
     float obj_shadow = 1.0f;
     if (day_gate > 0.0f)
@@ -137,12 +140,12 @@ PSOutput PSMain(PSInput input)
         float3 proj_ndc = proj.xyz / proj.w;
         float2 shadow_uv = float2(proj_ndc.x * 0.5f + 0.5f, -proj_ndc.y * 0.5f + 0.5f);
         float shadow_z = proj_ndc.z;
-        
+
         if (shadow_uv.x >= 0.0f && shadow_uv.x <= 1.0f && shadow_uv.y >= 0.0f && shadow_uv.y <= 1.0f && shadow_z <= 1.0f)
         {
             float fade = smoothstep(0.0f, 0.05f, shadow_uv.x) * smoothstep(1.0f, 0.95f, shadow_uv.x) *
                          smoothstep(0.0f, 0.05f, shadow_uv.y) * smoothstep(1.0f, 0.95f, shadow_uv.y);
-            
+
             float shadow_val = 0.0f;
             float2 off = 1.0f / 2048.0f;
             for (int y = -1; y <= 1; ++y)
@@ -156,33 +159,34 @@ PSOutput PSMain(PSInput input)
             obj_shadow = lerp(1.0f, lerp(1.0f, shadow_val, obj_shadow_str * day_gate), fade);
         }
     }
-    
+
     float ndl = dot(N, -sun_dir);
     float t = saturate(ndl * 0.5f + 0.5f);
-    
+
     float scaled = t * toon_cuts;
     float band = min(floor(scaled), toon_cuts - 1.0f);
     float fw = fwidth(scaled) * toon_soft;
     float f = scaled - band;
     band += smoothstep(1.0f - fw, 1.0f, f);
     float ramp = band / max(toon_cuts - 1.0f, 1.0f);
-    
+
+    // M2.5-24G-2: sombra de nuvem le o MESMO weather map do ceu (sincronia por construcao)
     float2 sh_off = wind_dir * cloud_time * -200.0f;
-    float sh_env = saturate((wfbm((input.world_pos.xz + sh_off) * 0.0008f) - 0.32f) / 0.36f);
-    float sh_det = saturate((wfbm((input.world_pos.xz + sh_off) * 0.006f) - 0.35f) / 0.30f);
+    float sh_env = saturate((weather_map.SampleLevel(weather_samp, (input.world_pos.xz + sh_off) * 0.0002f, 0).r - 0.32f) / 0.36f);
+    float sh_det = saturate((weather_map.SampleLevel(weather_samp, (input.world_pos.xz + sh_off) * 0.0015f, 0).r - 0.35f) / 0.30f);
     float sombra_de_nuvem = 1.0f - shadow_str * sh_det * saturate(cloud_cover) * lerp(0.45f, 1.0f, sh_env);
-    
+
     float final_shadow = max(obj_shadow * sombra_de_nuvem, 0.12f); // piso anti-buraco-preto (dupla sombra)
-    
+
     float3 direct_light = sun_color * ramp * final_shadow;
     float3 lit = albedo * sun_color * (ambient + (1.0f - ambient) * ramp * final_shadow); // teto 1.0 restaurado (sagrada, 2a reincidencia)
     float dist = length(cam_pos - input.world_pos);
     float fog_f = 1.0f - exp(-fog_density * dist);
-    
+
     float3 final_color = lerp(lit, float3(fog_color_r, fog_color_g, fog_color_b), fog_f);
-    
+
     output.color = float4(final_color, tex_color.a);
     output.normal_id = float4(N * 0.5f + 0.5f, object_id);
-    
+
     return output;
 }
