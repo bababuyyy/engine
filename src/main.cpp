@@ -2596,7 +2596,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Silhueta", &cloud_silhouette, 0.0f, 0.5f);
         ImGui::SliderFloat("Bandas de luz", &cloud_bands, 1.0f, 5.0f);
         ImGui::SliderFloat("Cobertura", &cloud_cobertura, 0.0f, 1.0f);
-        ImGui::SliderFloat("Densidade Volume", &cloud_densidade, 0.5f, 8.0f);
+        ImGui::SliderFloat("Densidade Volume", &cloud_densidade, 0.05f, 8.0f, "%.2f"); // 24J-2d: piso da regua honesta
         ImGui::SliderFloat("Escala do Ruido", &cloud_escala, 0.001f, 0.02f, "%.4f");
         ImGui::SliderFloat("Sombra de nuvem", &shadow_str, 0.0f, 1.0f);
         ImGui::SliderFloat("Velocidade", &cloud_speed, 0.0f, 3.0f);
