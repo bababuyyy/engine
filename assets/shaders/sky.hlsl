@@ -155,7 +155,8 @@ float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_det
     // M2.5-24G-2: canal G = TIPO POR REGIAO; o slider "Tipo de Nuvem" vira vies global.
     float4 weather = weather_map.SampleLevel(weather_samp, (p.xz + wdisp) * 0.0002f, 0);
     // M2.5-24G-3: tetos do clima ceifam os extremos do mapa (tempestade so quando o clima mandar)
-    float wcov = min(saturate((weather.r - 0.32f) / 0.36f), clima_cov_teto);
+    // M2.5-24G-4: janela com respiro - veus parciais sobrevivem nos vaos entre as massas
+    float wcov = min(saturate((weather.r - 0.22f) / 0.55f), clima_cov_teto);
     float wtype = min(saturate(weather.g + (cloud_type - 0.5f)), clima_type_teto);
     float4 active_grad = grad_for_type(wtype);
     float hf = saturate((p.y - h_min) / max(h_max - h_min, 1.0f));
