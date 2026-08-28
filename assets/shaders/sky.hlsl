@@ -393,8 +393,7 @@ PSOutput PSMain(PSInput input)
 
                 if (T < 0.05f)
                 {
-                    T = 0.0f;
-                    break;
+                    break; // 24J-6: para SEM forcar T=0 - o snap criava a iso-linha dura do miolo
                 }
                 t += sz;
             }
@@ -403,6 +402,10 @@ PSOutput PSMain(PSInput input)
 
     // M2.5-24F-3: corte pos-integral REMOVIDO (V7 do tribunal: nenhuma referencia
     // de producao remapeia o alpha final; a borda pertence ao dominio da densidade).
+
+    // M2.5-24J-6: remap continuo do threshold do early-out - chega a 0 exatamente onde
+    // o snap chegava, sem degrau e sem ~5% de ceu HDR vazando no miolo. Ceu limpo: 1.0 exato.
+    T = saturate((T - 0.05f) / 0.95f);
 
     float fog_air = saturate(cloud_dist / (cap * 1.2f)) * 0.85f;
 
