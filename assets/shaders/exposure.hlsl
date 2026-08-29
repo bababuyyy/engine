@@ -111,6 +111,13 @@ cbuffer ExpoBlock : register(b0, space3)
 // do passe seguinte produz a MEDIA GEOMETRICA - o L_barra_w de Reinhard.
 float4 PS_Luma(PSInput input) : SV_Target0
 {
+    // M2.5-26-2a: a cena chega PRE-EXPOSTA (epilogo do Listing 31). Para medir
+    // luminancia ABSOLUTA, desfazemos a pre-exposicao - a propria fonte diz que "the
+    // pre-exposure can be undone to retrieve the absolute luminance value".
+    float e_prev = tex_b.SampleLevel(samp, float2(0.5f, 0.5f), 0).r;
+    e_prev = (e_prev > 0.0f && e_prev < 1e6f) ? e_prev : 1.0f;
+    float inv_prev = 1.0f / e_prev;
+
     float2 base = floor(input.uv * 32.0f) / 32.0f;
     float sum = 0.0f;
     [loop] for (int y = 0; y < 6; ++y)
@@ -120,7 +127,7 @@ float4 PS_Luma(PSInput input) : SV_Target0
             float2 uv = base + (float2((float)x, (float)y) + 0.5f) / (6.0f * 32.0f);
             float3 c = tex_a.SampleLevel(samp, uv, 0).rgb;
             float l = dot(max(c, 0.0f), float3(0.2126f, 0.7152f, 0.0722f)); // luma Rec.709
-            sum += log(max(l, 1e-5f)); // delta de Reinhard: nenhum pixel preto zera a media
+            sum += log(max(l * inv_prev, 1e-5f)); // 26-2a: desfaz a pre-exposicao; delta de Reinhard
         }
     }
     return float4(sum * (1.0f / 36.0f), 0.0f, 0.0f, 1.0f);

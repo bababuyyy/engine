@@ -53,6 +53,24 @@ SamplerState shadow_diag : register(s2, space2);
 Texture2D weather_map : register(t3, space2);   // M2.5-24G-2: o MESMO weather do ceu
 SamplerState weather_samp : register(s3, space2);
 
+// M2.5-26-2a: PRE-EXPOSICAO. Lagarde & de Rousiers, "Moving Frostbite to PBR 3.0"
+// (SIGGRAPH 2014), sec. 5.2, VERBATIM: "Light buffer Float16. Exposure is
+// pre-applied. [...] We use the exposure information described in Section 5.1 to
+// pre-expose all our lighting before storing it. We either use a fixed exposure or
+// use the exposure calculated by auto-exposure of the previous frame. [...] The
+// pre-exposure is performed inside an epilogue present in all lighting shaders."
+// Listing 31:  outColor0 = epilogueLighting(outColor0, g_exposureMultiplier);
+// POR QUE: com o sol em lux, o disco solar vale E/Omega ~ 1e7 cd/m2 e o alvo R16F
+// satura em 65504. Sem pre-exposicao as unidades fisicas nao cabem no buffer.
+Texture2D tex_expo : register(t4, space2);
+SamplerState samp_expo : register(s4, space2);
+float expo_mul()
+{
+    float e = tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r;
+    return (e > 0.0f && e < 1e6f) ? e : 1.0f; // 1o frame / textura ainda nao escrita
+}
+
+
 cbuffer SunBlock : register(b0, space3)
 {
     float3 sun_dir;
@@ -185,7 +203,7 @@ PSOutput PSMain(PSInput input)
 
     float3 final_color = lerp(lit, float3(fog_color_r, fog_color_g, fog_color_b), fog_f);
 
-    output.color = float4(final_color, tex_color.a);
+    output.color = float4(final_color * expo_mul(), tex_color.a); // 26-2a: epilogueLighting
     output.normal_id = float4(N * 0.5f + 0.5f, object_id);
 
     return output;

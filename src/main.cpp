@@ -646,7 +646,7 @@ int main(int argc, char* argv[]) {
     ps_info.entrypoint = "PSMain";
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    ps_info.num_samplers = 4; // M2.5-24G-2: + weather map
+    ps_info.num_samplers = 5; // M2.5-26-2a: + a exposicao (pre-exposicao no epilogo)
     ps_info.num_uniform_buffers = 2;
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
@@ -709,7 +709,7 @@ int main(int argc, char* argv[]) {
     sky_ps_info.entrypoint = "PSMain";
     sky_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     sky_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    sky_ps_info.num_samplers = 5; // M2.5-25-2: + LUT de transmitancia (t3) e de multi-scattering (t4)
+    sky_ps_info.num_samplers = 6; // M2.5-26-2a: + a exposicao (t5) para a pre-exposicao
     sky_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* sky_ps = SDL_CreateGPUShader(device, &sky_ps_info);
     if (!sky_ps) { SDL_Log("FALHA sky_ps: %s", SDL_GetError()); return 1; }
@@ -730,7 +730,7 @@ int main(int argc, char* argv[]) {
     grass_ps_info.entrypoint = "PSMain";
     grass_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     grass_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    grass_ps_info.num_samplers = 4; // M2.5-24G-2: + weather map
+    grass_ps_info.num_samplers = 5; // M2.5-26-2a: + a exposicao (pre-exposicao no epilogo)
     grass_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* grass_ps = SDL_CreateGPUShader(device, &grass_ps_info);
     if (!grass_ps) return 1;
@@ -795,7 +795,7 @@ int main(int argc, char* argv[]) {
     expo_luma_info.entrypoint = "PS_Luma";
     expo_luma_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     expo_luma_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    expo_luma_info.num_samplers = 1;
+    expo_luma_info.num_samplers = 2; // M2.5-26-2a: + a exposicao anterior, para desfazer a pre-exposicao
     expo_luma_info.num_uniform_buffers = 1;
     SDL_GPUShader* expo_luma_ps = SDL_CreateGPUShader(device, &expo_luma_info);
     if (!expo_luma_ps) { SDL_Log("FALHA expo_luma_ps: %s", SDL_GetError()); return 1; }
@@ -3122,6 +3122,11 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
 
             glm::vec3 to_sun_vec;
             glm::vec3 to_moon_vec; // M2.5-25-9a
+            // M2.5-26-2a: a exposicao do quadro ANTERIOR, que sera pre-aplicada por
+            // todos os shaders de iluminacao deste quadro (Frostbite 5.2 / Listing 31).
+            // Um valor SO para o quadro inteiro: cena, ceu, grama, shafts e o medidor
+            // tem de concordar, senao a conta de desfazer a pre-exposicao nao fecha.
+            SDL_GPUTexture* expo_prev = expo_tex[1 - expo_ping];
             float effective_intensity = sun_intensity;
             float effective_ambient = sun_ambient;
 
@@ -3549,14 +3554,15 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 SDL_GPUBufferBinding sky_ib_bind = { dome_index_buffer, 0 };
                 SDL_BindGPUIndexBuffer(scene_pass, &sky_ib_bind, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
-                SDL_GPUTextureSamplerBinding sky_samps[5] = {
+                SDL_GPUTextureSamplerBinding sky_samps[6] = {
                     { weather_tex, sampler }, // M2.5-24G-1: weather map no t0 do ceu
                     { cloud_tex, cloud_sampler },
                     { cloud_detail_tex, cloud_sampler },
                     { trans_tex, lut_sampler }, // M2.5-25-2: t3 = transmitancia
-                    { ms_tex, lut_sampler }     // M2.5-25-2: t4 = multi-scattering
+                    { ms_tex, lut_sampler },    // M2.5-25-2: t4 = multi-scattering
+                    { expo_prev, upscale_sampler } // M2.5-26-2a: t5 = exposicao anterior
                 };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, sky_samps, 5);
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, sky_samps, 6);
 
                 SDL_DrawGPUIndexedPrimitives(scene_pass, dome_indices.size(), 1, 0, 0, 0);
             }
@@ -3577,13 +3583,14 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
 
             auto bind_3_samps = [&](SDL_GPUTexture* color_tex) {
                 // M2.5-24G-2: 4o par = weather map (sombra de nuvem sincronizada com o ceu)
-                SDL_GPUTextureSamplerBinding samps[4] = {
+                SDL_GPUTextureSamplerBinding samps[5] = {
                     { color_tex ? color_tex : fallback_tex, sampler },
                     { shadow_map, shadow_cmp },
                     { shadow_map, shadow_diag },
-                    { weather_tex, sampler }
+                    { weather_tex, sampler },
+                    { expo_prev, upscale_sampler } // M2.5-26-2a: t4 = exposicao anterior
                 };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, samps, 4);
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, samps, 5);
                 };
 
             bind_3_samps(fallback_tex);
@@ -3732,13 +3739,16 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             // exposicao aplicada no quadro mede ESTE quadro, sem atraso de frame.
             // A CPU nunca ve o numero - a regra da casa contra readback fica intacta.
             // ============================================================================
-            if (auto_exposure)
+            // M2.5-26-2a: os passes rodam SEMPRE. Com "Exposicao automatica" desligada,
+            // min = max = o slider manual, o que crava o alvo nele. Assim a textura 1x1
+            // carrega SEMPRE a exposicao de fato em uso, e todos os shaders leem a mesma
+            // fonte de verdade - nao existe caminho manual paralelo para divergir.
             {
                 struct ExpoBlock { float key, ec, emin, emax, speed, dt, p0, p1; } ep;
                 ep.key = exposure_key;
-                ep.ec = exposure_bias_ev;
-                ep.emin = exposure_min;
-                ep.emax = exposure_max;
+                ep.ec = auto_exposure ? exposure_bias_ev : 0.0f;
+                ep.emin = auto_exposure ? exposure_min : exposure;
+                ep.emax = auto_exposure ? exposure_max : exposure;
                 ep.speed = exposure_speed;
                 ep.p0 = 0.0f; ep.p1 = 0.0f;
                 static uint64_t expo_last_ms = SDL_GetTicks();
@@ -3748,7 +3758,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 expo_last_ms = expo_now_ms;
                 // Os dois primeiros frames leem uma textura que ainda nao foi escrita.
                 // Um dt enorme faz a adaptacao saltar direto para o alvo e engolir o lixo.
-                if (expo_warm < 2) { ep.dt = 1000.0f; ++expo_warm; }
+                if (expo_warm < 2 || !auto_exposure) { ep.dt = 1000.0f; if (expo_warm < 2) ++expo_warm; }
 
                 SDL_GPUColorTargetInfo lt = {};
                 lt.texture = luma_map_tex;
@@ -3758,8 +3768,11 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 SDL_GPURenderPass* lpass = SDL_BeginGPURenderPass(cmd_buffer, &lt, 1, nullptr);
                 SDL_BindGPUGraphicsPipeline(lpass, expo_luma_pipeline);
                 SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &ep, sizeof(ExpoBlock));
-                SDL_GPUTextureSamplerBinding lb = { composite_color, upscale_sampler };
-                SDL_BindGPUFragmentSamplers(lpass, 0, &lb, 1);
+                SDL_GPUTextureSamplerBinding lb[2] = {
+                    { composite_color, upscale_sampler },
+                    { expo_prev, upscale_sampler } // 26-2a: para desfazer a pre-exposicao
+                };
+                SDL_BindGPUFragmentSamplers(lpass, 0, lb, 2);
                 SDL_DrawGPUPrimitives(lpass, 3, 1, 0, 0);
                 SDL_EndGPURenderPass(lpass);
 
@@ -3773,7 +3786,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &ep, sizeof(ExpoBlock));
                 SDL_GPUTextureSamplerBinding ab[2] = {
                     { luma_map_tex, upscale_sampler },
-                    { expo_tex[1 - expo_ping], upscale_sampler }
+                    { expo_prev, upscale_sampler }
                 };
                 SDL_BindGPUFragmentSamplers(apass, 0, ab, 2);
                 SDL_DrawGPUPrimitives(apass, 3, 1, 0, 0);
@@ -3886,7 +3899,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 { depth_texture, point_sampler },
                 { shadow_map, shadow_cmp },
                 { weather_tex, sampler },
-                { expo_tex[expo_ping], upscale_sampler } // M2.5-26-4
+                { expo_prev, upscale_sampler } // M2.5-26-2a: a MESMA exposicao que pre-expos a cena
             };
             SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 7);
 

@@ -72,6 +72,15 @@ static const float bayer[16] =
 // to variations in the low range" (Fig. 75), e ela nao produz preto verdadeiro
 // (Fig. 76). Nosso swapchain e B8G8R8A8_UNORM (sonda U6: formato 12, sem _SRGB),
 // entao o hardware nao codifica - a codificacao e responsabilidade deste shader.
+// M2.5-26-2a: a exposicao usada NESTE quadro (a do quadro anterior, medida na GPU).
+// Ela ja foi aplicada nos shaders de iluminacao (epilogo do Listing 31), entao aqui
+// ela serve so para pre-expor o que NASCE neste passe: os shafts volumetricos.
+float expo_mul()
+{
+    float e = tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r;
+    return (e > 0.0f && e < 1e6f) ? e : 1.0f;
+}
+
 float3 accurateLinearToSRGB(float3 linearCol)
 {
     float3 sRGBLo = linearCol * 12.92f;
@@ -170,15 +179,17 @@ float4 PSMain(PSInput input) : SV_Target0
         {
             return float4(scat * 4.0f, 1.0f);
         }
-        final_color.rgb += scat * shaft_intensity;
+        final_color.rgb += scat * shaft_intensity * expo_mul(); // 26-2a: os shafts nascem em unidade absoluta; pre-expoe aqui
     }
 
     final_color.rgb += tex_bloom.Sample(samp, input.uv).rgb * bloom_intensity; // M2.5-23: o florescer
-    // M2.5-26-4: com auto ligado, a exposicao vem MEDIDA da GPU (media log de
-    // Reinhard + constante do fotometro do Frostbite). Com auto desligado, o slider
-    // manual manda, exatamente como antes.
-    float expo = (expo_auto > 0.5f) ? tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r : exposure;
-    final_color.rgb *= expo; // M2.5-24I-2: exposicao antes do ombro (o par da intensidade)
+    // M2.5-26-2a: NAO ha mais multiplicacao por exposicao aqui. A fonte e explicita:
+    // "With pre-exposure there is no need to apply exposure at the end of the
+    // pipeline" (Frostbite 5.2). A cena, o ceu e a grama ja saem pre-expostos do
+    // epilogo; os shafts foram pre-expostos acima; o bloom vem do buffer ja exposto.
+    // Consequencia declarada: o "Bloom: Limiar" passa a operar sobre valores EXPOSTOS
+    // (antes operava sobre absolutos e ignorava a exposicao). E mais correto, e e o
+    // unico slider que muda de significado nesta estacao - recalibrar uma vez.
 
     // M2.5-24I: tonemap de ombro exponencial - abaixo do ombro as cores ficam INTACTAS
     // (toon preservado); acima, rolloff filmico continuo (derivada 1 no ombro).
