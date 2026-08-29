@@ -89,7 +89,7 @@ cbuffer SkyBlock : register(b0, space3)
     float3 to_astro;       // M2.5-25-12: astro dominante (sol de dia, lua de noite)
     float pad_p;
     float3 astro_sky_col;  // M2.5-25-12: cor JA multiplicada pela intensidade
-    float pad_q;
+    float aerial_str;      // M2.5-25-13: 1.0 = extincao fisica; acima = bruma de arte
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -621,12 +621,21 @@ PSOutput PSMain(PSInput input)
     // o snap chegava, sem degrau e sem ~5% de ceu HDR vazando no miolo. Ceu limpo: 1.0 exato.
     T = saturate((T - 0.05f) / 0.95f);
 
-    float fog_air = saturate(cloud_dist / (cap * 1.2f)) * 0.85f;
+    // M2.5-25-13: PERSPECTIVA AEREA FISICA.
+    // Antes: fog_air = saturate(cloud_dist / (cap*1.2)) * 0.85 - uma rampa linear
+    // normalizada pelo 'cap', que e o ORCAMENTO DE MARCHA, nao distancia de mundo.
+    // Da altura t_min explode (1000u de altitude, 3 graus abaixo da horizontal ->
+    // ~12.000u ate a camada), a rampa satura e 85% da nuvem virava ceu.
+    // Agora: extincao REAL do ar com o MESMO sigma_t da Tabela 1 do Hillaire que a
+    // marcha do ceu usa, na forma canonica "cor atenuada + in-scatter". O in-scatter
+    // e o 'ceu' - a cor fisica da atmosfera naquela direcao (25-10).
+    // ESCOPO: perspectiva aerea avaliada NUM PONTO, nao a LUT 32^3 por froxel (5.4).
+    // "Nevoa aerea" (aerial_str) = ARTE: 1.0 = fisico puro; acima disso e bruma
+    // por direcao de arte.
+    float h_aer_km = max((cam_pos.y + (h_min + h_max) * 0.5f) * 0.5f, 0.0f) * 0.001f;
+    float3 T_aer = exp(-atmo_sigma_t(h_aer_km) * (min(cloud_dist, 200000.0f) * 0.001f * aerial_str));
 
-    // M2.5-25-10: o desbotamento das nuvens ao longe usa a cor FISICA da atmosfera
-    // NAQUELA DIRECAO (ja computada neste pixel), no lugar da paleta hardcoded.
-    // Correto por direcao e de graca - melhor que a cor unica que estava aqui.
-    float3 final_color = lerp(radiance, ceu * (1.0f - T), fog_air) + T * (ceu + astro);
+    float3 final_color = radiance * T_aer + ceu * (1.0f - T) * (1.0f - T_aer) + T * (ceu + astro);
     final_color = min(max(final_color, 0.0f), 8.0f);
 
     PSOutput output;

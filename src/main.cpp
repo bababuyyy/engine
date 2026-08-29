@@ -146,7 +146,7 @@ struct SkyParams {
     float to_moon[3];       float moon_disk_deg;
     float moon_disk_bright; float pad_o[3]; // 25-9a: a lua no ceu
     float to_astro[3];      float pad_p;
-    float astro_sky_col[3]; float pad_q; // 25-12: a lua ilumina as nuvens (368B)
+    float astro_sky_col[3]; float aerial_str; // 25-12 + 25-13 (368B)
 };
 
 struct ObjIdParams {
@@ -354,6 +354,9 @@ float moon_disk_bright = 8.0f;   // ARTE (nossas unidades sao arbitrarias)
 // M2.5-25-9c: a luz que a lua joga na CENA. ARTE: a razao fisica real entre lua
 // cheia e sol e ~1/400.000 - nenhum jogo usa isso literalmente.
 float moon_scene_bright = 0.12f;
+// M2.5-25-13: multiplicador da profundidade optica da perspectiva aerea das nuvens.
+// 1.0 = extincao fisica pura (Tabela 1 do Hillaire). Acima disso e bruma de ARTE.
+float aerial_str = 1.0f;
 float moon_tint[3] = { 0.80f, 0.88f, 1.00f }; // luar levemente frio (arte)
 float exposure_auto_cur = 1.0f;  // valor suavizado corrente (nao persiste: converge sozinho)
 float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
@@ -454,6 +457,7 @@ auto save_tuning = []() {
     f << "moon_disk_deg=" << moon_disk_deg << "\n";
     f << "moon_disk_bright=" << moon_disk_bright << "\n";
     f << "moon_scene_bright=" << moon_scene_bright << "\n";
+    f << "aerial_str=" << aerial_str << "\n";
     f << "moon_tint_r=" << moon_tint[0] << "\n";
     f << "moon_tint_g=" << moon_tint[1] << "\n";
     f << "moon_tint_b=" << moon_tint[2] << "\n";
@@ -565,6 +569,7 @@ auto load_tuning = []() {
             else if (key == "moon_disk_deg") moon_disk_deg = std::stof(val);
             else if (key == "moon_disk_bright") moon_disk_bright = std::stof(val);
             else if (key == "moon_scene_bright") moon_scene_bright = std::stof(val);
+            else if (key == "aerial_str") aerial_str = std::stof(val);
             else if (key == "moon_tint_r") moon_tint[0] = std::stof(val);
             else if (key == "moon_tint_g") moon_tint[1] = std::stof(val);
             else if (key == "moon_tint_b") moon_tint[2] = std::stof(val);
@@ -2848,6 +2853,7 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Lua: disco (raio, graus)", &moon_disk_deg, 0.05f, 3.0f, "%.3f");
         ImGui::SliderFloat("Lua: brilho", &moon_disk_bright, 0.0f, 60.0f, "%.1f");
         ImGui::SliderFloat("Lua: luz na cena", &moon_scene_bright, 0.0f, 1.0f, "%.3f"); // 25-9c
+        ImGui::SliderFloat("Nevoa aerea (1 = fisico)", &aerial_str, 0.0f, 8.0f, "%.2f"); // 25-13
         ImGui::SliderFloat3("Lua: cor da luz", moon_tint, 0.0f, 1.0f);
         ImGui::SliderFloat("Disco do sol (raio, graus)", &sun_disk_deg, 0.05f, 3.0f, "%.4f"); // 25-7: 0.2725 = real
         ImGui::SliderFloat("Disco do sol: brilho", &sun_disk_bright, 0.0f, 200.0f, "%.1f");
@@ -3377,7 +3383,7 @@ int main(int argc, char* argv[]) {
                 float por_lua = moon_tint[ci] * (&t_moon.x)[ci] * I_lua;
                 sky_params.astro_sky_col[ci] = lua_manda ? por_lua : por_sol;
             }
-            sky_params.pad_q = 0.0f;
+            sky_params.aerial_str = aerial_str; // 25-13
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
