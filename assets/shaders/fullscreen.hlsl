@@ -96,6 +96,38 @@ float hg_phase(float cos_theta, float g)
 
 float4 PSMain(PSInput input) : SV_Target0
 {
+    // ========================================================================
+    // M2.5-26-I: MEDIDORES. Sem readback, sem numero na tela: o valor sai
+    // CODIFICADO no nivel de cinza, e a screenshot vira a leitura. Retorno
+    // ANTES de tudo (tonemap, sRGB, dither), entao o que o buffer recebe e o
+    // proprio numero. O motivo de existirem: ha quatro estacoes seguidas em que
+    // eu conserto sem enxergar a exposicao, e o "Exposicao efetiva" do painel
+    // ainda mostra o estimador analitico velho - o unico numero na tela e
+    // justamente o que nao vale mais.
+    // ========================================================================
+    if (shaft_debug > 1.5f && shaft_debug < 2.5f)
+    {
+        // MEDIDOR 1: a exposicao MEDIDA, como EV100. Tela toda de um cinza so.
+        // EV100 = log2(1 / (1.2 * exposure))    (Listing 28 invertido)
+        // Leitura: EV100 = (nivel_de_cinza / 255) * 32 - 6
+        float e_m = tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r;
+        float ev = log2(1.0f / max(1.2f * e_m, 1e-30f));
+        float g = saturate((ev + 6.0f) / 32.0f);
+        return float4(g, g, g, 1.0f);
+    }
+    if (shaft_debug > 2.5f)
+    {
+        // MEDIDOR 2: a luminancia ABSOLUTA de cada pixel, em log10(cd/m2).
+        // A cena chega pre-exposta, entao desfazemos a pre-exposicao primeiro.
+        // Leitura: log10(cd/m2) = (nivel_de_cinza / 255) * 8 - 2
+        //   preto = 0.01 cd/m2 ... branco = 1.000.000 cd/m2
+        float e_m = tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r;
+        e_m = (e_m > 0.0f && e_m < 1e6f) ? e_m : 1.0f;
+        float3 c = tex_color.SampleLevel(samp, input.uv, 0).rgb / e_m;
+        float L = dot(max(c, 0.0f), float3(0.2126f, 0.7152f, 0.0722f));
+        float g = saturate((log10(max(L, 1e-8f)) + 2.0f) / 8.0f);
+        return float4(g, g, g, 1.0f);
+    }
     // Sharp Bilinear / Fat Pixel Upscale Base
     float2 box = clamp(fwidth(input.uv) * tex_size, 1e-5, 1.0);
     float2 tx = input.uv * tex_size - 0.5 * box;

@@ -2169,7 +2169,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
     float sun_color_arr[3] = { 1.0f, 1.0f, 1.0f };
 
     int view_mode = 0;
-    const char* view_modes[] = { "Final", "Normais+ID", "Sem outline", "Shafts (debug)" };
+    const char* view_modes[] = { "Final", "Normais+ID", "Sem outline", "Shafts (debug)", "MEDIDOR: EV100", "MEDIDOR: luminancia" };
 
     int toon_cuts = 3;
     float toon_soft = 1.0f;
@@ -2794,7 +2794,9 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             }
         }
 
-        ImGui::Combo("Vista", &view_mode, view_modes, 4);
+        ImGui::Combo("Vista", &view_mode, view_modes, 6);
+        if (view_mode == 4) ImGui::TextDisabled("Tela cinza uniforme. EV100 = (nivel/255)*32 - 6");
+        if (view_mode == 5) ImGui::TextDisabled("Cada pixel = log10(cd/m2) do proprio pixel. nivel/255*8 - 2");
 
         ImGui::Text("Instancias: 100000");
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
@@ -3985,11 +3987,11 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             fs_params.exposure = auto_exposure ? exposure_auto_cur : exposure; // M2.5-25-4
             fs_params.shaft_cloud_occ = shaft_cloud_occ;
             fs_params.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
-            fs_params.shaft_debug = (view_mode == 3) ? 1.0f : 0.0f;
+            fs_params.shaft_debug = (view_mode == 3) ? 1.0f : ((view_mode == 4) ? 2.0f : ((view_mode == 5) ? 3.0f : 0.0f)); // 26-I: medidores
             fs_params.shaft_height_falloff = shaft_height_falloff; fs_params.dither_amt = dither_amt;
             fs_params.expo_auto = auto_exposure ? 1.0f : 0.0f; // 26-4: liga a leitura da textura 1x1
             // Anular shafts nas views de debug para nao sujar a validacao
-            fs_params.shaft_intensity = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f;
+            fs_params.shaft_intensity = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f; // 26-I: medidores tambem sem shafts
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
 
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &fs_params, sizeof(FsParams));
