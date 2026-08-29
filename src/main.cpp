@@ -331,7 +331,10 @@ float tonemap_shoulder = 0.75f; // M2.5-24I: inicio do ombro (abaixo = cores int
 float exposure = 1.0f;          // M2.5-24I-2: a chave do HDR (Lagarde 2014 via Hillaire)
 // M2.5-25-4: exposicao automatica analitica (ver comentario no calculo, no loop de frame)
 bool  auto_exposure = true;      // desligado = o slider "Exposicao" manda, como antes
-float exposure_key = 0.18f;      // chave / cinza medio (Reinhard) - ARTE, e a unica escolha de gosto aqui
+float exposure_key = 0.1041667f; // M2.5-25-17: NAO e arte. E K/(1.2*100) com K=12.5, a constante
+                                 // do fotometro do Frostbite (eq. 69 + Listing 28, 2014). Substituindo
+                                 // uma na outra: exposure = 0.1041667/Lavg - que e exatamente a forma
+                                 // do nosso alvo. O gosto mora no EC (Compensacao), como a fonte define.
 float exposure_bias_ev = 0.0f;   // compensacao em STOPS (fotografia) - ARTE
 float exposure_speed = 2.0f;     // velocidade da adaptacao do "olho" (1/s)
 // M2.5-25-5a: limites da exposicao = ARTE (quanto a noite tem direito de ser escura)
@@ -1910,7 +1913,13 @@ int main(int argc, char* argv[]) {
     if (!out_pipeline) { SDL_Log("FALHA out_pipeline: %s", SDL_GetError()); return 1; }
 
     SDL_GPUColorTargetDescription fs_color_desc = {};
-    fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+    // SONDA U6 (temporaria): o swapchain codifica sRGB por hardware ou nao?
+    SDL_Log("[sonda U6] swapchain=%d | R8G8B8A8_UNORM=%d  R8G8B8A8_UNORM_SRGB=%d  B8G8R8A8_UNORM=%d  B8G8R8A8_UNORM_SRGB=%d",
+            (int)SDL_GetGPUSwapchainTextureFormat(device, window),
+            (int)SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, (int)SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+            (int)SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM, (int)SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB);
+    
+fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
 
     SDL_GPUGraphicsPipelineCreateInfo fs_pipe_info = {};
     fs_pipe_info.vertex_shader = fs_vs;
@@ -2762,6 +2771,8 @@ int main(int argc, char* argv[]) {
             bloom_threshold = 1.1f;  // so highlights HDR reais
             cloud_absorcao = 1.0f;   // Beer canonico
             cloud_powder_str = 0.5f; // Schneider 2015
+            exposure_key = 0.1041667f; // 25-17: K/(1.2*100), K=12.5 - Frostbite eq.69 + Listing 28
+            exposure_bias_ev = 0.0f;   // 25-17: EC=0 = sem compensacao; a compensacao e ARTE, mas o zero e o neutro
             app_log.add("Fisica da Pesquisa aplicada (arte intacta). Salvar Config p/ persistir.");
         }
         ImGui::SameLine();
