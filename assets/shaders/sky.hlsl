@@ -27,10 +27,6 @@ cbuffer SkyBlock : register(b0, space3)
 {
     float3 to_sun;
     float pad0;
-    float3 zenith_color;
-    float pad1;
-    float3 horizon_color;
-    float pad2;
     float3 sun_color;
     float pad3;
     float3 cam_pos;

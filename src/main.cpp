@@ -125,8 +125,6 @@ struct SunParams {
 
 struct SkyParams {
     float to_sun[3];        float pad0;
-    float zenith_color[3];  float pad1;
-    float horizon_color[3]; float pad2;
     float sun_color[3];     float pad3;
     float cam_pos[3];       float pad4;
     float wind_dir[2];      float time;       float cloud_speed;
@@ -3035,7 +3033,6 @@ int main(int argc, char* argv[]) {
             glm::vec3 to_sun_vec;
             glm::vec3 to_moon_vec; // M2.5-25-9a
             float effective_intensity = sun_intensity;
-            glm::vec3 c_zenith, c_horizon;
             float effective_ambient = sun_ambient;
 
             if (sol_automatico) {
@@ -3061,23 +3058,13 @@ int main(int argc, char* argv[]) {
                     std::sin(theta_moon) * std::sin(phi)
                 ));
 
-                float sol_fator = glm::smoothstep(-0.05f, 0.25f, to_sun_vec.y);
-                effective_intensity = sun_intensity * sol_fator;
+                // M2.5-25-F: sol_fator removido - era calculado aqui e SOBRESCRITO
+                // pela linha da "Lua minima" logo abaixo. Codigo morto desde a origem.
 
                 auto saturate = [](float x) { return std::max(0.0f, std::min(1.0f, x)); };
-                float day_w = saturate(to_sun_vec.y);
-                float sunset_w = saturate(1.0f - std::fabs(to_sun_vec.y));
+                // M2.5-25-F: a paleta do crepusculo foi DELETADA. Tudo o que ela
+                // pintava (ceu, nevoa, desbotamento das nuvens) e fisico desde a 25-10.
                 float night_w = saturate(-to_sun_vec.y);
-
-                glm::vec3 zd(0.25f, 0.55f, 0.95f);
-                glm::vec3 hd(0.60f, 0.80f, 0.98f);
-                glm::vec3 zp(0.30f, 0.30f, 0.60f);
-                glm::vec3 hp(0.98f, 0.55f, 0.25f);
-                glm::vec3 zn(0.02f, 0.03f, 0.08f);
-                glm::vec3 hn(0.05f, 0.07f, 0.15f);
-
-                c_zenith = day_w * zd + sunset_w * zp + night_w * zn;
-                c_horizon = day_w * hd + sunset_w * hp + night_w * hn;
 
                 // M2.5-19C: Base lunar noturna - piso garantido de luz
                 float min_ambient_night = 0.04f;
@@ -3094,8 +3081,6 @@ int main(int argc, char* argv[]) {
                 ));
 
                 to_moon_vec = -to_sun_vec; // 25-9a: sem orbita no modo manual, lua cheia oposta
-                c_zenith = glm::vec3(0.1f, 0.4f, 0.8f);
-                c_horizon = glm::vec3(0.4f, 0.7f, 0.9f);
                 effective_ambient = sun_ambient;
             }
 
@@ -3143,16 +3128,12 @@ int main(int argc, char* argv[]) {
             glm::vec3 c_cloud_sunset(0.95f, 0.85f, 0.70f);
             glm::vec3 c_cloud_night(0.08f, 0.1f, 0.15f);
 
-            glm::vec3 c_sky_amb_day(0.45f, 0.65f, 0.95f); // Azulada contra a luz solar
-            glm::vec3 c_sky_amb_sunset(0.85f, 0.60f, 0.70f);
-            glm::vec3 c_sky_amb_night(0.02f, 0.03f, 0.08f);
 
             glm::vec3 c_cloud_shad_day(0.55f, 0.60f, 0.75f); // Azul lavanda opaco
             glm::vec3 c_cloud_shad_sunset(0.50f, 0.35f, 0.40f); // Roxo quente
             glm::vec3 c_cloud_shad_night(0.01f, 0.01f, 0.04f); // Azul escuro profundo
 
             glm::vec3 effective_cloud_color = c_cloud_day;
-            glm::vec3 effective_sky_amb = c_sky_amb_day;
             glm::vec3 effective_cloud_shad = c_cloud_shad_day;
 
             // M2.5-24: Computacao da Matriz Orto p/ Sombra
@@ -3233,7 +3214,6 @@ int main(int argc, char* argv[]) {
                 float night_w = saturate(-to_sun_vec.y);
 
                 effective_cloud_color = day_w * c_cloud_day + sunset_w * c_cloud_sunset + night_w * c_cloud_night;
-                effective_sky_amb = day_w * c_sky_amb_day + sunset_w * c_sky_amb_sunset + night_w * c_sky_amb_night;
                 effective_cloud_shad = day_w * c_cloud_shad_day + sunset_w * c_cloud_shad_sunset + night_w * c_cloud_shad_night;
             }
 
@@ -3242,14 +3222,6 @@ int main(int argc, char* argv[]) {
             sky_params.to_sun[1] = to_sun_vec.y;
             sky_params.to_sun[2] = to_sun_vec.z;
             sky_params.pad0 = 0.0f;
-            sky_params.zenith_color[0] = c_zenith.x;
-            sky_params.zenith_color[1] = c_zenith.y;
-            sky_params.zenith_color[2] = c_zenith.z;
-            sky_params.pad1 = 0.0f;
-            sky_params.horizon_color[0] = c_horizon.x;
-            sky_params.horizon_color[1] = c_horizon.y;
-            sky_params.horizon_color[2] = c_horizon.z;
-            sky_params.pad2 = 0.0f;
             sky_params.sun_color[0] = sun_color_arr[0] * t_sol.x * effective_intensity; // 25-1
             sky_params.sun_color[1] = sun_color_arr[1] * t_sol.y * effective_intensity;
             sky_params.sun_color[2] = sun_color_arr[2] * t_sol.z * effective_intensity;
