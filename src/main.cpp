@@ -808,7 +808,7 @@ int main(int argc, char* argv[]) {
 
     SDL_GPUTextureCreateInfo fallback_tex_info = {};
     fallback_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
-    fallback_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    fallback_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB; // 25-U6b: COR -> o hardware decodifica sRGB
     fallback_tex_info.width = 1;
     fallback_tex_info.height = 1;
     fallback_tex_info.layer_count_or_depth = 1;
@@ -1583,7 +1583,7 @@ int main(int argc, char* argv[]) {
                 if (asset.tex_w > 0 && asset.tex_h > 0 && !asset.tex_rgba.empty()) {
                     SDL_GPUTextureCreateInfo asset_tex_info = {};
                     asset_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
-                    asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+                    asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB; // 25-U6b: albedo e COR (Frostbite 4.1: "rely on the sRGB convention due to its hardware support"); alfa segue linear
                     asset_tex_info.width = asset.tex_w;
                     asset_tex_info.height = asset.tex_h;
                     asset_tex_info.layer_count_or_depth = 1;
@@ -1643,7 +1643,7 @@ int main(int argc, char* argv[]) {
                 if (asset.tex_w > 0 && asset.tex_h > 0 && !asset.tex_rgba.empty()) {
                     SDL_GPUTextureCreateInfo asset_tex_info = {};
                     asset_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
-                    asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+                    asset_tex_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB; // 25-U6b: albedo e COR (Frostbite 4.1: "rely on the sRGB convention due to its hardware support"); alfa segue linear
                     asset_tex_info.width = asset.tex_w;
                     asset_tex_info.height = asset.tex_h;
                     asset_tex_info.layer_count_or_depth = 1;
