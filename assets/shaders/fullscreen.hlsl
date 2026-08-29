@@ -50,7 +50,7 @@ cbuffer FsBlock : register(b0, space3)
     float cloud_mid;        // M2.5-24I-3
     float shaft_debug;      // M2.5-24I-4
     float shaft_height_falloff; // M2.5-24J (B6): ocupa o antigo pad_j0
-    float pad_j1;
+    float dither_amt; // M2.5-25-U6d
     float pad_j2;
 };
 
@@ -198,6 +198,6 @@ float4 PSMain(PSInput input) : SV_Target0
     // Precedente da casa: 24J-2c - "o jitter cobre o quantum" que ele disfarca.
     float2 dpx = floor(input.uv * tex_size);
     float dth = frac(sin(dot(dpx, float2(12.9898f, 78.233f))) * 43758.5453f);
-    final_color.rgb += (dth - 0.5f) / 255.0f;
+    final_color.rgb += (dth - 0.5f) * dither_amt / 255.0f; // 25-U6d: forca no painel (0 = desligado)
     return final_color;
 }
