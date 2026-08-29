@@ -62,6 +62,21 @@ static const float bayer[16] =
     15.0f / 16.0f, 7.0f / 16.0f, 13.0f / 16.0f, 5.0f / 16.0f
 };
 
+// M2.5-25-U6a: conversao EXATA de linear para sRGB.
+// Lagarde & de Rousiers, "Moving Frostbite to Physically Based Rendering 3.0"
+// (SIGGRAPH 2014), secao 5.1.5, Listing 30 - VERBATIM.
+// A fonte manda EVITAR a aproximacao por gama 2.2: "the inaccuracy of the
+// approximation for dark values [...] is critical since eyes are very sensitive
+// to variations in the low range" (Fig. 75), e ela nao produz preto verdadeiro
+// (Fig. 76). Nosso swapchain e B8G8R8A8_UNORM (sonda U6: formato 12, sem _SRGB),
+// entao o hardware nao codifica - a codificacao e responsabilidade deste shader.
+float3 accurateLinearToSRGB(float3 linearCol)
+{
+    float3 sRGBLo = linearCol * 12.92f;
+    float3 sRGBHi = (pow(abs(linearCol), 1.0f / 2.4f) * 1.055f) - 0.055f;
+    return (linearCol <= 0.0031308f) ? sRGBLo : sRGBHi;
+}
+
 float hg_phase(float cos_theta, float g)
 {
     float g2 = g * g;
@@ -166,7 +181,15 @@ float4 PSMain(PSInput input) : SV_Target0
     float3 over = max(tc - ts, 0.0f);
     final_color.rgb = min(tc, ts) + (1.0f - ts) * (1.0f - exp(-over / max(1.0f - ts, 1e-4f)));
 
+    // M2.5-25-U6a: a saida vira sRGB AQUI. Ordem do Frostbite (deck, Camera-Exposure):
+    //   1. film stock / tone map  ->  2. style (LUT / grading)  ->  3. sRGB / Rec709
+    final_color.rgb = accurateLinearToSRGB(saturate(final_color.rgb));
+
+    // O dither de de-banding passou para DEPOIS da codificacao. Ele vale MEIO degrau
+    // do buffer de 8 bits, e "meio degrau" so existe no espaco de tela. Aplicado em
+    // linear (como estava), perto do preto ele valia ~6,5 niveis de 255 - era o
+    // granulado que aparecia so nas areas escuras.
     float dth = frac(sin(dot(input.uv, float2(12.9898f, 78.233f))) * 43758.5453f);
-    final_color.rgb += (dth - 0.5f) / 255.0f; // de-banding do 8-bit (estagio final, padrao HDRP)
+    final_color.rgb += (dth - 0.5f) / 255.0f;
     return final_color;
 }
