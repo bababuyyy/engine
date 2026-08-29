@@ -440,7 +440,19 @@ PSOutput PSMain(PSInput input)
             float3 Nm = rgt * duv.x + upv * duv.y - to_moon * zz;
             float lam = saturate(dot(Nm, to_sun));           // a fase, por geometria
             float edge_m = 1.0f - smoothstep(0.88f, 1.0f, length(duv));
-            astro += (0.11f / 3.14159265f) * lam * edge_m * moon_disk_bright;
+            // M2.5-26-5 (N1.4): o disco da lua tambem atravessa a atmosfera.
+            // A checklist da noite exige, verbatim: "Disco multiplicado pela
+            // Transmittance LUT na direcao dele (avermelha no poente) - etapa
+            // EXPLICITA, nao embutida". O disco do SOL ja fazia isso desde a 25-7
+            // (sun_color carrega t_sol); a LUA ficou de fora. Sintoma: ela descia
+            // branca ate encostar no horizonte e sumia de supetao no teste de
+            // oclusao do planeta, enquanto o halo em volta - esse sim atenuado
+            // pela marcha - ja estava vermelho. Branco, depois vermelho, depois
+            // nada: exatamente o que a retina relatou as 5.3h.
+            // A LUT vale 0 para direcoes bloqueadas pelo chao, entao o corte do
+            // planeta passa a ser invisivel: o disco chega ao horizonte ja preto.
+            float3 t_moon_disk = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(0.0f, to_moon.y), 0).rgb;
+            astro += t_moon_disk * ((0.11f / 3.14159265f) * lam * edge_m * moon_disk_bright);
         }
     }
 

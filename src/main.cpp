@@ -2893,7 +2893,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::Checkbox("Sol automatico", &sol_automatico);
         ImGui::SameLine();
         ImGui::Checkbox("Hora manual", &sol_hora_manual);
-        if (sol_hora_manual) ImGui::SliderFloat("Hora do dia", &sol_hora, 0.0f, 24.0f, "%.1fh");
+        if (sol_hora_manual) ImGui::SliderFloat("Hora do dia", &sol_hora, 0.0f, 24.0f, "%.2fh"); // 26-5: 0.1h = 1,5 grau de arco; fino demais para julgar transicao
         if (sol_automatico) {
             ImGui::SliderFloat("Inclinacao do arco", &arco_inclinacao, 0.0f, 45.0f);
         }
@@ -3126,7 +3126,14 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             float effective_ambient = sun_ambient;
 
             if (sol_automatico) {
-                float t_frac = (g_hours * 60.0f + g_minutes) / 1440.0f;
+                // M2.5-26-5: RELOGIO CONTINUO para a posicao dos astros.
+                // g_hours/g_minutes sao inteiros (game_minutes_total = sim_tick/120),
+                // entao o sol e a lua saltavam 0,25 grau de uma vez a cada 2 segundos
+                // reais e ficavam parados no meio - o "movimento duro" que a retina
+                // pegou. A posicao dos astros e APRESENTACAO: nao entra no tick, nao
+                // entra no golden hash. O relogio inteiro segue mandando na simulacao,
+                // na UI e nas agendas dos NPCs.
+                float t_frac = (float)(std::fmod((double)sim_tick / 120.0, 1440.0) / 1440.0);
                 if (sol_hora_manual) t_frac = sol_hora / 24.0f; // M2.5-24G-5: so a LUZ obedece; o tick segue vivo
                 float theta = (t_frac - 0.25f) * 2.0f * 3.14159265f;
                 float phi = glm::radians(arco_inclinacao);
