@@ -226,8 +226,10 @@ PSOutput PSMain(PSInput input)
         }
     }
 
-    float ndl = saturate(dot(N, -sun_dir));
-    float t_hl = ndl * 0.5f + 0.5f;
+    // M2.5-25-6 (BUG B): Half-Lambert de Valve, na MESMA forma da basic.hlsl - o
+    // saturate vem DEPOIS do wrap. Antes vinha antes, o que criava um piso de 0.5:
+    // a grama ficava iluminada a >=50% em qualquer hora, sol onde estivesse.
+    float t_hl = saturate(dot(N, -sun_dir) * 0.5f + 0.5f);
 
     // M2.5-24G-2: sombra de nuvem le o MESMO weather map do ceu (sincronia por construcao)
     float2 sh_off = wind_dir_ps * cloud_time * -200.0f;

@@ -3257,9 +3257,13 @@ int main(int argc, char* argv[]) {
             sun_params.dir[1] = s_dir.y;
             sun_params.dir[2] = s_dir.z;
             sun_params.ambient = effective_ambient;
-            sun_params.color[0] = sun_color_arr[0] * t_sol.x * sun_intensity; // 25-1
-            sun_params.color[1] = sun_color_arr[1] * t_sol.y * sun_intensity;
-            sun_params.color[2] = sun_color_arr[2] * t_sol.z * sun_intensity;
+            // M2.5-25-6 (BUG A): a CENA passa a usar effective_intensity, como o ceu,
+            // as nuvens e os shafts ja usavam. A "Lua minima" (0.1 a noite, calculada
+            // logo acima) era jogada fora aqui - a cena rodava com a intensidade solar
+            // de meio-dia durante a madrugada.
+            sun_params.color[0] = sun_color_arr[0] * t_sol.x * effective_intensity;
+            sun_params.color[1] = sun_color_arr[1] * t_sol.y * effective_intensity;
+            sun_params.color[2] = sun_color_arr[2] * t_sol.z * effective_intensity;
             sun_params.cam_pos[0] = cam_pos.x;
             sun_params.cam_pos[1] = cam_pos.y;
             sun_params.cam_pos[2] = cam_pos.z;
