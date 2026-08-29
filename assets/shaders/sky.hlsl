@@ -580,7 +580,13 @@ PSOutput PSMain(PSInput input)
                     float t_sun = exp(-dens_sol * absorcao);
                     float k_ms = lerp(0.25f, lerp(0.25f, 0.05f, saturate(dim_profile)), saturate(cos_astro / 0.9f));
                     float ms_vol = saturate(dim_profile) * exp(-dens_sol * absorcao * k_ms);
-                    float luz = t_sun * phase_val + ms_vol * cloud_ms_str * hg_phase(cos_astro, cloud_ms_g2);
+                    // M2.5-25-14: o terceiro termo isotropico entra SOMADO A FASE, dentro da
+                    // integral - e assim que uma funcao de fase multi-lobo se compoe. Como fase,
+                    // ele multiplica a atenuacao t_sun, que varia ao longo da marcha de luz:
+                    // o miolo escurece e a casca acende mesmo longe do sol.
+                    // A forma anterior (24J-7) somava 0.12 DEPOIS da atenuacao e, a 90 graus do
+                    // sol, essa constante era 2.5x a fase (0.048) - tudo chapava.
+                    float luz = t_sun * (phase_val + cloud_iso_str) + ms_vol * cloud_ms_str * hg_phase(cos_astro, cloud_ms_g2);
                     float powder = 1.0f - exp(-2.0f * dens_sol);
                     luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
 
@@ -593,8 +599,9 @@ PSOutput PSMain(PSInput input)
                     float amb_scat = pow(saturate(1.0f - dim_profile), 0.5f);
                     float3 ambient_term = sky_ambient_color * (amb_scat * cloud_ambient_str);
 
-                    // 24J-7: 3o termo isotropico Â· 25-12: cor do astro dominante (ja pre-multiplicada)
-                    float3 direct_term = (luz + cloud_iso_str) * astro_sky_col;
+                    // 25-12: cor do astro dominante (ja pre-multiplicada) Â· 25-14: o isotropico
+                    // saiu daqui e virou piso de fase, acima.
+                    float3 direct_term = luz * astro_sky_col;
 
                     radiance += T * (1.0f - exp(-d * sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
                     T *= exp(-d * sz * absorcao);
