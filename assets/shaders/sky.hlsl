@@ -416,6 +416,23 @@ PSOutput PSMain(PSInput input)
         }
     }
 
+    // M2.5-25-9b: O PLANETA OCLUI OS ASTROS. Sem isto, sol e lua sao desenhados
+    // abaixo da linha do horizonte - visiveis na metade de baixo do domo, alem da
+    // borda do terreno ("a lua no chao"). E o MESMO teste raio-esfera que a marcha
+    // ja usa para cortar em atmo_sky(); aqui aplicado a composicao dos discos.
+    // Sendo por pixel, o nascer e o poente saem certos de graca: o astro e cortado
+    // pela linha do horizonte, sem mascara nem fade artificial.
+    {
+        float3 p0_a = float3(0.0f, kRg + max(cam_pos.y, 0.0f) * 0.001f, 0.0f);
+        float b_a = dot(p0_a, dir);
+        float c_a = dot(p0_a, p0_a) - kRg * kRg;
+        float disc_a = b_a * b_a - c_a;
+        if (disc_a >= 0.0f && (-b_a - sqrt(disc_a)) > 0.0f)
+        {
+            astro = float3(0.0f, 0.0f, 0.0f); // atras do mundo
+        }
+    }
+
     // Vista de depuracao das LUTs (salvaguarda de atribuicao desta estacao)
     if (atmo_debug > 0.5f)
     {
