@@ -78,6 +78,8 @@ cbuffer SkyBlock : register(b0, space3)
     float sun_disk_bright; // M2.5-25-7: brilho do disco (arte)
     float pad_m0;
     float pad_m1;
+    float3 night_tint;     // M2.5-25-8: cor do piso noturno (ARTE)
+    float pad_n;
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -353,13 +355,17 @@ PSOutput PSMain(PSInput input)
     // crepusculo). O ceu agora e a atmosfera fisica de Hillaire 2020. O ganho e
     // conversao de UNIDADES (o paper e fotometrico; nosso sun_intensity e
     // arbitrario) - unico numero desta estacao que nao esta na fonte.
-    // M2.5-25-5a: PISO DO CEU NOTURNO. Sem ele, o modelo fisico devolve preto
-    // absoluto a noite (transmitancia ao sol = 0). Composicao da fonte (ING sky
-    // brightness, 3 fontes convergentes): airglow 65% (verde, oxigenio 557.7nm)
-    // + luz zodiacal 27% (cor de sol) + luz estelar difusa 7% (branco-azulada)
-    // -> tom (0.674, 1.0, 0.646). O TOM e da fonte; a FORCA e do diretor.
+    // M2.5-25-5a / 25-8: PISO DO CEU NOTURNO. Sem ele, o modelo fisico devolve
+    // preto absoluto a noite (transmitancia ao sol = 0).
+    // COM FONTE (ING sky brightness, 3 fontes convergentes): o ceu sem lua NAO e
+    // preto (~2e-4 cd/m2), e sua composicao e airglow + luz zodiacal + luz estelar.
+    // SEM FONTE (correcao da 25-8): a COR. A divisao 145/60/15 do documento esta em
+    // unidades S10(vis) - magnitudes fotometricas numa banda, nao pesos RGB. O verde
+    // que estava aqui foi extrapolacao. Alem disso, o airglow verde e fenomeno de
+    // fotografia de longa exposicao; o olho adaptado ao escuro ve cinza-azulado
+    // (Purkinje - lacuna declarada na fornada). Logo: a cor e ARTE, no painel.
     // Somado sem condicional: de dia ele e desprezivel, como na natureza.
-    float3 ceu = (atmo_sky(dir) + night_floor * float3(0.674f, 1.0f, 0.646f)) * sky_gain;
+    float3 ceu = (atmo_sky(dir) + night_floor * night_tint) * sky_gain;
 
     float cos_sun = dot(dir, to_sun);
 
