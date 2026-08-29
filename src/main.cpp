@@ -44,6 +44,9 @@ typedef unsigned char BYTE;
 #include "bloom_thresh_ps.h"
 #include "bloom_down_ps.h"
 #include "bloom_up_ps.h"
+#include "expo_vs.h"        // M2.5-26-4
+#include "expo_luma_ps.h"   // M2.5-26-4
+#include "expo_adapt_ps.h"  // M2.5-26-4
 #include "shadow_vs.h"
 #include "shadow_ps.h"
 #include "clouds/cloud_noise.h"
@@ -162,7 +165,7 @@ struct FsParams { // M2.5-24H: shafts volumetricos
     float tex_size[2];   float wind_off[2];
     float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
     float tonemap_shoulder; float exposure; float shaft_cloud_occ; float cloud_mid; // 24I-3: altura media da camada
-    float shaft_debug;      float shaft_height_falloff; float dither_amt; float pad_j1; // 25-U6d ocupa o pad_j[0]
+    float shaft_debug;      float shaft_height_falloff; float dither_amt; float expo_auto; // 25-U6d + 26-4 ocupam os dois pad_j
 };
 static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
 
@@ -664,7 +667,7 @@ int main(int argc, char* argv[]) {
     fs_ps_info.entrypoint = "PSMain";
     fs_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     fs_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    fs_ps_info.num_samplers = 6; // M2.5-24H: + depth, shadow map, weather
+    fs_ps_info.num_samplers = 7; // M2.5-26-4: + a exposicao medida (1x1)
     fs_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* fs_ps = SDL_CreateGPUShader(device, &fs_ps_info);
     if (!fs_ps) return 1;
@@ -774,6 +777,39 @@ int main(int argc, char* argv[]) {
     b_up_info.num_uniform_buffers = 1;
     SDL_GPUShader* bloom_up_ps = SDL_CreateGPUShader(device, &b_up_info);
     if (!bloom_up_ps) { SDL_Log("FALHA bloom_up_ps: %s", SDL_GetError()); return 1; }
+
+    // M2.5-26-4: shaders da exposicao medida (Frostbite 2014, sec. 5.1)
+    SDL_GPUShaderCreateInfo expo_vs_info = {};
+    expo_vs_info.code = g_expo_vs;
+    expo_vs_info.code_size = sizeof(g_expo_vs);
+    expo_vs_info.entrypoint = "VSMain";
+    expo_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    expo_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    expo_vs_info.num_uniform_buffers = 0;
+    SDL_GPUShader* expo_vs = SDL_CreateGPUShader(device, &expo_vs_info);
+    if (!expo_vs) { SDL_Log("FALHA expo_vs: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo expo_luma_info = {};
+    expo_luma_info.code = g_expo_luma_ps;
+    expo_luma_info.code_size = sizeof(g_expo_luma_ps);
+    expo_luma_info.entrypoint = "PS_Luma";
+    expo_luma_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    expo_luma_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    expo_luma_info.num_samplers = 1;
+    expo_luma_info.num_uniform_buffers = 1;
+    SDL_GPUShader* expo_luma_ps = SDL_CreateGPUShader(device, &expo_luma_info);
+    if (!expo_luma_ps) { SDL_Log("FALHA expo_luma_ps: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo expo_adapt_info = {};
+    expo_adapt_info.code = g_expo_adapt_ps;
+    expo_adapt_info.code_size = sizeof(g_expo_adapt_ps);
+    expo_adapt_info.entrypoint = "PS_Adapt";
+    expo_adapt_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    expo_adapt_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    expo_adapt_info.num_samplers = 2;
+    expo_adapt_info.num_uniform_buffers = 1;
+    SDL_GPUShader* expo_adapt_ps = SDL_CreateGPUShader(device, &expo_adapt_info);
+    if (!expo_adapt_ps) { SDL_Log("FALHA expo_adapt_ps: %s", SDL_GetError()); return 1; }
 
     SDL_GPUShaderCreateInfo shadow_vs_info = {};
     shadow_vs_info.code = g_shadow_vs;
@@ -1969,6 +2005,40 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
 
     b_pipe_info.fragment_shader = bloom_up_ps;
     SDL_GPUGraphicsPipeline* bloom_up_pipeline = SDL_CreateGPUGraphicsPipeline(device, &b_pipe_info);
+
+    // M2.5-26-4: pipelines e alvos da exposicao medida. Tamanho FIXO (32x32 e 1x1):
+    // nao dependem da resolucao interna, entao ficam fora da recriacao do resize.
+    SDL_GPUGraphicsPipelineCreateInfo e_pipe_info = {};
+    e_pipe_info.vertex_shader = expo_vs;
+    e_pipe_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    e_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    e_pipe_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    e_pipe_info.target_info.num_color_targets = 1;
+    SDL_GPUColorTargetDescription e_target_desc = {};
+    e_target_desc.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    e_pipe_info.target_info.color_target_descriptions = &e_target_desc;
+
+    e_pipe_info.fragment_shader = expo_luma_ps;
+    SDL_GPUGraphicsPipeline* expo_luma_pipeline = SDL_CreateGPUGraphicsPipeline(device, &e_pipe_info);
+    if (!expo_luma_pipeline) { SDL_Log("FALHA expo_luma_pipeline: %s", SDL_GetError()); return 1; }
+
+    e_pipe_info.fragment_shader = expo_adapt_ps;
+    SDL_GPUGraphicsPipeline* expo_adapt_pipeline = SDL_CreateGPUGraphicsPipeline(device, &e_pipe_info);
+    if (!expo_adapt_pipeline) { SDL_Log("FALHA expo_adapt_pipeline: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUTextureCreateInfo expo_tex_info = {};
+    expo_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
+    expo_tex_info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    expo_tex_info.layer_count_or_depth = 1;
+    expo_tex_info.num_levels = 1;
+    expo_tex_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    expo_tex_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    expo_tex_info.width = 32; expo_tex_info.height = 32;
+    SDL_GPUTexture* luma_map_tex = SDL_CreateGPUTexture(device, &expo_tex_info);
+    expo_tex_info.width = 1; expo_tex_info.height = 1;
+    SDL_GPUTexture* expo_tex[2] = { SDL_CreateGPUTexture(device, &expo_tex_info), SDL_CreateGPUTexture(device, &expo_tex_info) };
+    if (!luma_map_tex || !expo_tex[0] || !expo_tex[1]) { SDL_Log("FALHA alvos da exposicao: %s", SDL_GetError()); return 1; }
+    int expo_ping = 0;
 
     // Variaveis globais de Render Target mantidas nulas ate a hora certa
     SDL_GPUTexture* bloom_tex_a = nullptr;
@@ -3648,6 +3718,62 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             SDL_EndGPURenderPass(o_pass);
 
             // ============================================================================
+            // M2.5-26-4: EXPOSICAO MEDIDA - dois passes minusculos, tudo na GPU.
+            //   composite_color            -> luma_map_tex (32x32, log-luminancia)
+            //   luma_map_tex + expo[ant.]  -> expo[atual]   (1x1, alvo + adaptacao)
+            // Roda DEPOIS do outline (composite pronto) e ANTES do fullscreen: a
+            // exposicao aplicada no quadro mede ESTE quadro, sem atraso de frame.
+            // A CPU nunca ve o numero - a regra da casa contra readback fica intacta.
+            // ============================================================================
+            if (auto_exposure)
+            {
+                struct ExpoBlock { float key, ec, emin, emax, speed, dt, p0, p1; } ep;
+                ep.key = exposure_key;
+                ep.ec = exposure_bias_ev;
+                ep.emin = exposure_min;
+                ep.emax = exposure_max;
+                ep.speed = exposure_speed;
+                ep.p0 = 0.0f; ep.p1 = 0.0f;
+                static uint64_t expo_last_ms = SDL_GetTicks();
+                static int expo_warm = 0;
+                uint64_t expo_now_ms = SDL_GetTicks();
+                ep.dt = std::min((float)(expo_now_ms - expo_last_ms) / 1000.0f, 0.25f);
+                expo_last_ms = expo_now_ms;
+                // Os dois primeiros frames leem uma textura que ainda nao foi escrita.
+                // Um dt enorme faz a adaptacao saltar direto para o alvo e engolir o lixo.
+                if (expo_warm < 2) { ep.dt = 1000.0f; ++expo_warm; }
+
+                SDL_GPUColorTargetInfo lt = {};
+                lt.texture = luma_map_tex;
+                lt.load_op = SDL_GPU_LOADOP_CLEAR;
+                lt.store_op = SDL_GPU_STOREOP_STORE;
+                lt.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+                SDL_GPURenderPass* lpass = SDL_BeginGPURenderPass(cmd_buffer, &lt, 1, nullptr);
+                SDL_BindGPUGraphicsPipeline(lpass, expo_luma_pipeline);
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &ep, sizeof(ExpoBlock));
+                SDL_GPUTextureSamplerBinding lb = { composite_color, upscale_sampler };
+                SDL_BindGPUFragmentSamplers(lpass, 0, &lb, 1);
+                SDL_DrawGPUPrimitives(lpass, 3, 1, 0, 0);
+                SDL_EndGPURenderPass(lpass);
+
+                SDL_GPUColorTargetInfo at = {};
+                at.texture = expo_tex[expo_ping];
+                at.load_op = SDL_GPU_LOADOP_CLEAR;
+                at.store_op = SDL_GPU_STOREOP_STORE;
+                at.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+                SDL_GPURenderPass* apass = SDL_BeginGPURenderPass(cmd_buffer, &at, 1, nullptr);
+                SDL_BindGPUGraphicsPipeline(apass, expo_adapt_pipeline);
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &ep, sizeof(ExpoBlock));
+                SDL_GPUTextureSamplerBinding ab[2] = {
+                    { luma_map_tex, upscale_sampler },
+                    { expo_tex[1 - expo_ping], upscale_sampler }
+                };
+                SDL_BindGPUFragmentSamplers(apass, 0, ab, 2);
+                SDL_DrawGPUPrimitives(apass, 3, 1, 0, 0);
+                SDL_EndGPURenderPass(apass);
+            }
+
+            // ============================================================================
             // M2.5-23: Dual-Kawase Bloom Ping-Pong Pass
             // ============================================================================
             if (draw_bloom && view_mode == 0) {
@@ -3733,7 +3859,8 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             fs_params.shaft_cloud_occ = shaft_cloud_occ;
             fs_params.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
             fs_params.shaft_debug = (view_mode == 3) ? 1.0f : 0.0f;
-            fs_params.shaft_height_falloff = shaft_height_falloff; fs_params.dither_amt = dither_amt; fs_params.pad_j1 = 0.0f;
+            fs_params.shaft_height_falloff = shaft_height_falloff; fs_params.dither_amt = dither_amt;
+            fs_params.expo_auto = auto_exposure ? 1.0f : 0.0f; // 26-4: liga a leitura da textura 1x1
             // Anular shafts nas views de debug para nao sujar a validacao
             fs_params.shaft_intensity = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f;
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
@@ -3745,18 +3872,20 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             else if (view_mode == 2) upscale_source = scene_color;
 
             // O Pass Fullscreen agora bebe da id_mask pra calcular a oclusão volumetrica da luz e da cor unificada do bloom kawase
-            SDL_GPUTextureSamplerBinding fs_samp_binds[6] = {
+            SDL_GPUTextureSamplerBinding fs_samp_binds[7] = {
                 { upscale_source, upscale_sampler },
                 { normal_id, upscale_sampler },
                 { bloom_tex_a ? bloom_tex_a : fallback_tex, upscale_sampler },
                 { depth_texture, point_sampler },
                 { shadow_map, shadow_cmp },
-                { weather_tex, sampler }
+                { weather_tex, sampler },
+                { expo_tex[expo_ping], upscale_sampler } // M2.5-26-4
             };
-            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 6);
+            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 7);
 
             SDL_DrawGPUPrimitives(fs_pass, 3, 1, 0, 0);
             SDL_EndGPURenderPass(fs_pass);
+            expo_ping = 1 - expo_ping; // M2.5-26-4: alterna o ping-pong da exposicao
 
             SDL_GPUColorTargetInfo ui_target = {};
             ui_target.texture = swapchain_texture;

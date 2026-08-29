@@ -27,6 +27,8 @@ Texture2D shadow_map : register(t4, space2);
 SamplerComparisonState shadow_cmp : register(s4, space2);
 Texture2D weather_map : register(t5, space2);
 SamplerState weather_samp : register(s5, space2);
+Texture2D tex_expo : register(t6, space2);        // M2.5-26-4: exposicao medida (1x1)
+SamplerState samp_expo : register(s6, space2);
 
 cbuffer FsBlock : register(b0, space3)
 {
@@ -51,7 +53,7 @@ cbuffer FsBlock : register(b0, space3)
     float shaft_debug;      // M2.5-24I-4
     float shaft_height_falloff; // M2.5-24J (B6): ocupa o antigo pad_j0
     float dither_amt; // M2.5-25-U6d
-    float pad_j2;
+    float expo_auto;            // M2.5-26-4: 1 = ler a exposicao da textura
 };
 
 static const float bayer[16] =
@@ -172,7 +174,11 @@ float4 PSMain(PSInput input) : SV_Target0
     }
 
     final_color.rgb += tex_bloom.Sample(samp, input.uv).rgb * bloom_intensity; // M2.5-23: o florescer
-    final_color.rgb *= exposure; // M2.5-24I-2: exposicao antes do ombro (o par da intensidade)
+    // M2.5-26-4: com auto ligado, a exposicao vem MEDIDA da GPU (media log de
+    // Reinhard + constante do fotometro do Frostbite). Com auto desligado, o slider
+    // manual manda, exatamente como antes.
+    float expo = (expo_auto > 0.5f) ? tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r : exposure;
+    final_color.rgb *= expo; // M2.5-24I-2: exposicao antes do ombro (o par da intensidade)
 
     // M2.5-24I: tonemap de ombro exponencial - abaixo do ombro as cores ficam INTACTAS
     // (toon preservado); acima, rolloff filmico continuo (derivada 1 no ombro).

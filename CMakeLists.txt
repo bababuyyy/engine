@@ -93,9 +93,12 @@ add_custom_command(
     COMMAND ${FXC} /T ps_5_1 /E PS_Threshold /Fh ${CMAKE_CURRENT_BINARY_DIR}/bloom_thresh_ps.h /Vn g_bloom_thresh_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl
     COMMAND ${FXC} /T ps_5_1 /E PS_Down /Fh ${CMAKE_CURRENT_BINARY_DIR}/bloom_down_ps.h /Vn g_bloom_down_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl
     COMMAND ${FXC} /T ps_5_1 /E PS_Up /Fh ${CMAKE_CURRENT_BINARY_DIR}/bloom_up_ps.h /Vn g_bloom_up_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl
+    COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/expo_vs.h /Vn g_expo_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/exposure.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PS_Luma /Fh ${CMAKE_CURRENT_BINARY_DIR}/expo_luma_ps.h /Vn g_expo_luma_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/exposure.hlsl
+    COMMAND ${FXC} /T ps_5_1 /E PS_Adapt /Fh ${CMAKE_CURRENT_BINARY_DIR}/expo_adapt_ps.h /Vn g_expo_adapt_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/exposure.hlsl
     COMMAND ${FXC} /T vs_5_1 /E VSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/shadow_vs.h /Vn g_shadow_vs ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shadow.hlsl
     COMMAND ${FXC} /T ps_5_1 /E PSMain /Fh ${CMAKE_CURRENT_BINARY_DIR}/shadow_ps.h /Vn g_shadow_ps ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shadow.hlsl
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/grass.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shadow.hlsl
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/basic.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/fullscreen.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/outline.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/sky.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/grass.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/bloom.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/shadow.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders/exposure.hlsl
 )
 
 add_executable(engine src/main.cpp src/sim/sim.cpp src/core/jobs.h src/sim/sim.h src/phys/physics.h src/phys/physics.cpp src/level/level.cpp src/gen/gen.cpp src/assets/assets.cpp src/social/social.cpp src/clouds/cloud_noise.h src/clouds/cloud_noise.cpp src/sky/atmosphere.h src/sky/atmosphere.cpp)
