@@ -254,7 +254,11 @@ float cloud_silver_k = 0.0f;      // M2.5-24E-4: silver lining (0 = fisica pura)
 float cloud_ms_str = 1.0f;        // M2.5-24J-3: forca do brilho interno MS (retina; a fonte da a forma, nao o numero)
 float cloud_ms_g2 = 0.2f;         // M2.5-24J-3: fase secundaria "mais isotropica" (retina; 0 = isotropica pura)
 float cloud_iso_str = 0.12f;      // M2.5-24J-7: 3o termo de fase, isotropico (era o 0.12 fixo; 0.12 = comportamento anterior)
-float sky_gain = 3.0f;           // M2.5-25-2: CONVERSAO DE UNIDADES (o paper e fotometrico, ~120klx; nosso sun_intensity e arbitrario). NAO esta na fonte -> retina.
+// M2.5-26-2b: LEGADO. Este ganho existia para costurar duas reguas: a atmosfera do
+// Hillaire e fotometrica e o nosso sol era arbitrario. Com o sol em lux as duas
+// reguas viraram uma so e ele nao tem mais funcao. Fica em 1.0 e sai do painel na
+// proxima faxina; nao mexer.
+float sky_gain = 1.0f;
 int atmo_debug_mode = 0;          // M2.5-25-2: 0=off, 1=LUT de transmitancia, 2=LUT de multi-scattering
 float cloud_silver_spread = 0.3f;
 float clima_cov_teto = 0.85f;  // M2.5-24G-3: embriao da maquina de clima
@@ -311,7 +315,21 @@ float arco_inclinacao = 25.0f;
 float sun_yaw = 45.0f;
 float sun_pitch = -45.0f;
 float sun_ambient = 0.55f;
-float sun_intensity = 1.2f;
+// M2.5-26-2b: O SOL EM LUX (iluminancia no TOPO da atmosfera - o E_i da Eq. 3/11
+// do Hillaire). Derivacao a partir da Tabela 11 do Frostbite (medicao com fotometro,
+// Estocolmo, julho, ceu limpo), linha "Sol" as 12h = 90.700 lx no plano horizontal:
+//   a nossa marcha entrega E_chao = E_topo * T(mu) * mu
+//   com o arco de 25 graus o meio-dia poe o sol a 65 graus: mu = 0,9063
+//   T(65 graus) luma = 0,8611  ->  T*mu = 0,7804
+//   E_topo = 90.700 / 0,7804 = 116.216 lx
+// CONTRAPROVA (declarada, nao escondida): com esse E_topo o nosso CEU entrega
+// 8.338 lx no plano horizontal, contra os 19.300 lx da mesma tabela. O total fica
+// 99.000 contra 110.000 - 10% baixo, 0,14 stop. A diferenca mora no ceu, e a
+// explicacao provavel e que a medicao foi feita "com poucas nuvens" enquanto o
+// modelo do Hillaire e de ceu LIMPO. Fica registrado para a contraprova Sunny 16.
+// MARCHA ABSOLVIDA: 20 passos entregam 8.032 lx contra 8.338 com 320 passos - 3,7%
+// de diferenca. A resolucao da marcha nao e a causa.
+float sun_intensity = 116216.0f;
 
 float ray_strength = 0.6f;
 float ray_decay = 0.97f;
@@ -346,13 +364,23 @@ float exposure_key = 0.1041667f; // M2.5-25-17: NAO e arte. E K/(1.2*100) com K=
 float exposure_bias_ev = 0.0f;   // compensacao em STOPS (fotografia) - ARTE
 float exposure_speed = 2.0f;     // velocidade da adaptacao do "olho" (1/s)
 // M2.5-25-5a: limites da exposicao = ARTE (quanto a noite tem direito de ser escura)
-float exposure_min = 0.05f;
-float exposure_max = 8.0f;
-float night_sky_floor = 0.02f;   // forca do piso noturno (airglow+zodiacal+estelar); tom vem da fonte
+// M2.5-26-2b: com Lavg de meio-dia perto de 4.000 cd/m2 (Tabela 7: EV100 15), a
+// exposicao passa a viver perto de 0,104167/4000 = 2,6x10^-5. Os limites mudam de
+// ordem de grandeza junto. Ctrl+clique no slider digita o valor exato.
+float exposure_min = 1.0e-7f;
+float exposure_max = 1.0e-3f;
+// M2.5-26-2b: agora em cd/m2 DE VERDADE. Item N3.1 da checklist da noite, com tres
+// fontes convergentes: o ceu sem lua vale 2x10^-4 cd/m2 (22,0 mag/arcsec2). Ate a
+// 25-U6 esse numero era inexprimivel - o passo minimo do slider valia 66.000x o
+// valor certo. Agora ele e simplesmente o default.
+float night_sky_floor = 0.0002f;
 // M2.5-25-7: disco solar. O TAMANHO e fisico (0.2725 graus de raio, real); o BRILHO e arte
 // (o fisico seria E/Omega, ~15.000x - impossivel nas nossas unidades arbitrarias por ora).
 float sun_disk_deg = 0.2725f;
-float sun_disk_bright = 30.0f;
+// M2.5-26-2b: MULTIPLICADOR sobre a radiancia que conserva energia, L = E / Omega.
+// 1.0 = fisico. Mudar o raio do disco por direcao de arte deixa de mudar a energia
+// total que ele emite - so espalha a mesma energia numa area maior.
+float sun_disk_bright = 1.0f;
 // M2.5-25-8: cor do piso noturno. NAO vem da fonte (ver comentario no sky.hlsl):
 // default azul-acinzentado, que e como o olho adaptado ao escuro ve o ceu sem lua.
 float night_tint[3] = { 0.55f, 0.66f, 1.00f };
@@ -360,10 +388,20 @@ float night_tint[3] = { 0.55f, 0.66f, 1.00f };
 // 180 = cheia, 90/270 = quartos. O ciclo real leva ~29,5 dias; por ora e slider.
 float moon_elong_deg = 180.0f;   // cheia
 float moon_disk_deg = 0.26f;     // raio angular real (diametro ~0.52 graus)
-float moon_disk_bright = 8.0f;   // ARTE (nossas unidades sao arbitrarias)
+// M2.5-26-2b: MULTIPLICADOR sobre L = (rho/pi) * E_sol * N.L, com rho = 0.11 (bond
+// albedo lunar, N2.3). Com E_sol = 116.216 lx e lua cheia o pico da ~4.070 cd/m2, e
+// a luminancia real da superficie lunar fica entre 2.500 e 6.000 cd/m2. 1.0 = fisico.
+float moon_disk_bright = 1.0f;
 // M2.5-25-9c: a luz que a lua joga na CENA. ARTE: a razao fisica real entre lua
 // cheia e sol e ~1/400.000 - nenhum jogo usa isso literalmente.
-float moon_scene_bright = 0.12f;
+// M2.5-26-2b: A LUA EM LUX. Calibrada pelo item N2.4 (ceu de lua cheia ~ 0,03
+// cd/m2): a sonda sobre o nosso proprio modelo mostra que 1 lx de lua produz
+// 0,017108 cd/m2 no ceu a 45 graus, logo E_lua = 0,03/0,017108 = 1,754 lx.
+// DISCREPANCIA DECLARADA: isso da 16,0 stops entre sol e lua, e a checklist deriva
+// 17,6 stops comparando ceu de meio-dia com ceu de lua cheia. 1,6 stop em aberto -
+// resolver na contraprova Sunny 16, NAO por ajuste de gosto. O que importa agora e
+// que o numero finalmente CABE no controle: antes o slider era 0..1 linear.
+float moon_scene_bright = 1.754f;
 // M2.5-25-13: multiplicador da profundidade optica da perspectiva aerea das nuvens.
 // 1.0 = extincao fisica pura (Tabela 1 do Hillaire). Acima disso e bruma de ARTE.
 float aerial_str = 1.0f;
@@ -599,6 +637,22 @@ auto load_tuning = []() {
         catch (...) {
             SDL_Log("Aviso: Falha ao fazer o parse da chave %s no tuning.ini", key.c_str());
         }
+    }
+    // M2.5-26-2b: MIGRACAO DE REGUA. Todo tuning.ini salvo antes desta estacao guarda
+    // um sol em unidade arbitraria (~1.5). Carregar aquilo aqui deixaria as RAZOES
+    // entre sol, lua, piso noturno e discos erradas por ordens de grandeza - e a
+    // exposicao automatica esconderia o estrago, porque ela normaliza o brilho medio.
+    // Detectamos pelo proprio valor: nenhuma calibracao em lux fica abaixo de 100.
+    if (sun_intensity < 100.0f) {
+        sun_intensity     = 116216.0f;  // Tabela 11 (12h, 90.700 lx) / T*mu
+        moon_scene_bright = 1.754f;     // N2.4 (ceu de lua cheia 0,03 cd/m2)
+        night_sky_floor   = 0.0002f;    // N3.1 (2x10^-4 cd/m2)
+        sun_disk_bright   = 1.0f;       // E / Omega
+        moon_disk_bright  = 1.0f;       // rho/pi * E_sol
+        sky_gain          = 1.0f;       // legado, sem funcao
+        exposure_min      = 1.0e-7f;
+        exposure_max      = 1.0e-3f;
+        SDL_Log("[26-2b] tuning.ini era da regua antiga (sol=%.3f) - valores de LUZ resetados para as unidades fisicas. A ARTE nao foi tocada. Salvar Config para persistir.", 1.0f);
     }
     SDL_Log("Tuning carregado de config/tuning.ini");
     };
@@ -2877,7 +2931,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::SliderFloat("Brilho interno (MS)", &cloud_ms_str, 0.0f, 2.0f);
         ImGui::SliderFloat("Fase do MS (g2)", &cloud_ms_g2, 0.0f, 0.6f);
         ImGui::SliderFloat("Luz isotropica", &cloud_iso_str, 0.0f, 0.5f);
-        ImGui::SliderFloat("Ganho do ceu (equilibrio ceu x cena)", &sky_gain, 0.0f, 20.0f, "%.2f"); // 25-4b
+        ImGui::SliderFloat("Ganho do ceu (LEGADO - deixe em 1)", &sky_gain, 0.0f, 4.0f, "%.2f"); // 26-2b: sem funcao desde as unidades fisicas
         ImGui::SliderInt("Debug atmosfera", &atmo_debug_mode, 0, 2);
         ImGui::SliderFloat("Silver spread", &cloud_silver_spread, 0.05f, 0.5f);
         ImGui::SliderFloat("Camada: base", &cloud_h_min, 60.0f, 200.0f);
@@ -2903,7 +2957,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::EndDisabled();
         ImGui::SliderFloat("Ambient (Dia)", &sun_ambient, 0.0f, 1.0f);
         ImGui::SliderFloat3("Color", sun_color_arr, 0.0f, 1.0f);
-        ImGui::SliderFloat("Intensity", &sun_intensity, 0.0f, 5.0f);
+        ImGui::SliderFloat("Sol: iluminancia (lux)", &sun_intensity, 0.0f, 200000.0f, "%.0f lx"); // 26-2b: Tabela 11
 
         ImGui::Separator();
         ImGui::Text("Sombras Projetadas");
@@ -2933,18 +2987,18 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::SliderFloat("Chave (cinza medio)", &exposure_key, 0.01f, 0.25f, "%.3f"); // 25-4b: regua honesta
         ImGui::SliderFloat("Compensacao (EV)", &exposure_bias_ev, -4.0f, 4.0f, "%.2f");
         ImGui::SliderFloat("Adaptacao (1/s)", &exposure_speed, 0.1f, 8.0f);
-        ImGui::SliderFloat("Exposicao min", &exposure_min, 0.01f, 2.0f, "%.3f"); // 25-5a
-        ImGui::SliderFloat("Exposicao max", &exposure_max, 0.5f, 30.0f, "%.2f");
-        ImGui::SliderFloat("Piso do ceu noturno", &night_sky_floor, 0.0f, 0.2f, "%.4f");
+        ImGui::SliderFloat("Exposicao min", &exposure_min, 0.0f, 1.0e-4f, "%.9f"); // 26-2b: ctrl+clique digita
+        ImGui::SliderFloat("Exposicao max", &exposure_max, 0.0f, 1.0e-2f, "%.7f"); // 26-2b
+        ImGui::SliderFloat("Piso do ceu noturno (cd/m2)", &night_sky_floor, 0.0f, 0.01f, "%.5f"); // 26-2b: N3.1 = 0.0002
         ImGui::SliderFloat3("Cor do ceu noturno", night_tint, 0.0f, 1.0f); // 25-8: ARTE, nao vem da fonte
         ImGui::SliderFloat("Lua: fase (elongacao)", &moon_elong_deg, 0.0f, 360.0f, "%.0f graus"); // 25-9a: 0=nova, 180=cheia
         ImGui::SliderFloat("Lua: disco (raio, graus)", &moon_disk_deg, 0.05f, 3.0f, "%.3f");
-        ImGui::SliderFloat("Lua: brilho", &moon_disk_bright, 0.0f, 60.0f, "%.1f");
-        ImGui::SliderFloat("Lua: luz na cena", &moon_scene_bright, 0.0f, 1.0f, "%.3f"); // 25-9c
+        ImGui::SliderFloat("Lua: brilho (x fisico)", &moon_disk_bright, 0.0f, 4.0f, "%.2f"); // 26-2b: 1.0 = rho/pi * E_sol
+        ImGui::SliderFloat("Lua: iluminancia (lux)", &moon_scene_bright, 0.0f, 5.0f, "%.3f lx"); // 26-2b: N2.4 -> 1.754
         ImGui::SliderFloat("Nevoa aerea (1 = fisico)", &aerial_str, 0.0f, 8.0f, "%.2f"); // 25-13
         ImGui::SliderFloat3("Lua: cor da luz", moon_tint, 0.0f, 1.0f);
         ImGui::SliderFloat("Disco do sol (raio, graus)", &sun_disk_deg, 0.05f, 3.0f, "%.4f"); // 25-7: 0.2725 = real
-        ImGui::SliderFloat("Disco do sol: brilho", &sun_disk_bright, 0.0f, 200.0f, "%.1f");
+        ImGui::SliderFloat("Disco do sol: brilho (x fisico)", &sun_disk_bright, 0.0f, 4.0f, "%.2f"); // 26-2b: 1.0 = E/Omega
         ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
         ImGui::SliderFloat("Shaft: oclusao de nuvem", &shaft_cloud_occ, 0.0f, 1.0f);
 
@@ -3169,9 +3223,14 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 float night_w = saturate(-to_sun_vec.y);
 
                 // M2.5-19C: Base lunar noturna - piso garantido de luz
-                float min_ambient_night = 0.04f;
-                effective_ambient = sun_ambient * (1.0f - night_w) + min_ambient_night * night_w;
-                effective_intensity = sun_intensity * (1.0f - night_w) + 0.1f * night_w; // Lua minima iluminando o campo
+                // M2.5-26-2b: a "Lua minima" da M2.5-19C MORREU aqui. Ela era um piso de
+                // luz sem direcao, inventado quando nao existia lua no motor. A lua real
+                // entrou na 25-9c e desde entao esse termo era uma SEGUNDA lua invisivel
+                // que nunca se punha. Com o sol em lux, ela tambem sabotava a razao
+                // sol/lua - a unica coisa que esta estacao existe para acertar.
+                // A iluminancia do sol NAO muda com a hora: o que muda e a geometria e a
+                // transmitancia, e as duas ja estao no modelo.
+                (void)night_w;
             }
             else {
                 float sy_rad = glm::radians(sun_yaw);

@@ -434,7 +434,13 @@ PSOutput PSMain(PSInput input)
     float x_disk = saturate(phi_sun / phi_disk);
     float limb = 1.0f - 0.6f * (1.0f - sqrt(saturate(1.0f - x_disk * x_disk)));
     float edge = 1.0f - smoothstep(0.88f, 1.0f, x_disk); // 1 pixel de suavidade no fat-pixel
-    float3 astro = sun_color * (limb * edge * sun_disk_bright);
+    // M2.5-26-2b: DISCO CONSERVANDO ENERGIA. sun_color ja e iluminancia (lux) com a
+    // transmitancia embutida; a radiancia do disco e L = E / Omega, com
+    // Omega = 2*pi*(1 - cos(raio angular)). O slider vira MULTIPLICADOR de arte
+    // (1.0 = fisico), entao mudar o raio por direcao de arte espalha a mesma energia
+    // numa area maior em vez de INVENTAR energia - que era o que acontecia antes.
+    float omega_sun = 2.0f * 3.14159265f * (1.0f - cos(phi_disk));
+    float3 astro = sun_color * (limb * edge * sun_disk_bright / max(omega_sun, 1e-9f));
 
     // M2.5-25-9a: DISCO DA LUA COM FASE REAL.
     // Reconstruimos a normal da esfera lunar por pixel do disco e iluminamos com
@@ -470,7 +476,10 @@ PSOutput PSMain(PSInput input)
             // A LUT vale 0 para direcoes bloqueadas pelo chao, entao o corte do
             // planeta passa a ser invisivel: o disco chega ao horizonte ja preto.
             float3 t_moon_disk = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(0.0f, to_moon.y), 0).rgb;
-            astro += t_moon_disk * ((0.11f / 3.14159265f) * lam * edge_m * moon_disk_bright);
+            // M2.5-26-2b: L = (rho/pi) * E_sol * N.L, com rho = 0.11 (bond albedo, N2.3).
+            // E_sol e a MESMA iluminancia solar que ilumina a Terra - a lua esta a mesma
+            // distancia do sol. O slider vira multiplicador de arte (1.0 = fisico).
+            astro += t_moon_disk * ((0.11f / 3.14159265f) * lam * edge_m * moon_disk_bright * sun_illum);
         }
     }
 

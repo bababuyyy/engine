@@ -258,7 +258,7 @@ PSOutput PSMain(PSInput input)
     float final_shadow = max(obj_shadow * sombra_de_nuvem, 0.12f); // piso anti-buraco-preto (dupla sombra)
 
     float3 lit_pre = sun_color * (ambient + (1.0f - ambient) * t_hl * final_shadow);
-    float3 lit = albedo * lit_pre;
+    float3 lit = albedo * (1.0f / 3.14159265f) * lit_pre; // M2.5-26-2b: BSDF lambertiana rho/pi (Listing 6)
 
     float3 view_dir = normalize(input.world_pos - ps_cam_pos);
     float back = pow(saturate(dot(view_dir, -sun_dir)), 4.0f) * input.h01;

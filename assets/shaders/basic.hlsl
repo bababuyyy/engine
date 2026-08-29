@@ -197,7 +197,12 @@ PSOutput PSMain(PSInput input)
     float final_shadow = max(obj_shadow * sombra_de_nuvem, 0.12f); // piso anti-buraco-preto (dupla sombra)
 
     float3 direct_light = sun_color * ramp * final_shadow;
-    float3 lit = albedo * sun_color * (ambient + (1.0f - ambient) * ramp * final_shadow); // teto 1.0 restaurado (sagrada, 2a reincidencia)
+    // M2.5-26-2b: sun_color agora e ILUMINANCIA (lux). Listing 6 do Frostbite:
+    //   float illuminance = sunIlluminanceInLux * saturate(dot(N, D));
+    //   luminance = BSDF(V, D, L, data) * illuminance;
+    // e a BSDF difusa lambertiana e rho/pi (Kuzminykh eq. 2.32). O /pi que faltava
+    // estava ate agora escondido dentro da escala arbitraria.
+    float3 lit = albedo * (1.0f / 3.14159265f) * sun_color * (ambient + (1.0f - ambient) * ramp * final_shadow); // teto 1.0 restaurado (sagrada, 2a reincidencia)
     float dist = length(cam_pos - input.world_pos);
     float fog_f = 1.0f - exp(-fog_density * dist);
 
