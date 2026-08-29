@@ -86,6 +86,10 @@ cbuffer SkyBlock : register(b0, space3)
     float pad_o0;
     float pad_o1;
     float pad_o2;
+    float3 to_astro;       // M2.5-25-12: astro dominante (sol de dia, lua de noite)
+    float pad_p;
+    float3 astro_sky_col;  // M2.5-25-12: cor JA multiplicada pela intensidade
+    float pad_q;
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -374,6 +378,9 @@ PSOutput PSMain(PSInput input)
     float3 ceu = (atmo_sky(dir) + night_floor * night_tint) * sky_gain;
 
     float cos_sun = dot(dir, to_sun);
+    // M2.5-25-12: as NUVENS seguem o astro dominante; o disco do sol e da lua
+    // continuam usando to_sun (o sol de verdade), como a geometria exige.
+    float cos_astro = dot(dir, to_astro);
 
     // Â§5.3 / S6: o disco do sol e composto SEPARADO. O halo fake ao redor dele
     // foi REMOVIDO - o halo agora nasce do espalhamento de Mie na marcha.
@@ -443,9 +450,9 @@ PSOutput PSMain(PSInput input)
     }
 
     // M2.5-24E-4: soma convexa normalizada + silver lining artistico via max (Nubis 2017); k=0 = fisica pura
-    float phase_base = lerp(hg_phase(cos_sun, hg_g_frontal), hg_phase(cos_sun, -0.2f), 0.5f);
-    float phase_val = max(phase_base, cloud_silver_k * hg_phase(cos_sun, 0.99f - cloud_silver_spread));
-    float sun_angular_gate = saturate(-cos_sun);
+    float phase_base = lerp(hg_phase(cos_astro, hg_g_frontal), hg_phase(cos_astro, -0.2f), 0.5f);
+    float phase_val = max(phase_base, cloud_silver_k * hg_phase(cos_astro, 0.99f - cloud_silver_spread));
+    float sun_angular_gate = saturate(-cos_astro);
 
     float T = 1.0f;
     float3 radiance = float3(0.0f, 0.0f, 0.0f);
@@ -551,14 +558,14 @@ PSOutput PSMain(PSInput input)
                     for (int j = 0; j < 4; ++j)
                     {
                         float t_s = (j == 0) ? 6.0f : ((j == 1) ? 15.0f : ((j == 2) ? 30.0f : 60.0f));
-                        float3 p_sol = p_c + to_sun * t_s;
+                        float3 p_sol = p_c + to_astro * t_s; // 25-12
                         float dim_unused;
                         float d_sol = SampleCloudDensity(p_sol, wdisp, 0.0f, false, dim_unused);
                         dens_sol += d_sol * densidade * (t_s - prev_ts);
                         prev_ts = t_s;
                     }
                     {
-                        float3 p_far = p_c + to_sun * 150.0f;
+                        float3 p_far = p_c + to_astro * 150.0f; // 25-12
                         float dim_unused2;
                         float d_far = SampleCloudDensity(p_far, wdisp, 0.0f, false, dim_unused2);
                         dens_sol += d_far * densidade * 24.0f;
@@ -571,9 +578,9 @@ PSOutput PSMain(PSInput input)
                     // (a MESMA variavel que o Nubis3 usa como base do ms_volume). Constantes de
                     // extincao 0.25 / 0.05-0.25 e janela sun_dot 0->0.9 = fonte. ms_str/g2 = retina.
                     float t_sun = exp(-dens_sol * absorcao);
-                    float k_ms = lerp(0.25f, lerp(0.25f, 0.05f, saturate(dim_profile)), saturate(cos_sun / 0.9f));
+                    float k_ms = lerp(0.25f, lerp(0.25f, 0.05f, saturate(dim_profile)), saturate(cos_astro / 0.9f));
                     float ms_vol = saturate(dim_profile) * exp(-dens_sol * absorcao * k_ms);
-                    float luz = t_sun * phase_val + ms_vol * cloud_ms_str * hg_phase(cos_sun, cloud_ms_g2);
+                    float luz = t_sun * phase_val + ms_vol * cloud_ms_str * hg_phase(cos_astro, cloud_ms_g2);
                     float powder = 1.0f - exp(-2.0f * dens_sol);
                     luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
 
@@ -586,7 +593,8 @@ PSOutput PSMain(PSInput input)
                     float amb_scat = pow(saturate(1.0f - dim_profile), 0.5f);
                     float3 ambient_term = sky_ambient_color * (amb_scat * cloud_ambient_str);
 
-                    float3 direct_term = (luz + cloud_iso_str) * sun_color * sun_intensity; // 24J-7: 3o termo isotropico (linhagem Nubis; peso = retina)
+                    // 24J-7: 3o termo isotropico Â· 25-12: cor do astro dominante (ja pre-multiplicada)
+                    float3 direct_term = (luz + cloud_iso_str) * astro_sky_col;
 
                     radiance += T * (1.0f - exp(-d * sz * absorcao)) * (cloud_color * (ambient_term + direct_term));
                     T *= exp(-d * sz * absorcao);

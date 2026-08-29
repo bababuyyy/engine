@@ -144,7 +144,9 @@ struct SkyParams {
     float sun_disk_deg;     float sun_disk_bright; float pad_m[2]; // 25-7: disco solar fisico
     float night_tint[3];    float pad_n; // 25-8: cor do piso noturno = ARTE
     float to_moon[3];       float moon_disk_deg;
-    float moon_disk_bright; float pad_o[3]; // 25-9a: a lua no ceu (336B)
+    float moon_disk_bright; float pad_o[3]; // 25-9a: a lua no ceu
+    float to_astro[3];      float pad_p;
+    float astro_sky_col[3]; float pad_q; // 25-12: a lua ilumina as nuvens (368B)
 };
 
 struct ObjIdParams {
@@ -3286,13 +3288,18 @@ int main(int argc, char* argv[]) {
             // ambiente sai de cena de dia; o crepusculo passa a tingir as nuvens
             // sozinho, pela mesma atmosfera que pinta o ceu. Mesmo ganho de unidades.
             // Interim: abaixo do horizonte a paleta antiga volta, ate a lua (S7).
-            float atmo_amb[3];
+            // M2.5-25-12 (B): o interino amb_noite_w MORREU. O ambiente das nuvens
+            // passa a ser a SOMA DAS FONTES, como a Eq. 11 do Hillaire soma sobre N
+            // luzes: hemisferio iluminado pelo sol + hemisferio iluminado pela lua +
+            // piso noturno. A paleta antiga (c_sky_amb_night, quase preta) sai de cena.
+            float atmo_amb[3], atmo_amb_lua[3];
             atmo::sky_ambient(to_sun_vec.y, atmo_amb);
-            float amb_noite_w = std::clamp(-to_sun_vec.y / 0.1f, 0.0f, 1.0f);
+            atmo::sky_ambient(to_moon_vec.y, atmo_amb_lua);
             for (int ci = 0; ci < 3; ++ci)
             {
-                float fisico = atmo_amb[ci] * sun_color_arr[ci] * effective_intensity * sky_gain;
-                sky_params.sky_ambient_color[ci] = fisico * (1.0f - amb_noite_w) + effective_sky_amb[ci] * amb_noite_w;
+                float por_sol = atmo_amb[ci] * sun_color_arr[ci] * effective_intensity;
+                float por_lua = atmo_amb_lua[ci] * moon_tint[ci] * I_lua;
+                sky_params.sky_ambient_color[ci] = (por_sol + por_lua + night_sky_floor * night_tint[ci]) * sky_gain;
             }
 
             // M2.5-25-4: EXPOSICAO AUTOMATICA ANALITICA.
@@ -3355,6 +3362,22 @@ int main(int argc, char* argv[]) {
             sky_params.to_moon[2] = to_moon_vec.z; sky_params.moon_disk_deg = moon_disk_deg;
             sky_params.moon_disk_bright = moon_disk_bright;
             sky_params.pad_o[0] = 0.0f; sky_params.pad_o[1] = 0.0f; sky_params.pad_o[2] = 0.0f;
+
+            // M2.5-25-12 (A): o ASTRO DOMINANTE tambem ilumina as nuvens - o mesmo
+            // que a cena usa desde a 25-9c, entao chao e nuvem concordam sobre de onde
+            // vem a luz. De dia isto e IDENTICO ao que havia: to_sun e o produto
+            // sun_color * sun_intensity, que era o que o direct_term ja multiplicava.
+            sky_params.to_astro[0] = astro_dir.x;
+            sky_params.to_astro[1] = astro_dir.y;
+            sky_params.to_astro[2] = astro_dir.z;
+            sky_params.pad_p = 0.0f;
+            for (int ci = 0; ci < 3; ++ci)
+            {
+                float por_sol = sun_color_arr[ci] * (&t_sol.x)[ci] * effective_intensity * effective_intensity;
+                float por_lua = moon_tint[ci] * (&t_moon.x)[ci] * I_lua;
+                sky_params.astro_sky_col[ci] = lua_manda ? por_lua : por_sol;
+            }
+            sky_params.pad_q = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
