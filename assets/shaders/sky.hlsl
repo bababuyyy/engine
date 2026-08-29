@@ -80,6 +80,12 @@ cbuffer SkyBlock : register(b0, space3)
     float pad_m1;
     float3 night_tint;     // M2.5-25-8: cor do piso noturno (ARTE)
     float pad_n;
+    float3 to_moon;        // M2.5-25-9a
+    float moon_disk_deg;
+    float moon_disk_bright;
+    float pad_o0;
+    float pad_o1;
+    float pad_o2;
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -383,6 +389,32 @@ PSOutput PSMain(PSInput input)
     float limb = 1.0f - 0.6f * (1.0f - sqrt(saturate(1.0f - x_disk * x_disk)));
     float edge = 1.0f - smoothstep(0.88f, 1.0f, x_disk); // 1 pixel de suavidade no fat-pixel
     float3 astro = sun_color * (limb * edge * sun_disk_bright);
+
+    // M2.5-25-9a: DISCO DA LUA COM FASE REAL.
+    // Reconstruimos a normal da esfera lunar por pixel do disco e iluminamos com
+    // Lambert (rho = 0.11, bond albedo da tese CosmoScout VR, secao 3.3.2 -
+    // "An Ideal Diffuse Moon"). A fase (crescente/gibosa) EMERGE da geometria:
+    // nao ha mascara nem textura de fase, so N.L contra a direcao do sol.
+    {
+        float cos_moon = dot(dir, to_moon);
+        float phi_m = acos(clamp(cos_moon, -1.0f, 1.0f));
+        float phi_disk_m = radians(max(moon_disk_deg, 1e-4f));
+        if (phi_m < phi_disk_m)
+        {
+            // base ortonormal no plano do disco
+            float3 aux = (abs(to_moon.y) < 0.99f) ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+            float3 rgt = normalize(cross(aux, to_moon));
+            float3 upv = cross(to_moon, rgt);
+            // deslocamento angular normalizado para o disco unitario
+            float2 duv = float2(dot(dir, rgt), dot(dir, upv)) / sin(phi_disk_m);
+            float zz = sqrt(saturate(1.0f - dot(duv, duv)));
+            // normal da superficie lunar (no centro do disco aponta para nos)
+            float3 Nm = rgt * duv.x + upv * duv.y - to_moon * zz;
+            float lam = saturate(dot(Nm, to_sun));           // a fase, por geometria
+            float edge_m = 1.0f - smoothstep(0.88f, 1.0f, length(duv));
+            astro += (0.11f / 3.14159265f) * lam * edge_m * moon_disk_bright;
+        }
+    }
 
     // Vista de depuracao das LUTs (salvaguarda de atribuicao desta estacao)
     if (atmo_debug > 0.5f)

@@ -142,7 +142,9 @@ struct SkyParams {
     float cloud_ms_g2;      float cloud_iso_str; float sky_gain;  float atmo_debug; // 24J-3 + 24J-7 + 25-2
     float sun_illum[3];     float night_floor; // 25-2 + 25-5a
     float sun_disk_deg;     float sun_disk_bright; float pad_m[2]; // 25-7: disco solar fisico
-    float night_tint[3];    float pad_n; // 25-8: cor do piso noturno = ARTE (304B)
+    float night_tint[3];    float pad_n; // 25-8: cor do piso noturno = ARTE
+    float to_moon[3];       float moon_disk_deg;
+    float moon_disk_bright; float pad_o[3]; // 25-9a: a lua no ceu (336B)
 };
 
 struct ObjIdParams {
@@ -342,6 +344,11 @@ float sun_disk_bright = 30.0f;
 // M2.5-25-8: cor do piso noturno. NAO vem da fonte (ver comentario no sky.hlsl):
 // default azul-acinzentado, que e como o olho adaptado ao escuro ve o ceu sem lua.
 float night_tint[3] = { 0.55f, 0.66f, 1.00f };
+// M2.5-25-9a: a lua. A ELONGACAO (angulo Sol-Lua visto daqui) E a fase: 0 = nova,
+// 180 = cheia, 90/270 = quartos. O ciclo real leva ~29,5 dias; por ora e slider.
+float moon_elong_deg = 180.0f;   // cheia
+float moon_disk_deg = 0.26f;     // raio angular real (diametro ~0.52 graus)
+float moon_disk_bright = 8.0f;   // ARTE (nossas unidades sao arbitrarias)
 float exposure_auto_cur = 1.0f;  // valor suavizado corrente (nao persiste: converge sozinho)
 float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
 
@@ -437,6 +444,9 @@ auto save_tuning = []() {
     f << "night_tint_r=" << night_tint[0] << "\n";
     f << "night_tint_g=" << night_tint[1] << "\n";
     f << "night_tint_b=" << night_tint[2] << "\n";
+    f << "moon_elong_deg=" << moon_elong_deg << "\n";
+    f << "moon_disk_deg=" << moon_disk_deg << "\n";
+    f << "moon_disk_bright=" << moon_disk_bright << "\n";
     f << "shaft_cloud_occ=" << shaft_cloud_occ << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
@@ -541,6 +551,9 @@ auto load_tuning = []() {
             else if (key == "night_tint_r") night_tint[0] = std::stof(val);
             else if (key == "night_tint_g") night_tint[1] = std::stof(val);
             else if (key == "night_tint_b") night_tint[2] = std::stof(val);
+            else if (key == "moon_elong_deg") moon_elong_deg = std::stof(val);
+            else if (key == "moon_disk_deg") moon_disk_deg = std::stof(val);
+            else if (key == "moon_disk_bright") moon_disk_bright = std::stof(val);
             else if (key == "shaft_cloud_occ") shaft_cloud_occ = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
@@ -2817,6 +2830,9 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Exposicao max", &exposure_max, 0.5f, 30.0f, "%.2f");
         ImGui::SliderFloat("Piso do ceu noturno", &night_sky_floor, 0.0f, 0.2f, "%.4f");
         ImGui::SliderFloat3("Cor do ceu noturno", night_tint, 0.0f, 1.0f); // 25-8: ARTE, nao vem da fonte
+        ImGui::SliderFloat("Lua: fase (elongacao)", &moon_elong_deg, 0.0f, 360.0f, "%.0f graus"); // 25-9a: 0=nova, 180=cheia
+        ImGui::SliderFloat("Lua: disco (raio, graus)", &moon_disk_deg, 0.05f, 3.0f, "%.3f");
+        ImGui::SliderFloat("Lua: brilho", &moon_disk_bright, 0.0f, 60.0f, "%.1f");
         ImGui::SliderFloat("Disco do sol (raio, graus)", &sun_disk_deg, 0.05f, 3.0f, "%.4f"); // 25-7: 0.2725 = real
         ImGui::SliderFloat("Disco do sol: brilho", &sun_disk_bright, 0.0f, 200.0f, "%.1f");
         ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
@@ -2995,6 +3011,7 @@ int main(int argc, char* argv[]) {
             SDL_PushGPUVertexUniformData(cmd_buffer, 0, glm::value_ptr(mvp), sizeof(mvp));
 
             glm::vec3 to_sun_vec;
+            glm::vec3 to_moon_vec; // M2.5-25-9a
             float effective_intensity = sun_intensity;
             glm::vec3 c_zenith, c_horizon;
             float effective_ambient = sun_ambient;
@@ -3009,6 +3026,17 @@ int main(int argc, char* argv[]) {
                     std::cos(theta),
                     std::sin(theta) * std::cos(phi),
                     std::sin(theta) * std::sin(phi)
+                ));
+
+                // M2.5-25-9a: a lua percorre a MESMA circunferencia do sol, deslocada da
+                // elongacao. Isso reproduz a fase por construcao E faz a lua cheia nascer no
+                // poente, como na natureza. Simplificacao declarada: a orbita lunar real e
+                // inclinada ~5 graus em relacao a eclitica; usamos a mesma inclinacao do arco.
+                float theta_moon = theta + glm::radians(moon_elong_deg);
+                to_moon_vec = glm::normalize(glm::vec3(
+                    std::cos(theta_moon),
+                    std::sin(theta_moon) * std::cos(phi),
+                    std::sin(theta_moon) * std::sin(phi)
                 ));
 
                 float sol_fator = glm::smoothstep(-0.05f, 0.25f, to_sun_vec.y);
@@ -3043,6 +3071,7 @@ int main(int argc, char* argv[]) {
                     std::cos(sp_rad) * std::cos(sy_rad)
                 ));
 
+                to_moon_vec = -to_sun_vec; // 25-9a: sem orbita no modo manual, lua cheia oposta
                 c_zenith = glm::vec3(0.1f, 0.4f, 0.8f);
                 c_horizon = glm::vec3(0.4f, 0.7f, 0.9f);
                 effective_ambient = sun_ambient;
@@ -3277,6 +3306,10 @@ int main(int argc, char* argv[]) {
             sky_params.pad_m[0] = 0.0f; sky_params.pad_m[1] = 0.0f;
             sky_params.night_tint[0] = night_tint[0]; sky_params.night_tint[1] = night_tint[1];
             sky_params.night_tint[2] = night_tint[2]; sky_params.pad_n = 0.0f;
+            sky_params.to_moon[0] = to_moon_vec.x; sky_params.to_moon[1] = to_moon_vec.y;
+            sky_params.to_moon[2] = to_moon_vec.z; sky_params.moon_disk_deg = moon_disk_deg;
+            sky_params.moon_disk_bright = moon_disk_bright;
+            sky_params.pad_o[0] = 0.0f; sky_params.pad_o[1] = 0.0f; sky_params.pad_o[2] = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
