@@ -3375,9 +3375,21 @@ int main(int argc, char* argv[]) {
             sun_params.toon_soft = toon_soft;
             sun_params.wind_dir[0] = cos(w_rad);
             sun_params.wind_dir[1] = sin(w_rad);
-            sun_params.fog_color[0] = c_horizon.x;
-            sun_params.fog_color[1] = c_horizon.y;
-            sun_params.fog_color[2] = c_horizon.z;
+            // M2.5-25-10: a nevoa da cena bebe do CEU FISICO. A paleta hardcoded do
+            // crepusculo morre aqui: os pesos dela davam 50% de laranja de poente com
+            // o sol 30 graus ABAIXO do horizonte, e lavavam o meio-dia de azul.
+            // Mesma formula do ceu: fisico + piso noturno, tudo vezes o ganho.
+            // ESCOPO: corrige a COR. A integracao por distancia (perspectiva aerea,
+            // Hillaire 5.4) continua na fila.
+            {
+                float atmo_hz[3];
+                atmo::sky_horizon(to_sun_vec.y, atmo_hz);
+                for (int ci = 0; ci < 3; ++ci)
+                {
+                    float fisico = atmo_hz[ci] * sun_color_arr[ci] * effective_intensity;
+                    sun_params.fog_color[ci] = (fisico + night_sky_floor * night_tint[ci]) * sky_gain;
+                }
+            }
             sun_params.fog_density = fog_density;
             sun_params.cloud_time = (float)(sim_tick * DT) * cloud_speed; // sombra anda NA velocidade da nuvem
             sun_params.cloud_cover = draw_clouds ? cloud_cobertura : -2.0f;

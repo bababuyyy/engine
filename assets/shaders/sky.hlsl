@@ -615,7 +615,10 @@ PSOutput PSMain(PSInput input)
 
     float fog_air = saturate(cloud_dist / (cap * 1.2f)) * 0.85f;
 
-    float3 final_color = lerp(radiance, horizon_color * (1.0f - T), fog_air) + T * (ceu + astro);
+    // M2.5-25-10: o desbotamento das nuvens ao longe usa a cor FISICA da atmosfera
+    // NAQUELA DIRECAO (ja computada neste pixel), no lugar da paleta hardcoded.
+    // Correto por direcao e de graca - melhor que a cor unica que estava aqui.
+    float3 final_color = lerp(radiance, ceu * (1.0f - T), fog_air) + T * (ceu + astro);
     final_color = min(max(final_color, 0.0f), 8.0f);
 
     PSOutput output;

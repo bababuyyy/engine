@@ -37,4 +37,13 @@ std::vector<uint8_t> generate_multiscatter_lut();
 // de uma atmosfera de 100 km, entao a variacao por altura e irrelevante aqui.
 void sky_ambient(float sun_cos_zenith, float out_rgb[3]);
 
+// M2.5-25-10: cor FISICA da atmosfera junto ao horizonte, para a nevoa da cena.
+// Media de 8 azimutes a ~4 graus de elevacao - onde a nevoa efetivamente vive.
+// Substitui a paleta hardcoded do crepusculo, cujos pesos davam 50% de laranja
+// de poente com o sol 30 graus ABAIXO do horizonte. Valor UNITLESS, como o
+// sky_ambient: quem chama multiplica pela iluminancia do sol e pelo ganho.
+// A perspectiva aerea completa (Hillaire 5.4, LUT 32^3) continua na fila; isto
+// corrige a COR, nao a integracao por distancia.
+void sky_horizon(float sun_cos_zenith, float out_rgb[3]);
+
 } // namespace atmo

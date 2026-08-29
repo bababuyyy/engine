@@ -420,4 +420,27 @@ void sky_ambient(float sun_cos_zenith, float out_rgb[3])
     out_rgb[2] = acc.z;
 }
 
+void sky_horizon(float sun_cos_zenith, float out_rgb[3])
+{
+    ensure_baked();
+
+    float sc = std::clamp(sun_cos_zenith, -1.0f, 1.0f);
+    V3 sun(std::sqrt(std::max(0.0f, 1.0f - sc * sc)), sc, 0.0f);
+
+    const int kAz = 8;
+    const float el = 0.07f;                 // ~4 graus de elevacao
+    const float hr = std::sqrt(std::max(0.0f, 1.0f - el * el));
+    V3 acc(0.0f);
+    for (int k = 0; k < kAz; ++k)
+    {
+        float a = (k + 0.5f) * 2.0f * kPi / (float)kAz;
+        acc += sky_radiance(V3(std::cos(a) * hr, el, std::sin(a) * hr), sun);
+    }
+    acc = acc * (1.0f / (float)kAz);
+
+    out_rgb[0] = acc.x;
+    out_rgb[1] = acc.y;
+    out_rgb[2] = acc.z;
+}
+
 } // namespace atmo
