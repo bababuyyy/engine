@@ -189,7 +189,15 @@ float4 PSMain(PSInput input) : SV_Target0
     // do buffer de 8 bits, e "meio degrau" so existe no espaco de tela. Aplicado em
     // linear (como estava), perto do preto ele valia ~6,5 niveis de 255 - era o
     // granulado que aparecia so nas areas escuras.
-    float dth = frac(sin(dot(input.uv, float2(12.9898f, 78.233f))) * 43758.5453f);
+    // M2.5-25-U6c: o dither vive na grade do FAT PIXEL, nao na do monitor.
+    // Este passe roda na resolucao da JANELA e amostra a cena de tex_size (640x360)
+    // pelo upscale sharp-bilinear. Dentro de um mesmo fat pixel a cor e constante,
+    // entao um dither por pixel de tela nao quebra banda nenhuma - ele so deposita
+    // ruido por cima do bloco, e fica preso na tela quando a camera anda.
+    // A banda acontece ENTRE texels da cena; e la que o dither precisa variar.
+    // Precedente da casa: 24J-2c - "o jitter cobre o quantum" que ele disfarca.
+    float2 dpx = floor(input.uv * tex_size);
+    float dth = frac(sin(dot(dpx, float2(12.9898f, 78.233f))) * 43758.5453f);
     final_color.rgb += (dth - 0.5f) / 255.0f;
     return final_color;
 }
