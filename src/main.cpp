@@ -140,7 +140,8 @@ struct SkyParams {
     float silver_k;         float silver_spread;    float clima_cov_teto;   float clima_type_teto; // 24G-3: tetos do clima (ex-pads)
     float curvatura;        float fade_ini;         float passo_far; float cloud_ms_str; // 24G-6 + 24J-3
     float cloud_ms_g2;      float cloud_iso_str; float sky_gain;  float atmo_debug; // 24J-3 + 24J-7 + 25-2
-    float sun_illum[3];     float night_floor; // 25-2 + 25-5a: piso do ceu noturno (272B)
+    float sun_illum[3];     float night_floor; // 25-2 + 25-5a
+    float sun_disk_deg;     float sun_disk_bright; float pad_m[2]; // 25-7: disco solar fisico (288B)
 };
 
 struct ObjIdParams {
@@ -333,6 +334,10 @@ float exposure_speed = 2.0f;     // velocidade da adaptacao do "olho" (1/s)
 float exposure_min = 0.05f;
 float exposure_max = 8.0f;
 float night_sky_floor = 0.02f;   // forca do piso noturno (airglow+zodiacal+estelar); tom vem da fonte
+// M2.5-25-7: disco solar. O TAMANHO e fisico (0.2725 graus de raio, real); o BRILHO e arte
+// (o fisico seria E/Omega, ~15.000x - impossivel nas nossas unidades arbitrarias por ora).
+float sun_disk_deg = 0.2725f;
+float sun_disk_bright = 30.0f;
 float exposure_auto_cur = 1.0f;  // valor suavizado corrente (nao persiste: converge sozinho)
 float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
 
@@ -423,6 +428,8 @@ auto save_tuning = []() {
     f << "exposure_min=" << exposure_min << "\n";
     f << "exposure_max=" << exposure_max << "\n";
     f << "night_sky_floor=" << night_sky_floor << "\n";
+    f << "sun_disk_deg=" << sun_disk_deg << "\n";
+    f << "sun_disk_bright=" << sun_disk_bright << "\n";
     f << "shaft_cloud_occ=" << shaft_cloud_occ << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
@@ -522,6 +529,8 @@ auto load_tuning = []() {
             else if (key == "exposure_min") exposure_min = std::stof(val);
             else if (key == "exposure_max") exposure_max = std::stof(val);
             else if (key == "night_sky_floor") night_sky_floor = std::stof(val);
+            else if (key == "sun_disk_deg") sun_disk_deg = std::stof(val);
+            else if (key == "sun_disk_bright") sun_disk_bright = std::stof(val);
             else if (key == "shaft_cloud_occ") shaft_cloud_occ = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
@@ -2797,6 +2806,8 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Exposicao min", &exposure_min, 0.01f, 2.0f, "%.3f"); // 25-5a
         ImGui::SliderFloat("Exposicao max", &exposure_max, 0.5f, 30.0f, "%.2f");
         ImGui::SliderFloat("Piso do ceu noturno", &night_sky_floor, 0.0f, 0.2f, "%.4f");
+        ImGui::SliderFloat("Disco do sol (raio, graus)", &sun_disk_deg, 0.05f, 3.0f, "%.4f"); // 25-7: 0.2725 = real
+        ImGui::SliderFloat("Disco do sol: brilho", &sun_disk_bright, 0.0f, 200.0f, "%.1f");
         ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
         ImGui::SliderFloat("Shaft: oclusao de nuvem", &shaft_cloud_occ, 0.0f, 1.0f);
 
@@ -3251,6 +3262,8 @@ int main(int argc, char* argv[]) {
             sky_params.sun_illum[0] = sun_color_arr[0] * effective_intensity;
             sky_params.sun_illum[1] = sun_color_arr[1] * effective_intensity;
             sky_params.sun_illum[2] = sun_color_arr[2] * effective_intensity; sky_params.night_floor = night_sky_floor;
+            sky_params.sun_disk_deg = sun_disk_deg; sky_params.sun_disk_bright = sun_disk_bright;
+            sky_params.pad_m[0] = 0.0f; sky_params.pad_m[1] = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;

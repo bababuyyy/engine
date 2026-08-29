@@ -74,6 +74,10 @@ cbuffer SkyBlock : register(b0, space3)
     float atmo_debug;    // M2.5-25-2: 0=off, 1=transmitancia, 2=multi-scattering
     float3 sun_illum;    // M2.5-25-2: iluminancia CRUA (offset 256 - float3 alinhado)
     float night_floor;   // M2.5-25-5a: piso do ceu noturno (ocupa o pad_l)
+    float sun_disk_deg;    // M2.5-25-7: raio angular do disco (graus); 0.2725 = real
+    float sun_disk_bright; // M2.5-25-7: brilho do disco (arte)
+    float pad_m0;
+    float pad_m1;
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -361,9 +365,18 @@ PSOutput PSMain(PSInput input)
 
     // Â§5.3 / S6: o disco do sol e composto SEPARADO. O halo fake ao redor dele
     // foi REMOVIDO - o halo agora nasce do espalhamento de Mie na marcha.
-    float sun_core = smoothstep(0.9985f, 0.9995f, cos_sun);
-    sun_core = pow(sun_core, 0.6f);
-    float3 astro = sun_color * sun_core * 0.75f;
+    // M2.5-25-7: DISCO SOLAR FISICO.
+    // Raio angular real = 0.2725 graus (diametro 0.545) - fornada N1.1. O disco
+    // anterior tinha ~1.8-3.1 graus e nenhum perfil de brilho: lia como esfera chapada.
+    // Escurecimento de borda (Hestroffer & Magnan 1998, verbatim):
+    //   L(phi) = L(0) * [1 - u*(1 - sqrt((phi_sol^2 - phi^2)/phi_sol^2))],  u = 0.6
+    // A transmitancia atmosferica ja esta embutida: sun_color carrega t_sol (25-1).
+    float phi_sun = acos(clamp(cos_sun, -1.0f, 1.0f));
+    float phi_disk = radians(max(sun_disk_deg, 1e-4f));
+    float x_disk = saturate(phi_sun / phi_disk);
+    float limb = 1.0f - 0.6f * (1.0f - sqrt(saturate(1.0f - x_disk * x_disk)));
+    float edge = 1.0f - smoothstep(0.88f, 1.0f, x_disk); // 1 pixel de suavidade no fat-pixel
+    float3 astro = sun_color * (limb * edge * sun_disk_bright);
 
     // Vista de depuracao das LUTs (salvaguarda de atribuicao desta estacao)
     if (atmo_debug > 0.5f)
