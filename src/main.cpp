@@ -349,6 +349,10 @@ float night_tint[3] = { 0.55f, 0.66f, 1.00f };
 float moon_elong_deg = 180.0f;   // cheia
 float moon_disk_deg = 0.26f;     // raio angular real (diametro ~0.52 graus)
 float moon_disk_bright = 8.0f;   // ARTE (nossas unidades sao arbitrarias)
+// M2.5-25-9c: a luz que a lua joga na CENA. ARTE: a razao fisica real entre lua
+// cheia e sol e ~1/400.000 - nenhum jogo usa isso literalmente.
+float moon_scene_bright = 0.12f;
+float moon_tint[3] = { 0.80f, 0.88f, 1.00f }; // luar levemente frio (arte)
 float exposure_auto_cur = 1.0f;  // valor suavizado corrente (nao persiste: converge sozinho)
 float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
 
@@ -447,6 +451,10 @@ auto save_tuning = []() {
     f << "moon_elong_deg=" << moon_elong_deg << "\n";
     f << "moon_disk_deg=" << moon_disk_deg << "\n";
     f << "moon_disk_bright=" << moon_disk_bright << "\n";
+    f << "moon_scene_bright=" << moon_scene_bright << "\n";
+    f << "moon_tint_r=" << moon_tint[0] << "\n";
+    f << "moon_tint_g=" << moon_tint[1] << "\n";
+    f << "moon_tint_b=" << moon_tint[2] << "\n";
     f << "shaft_cloud_occ=" << shaft_cloud_occ << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
@@ -554,6 +562,10 @@ auto load_tuning = []() {
             else if (key == "moon_elong_deg") moon_elong_deg = std::stof(val);
             else if (key == "moon_disk_deg") moon_disk_deg = std::stof(val);
             else if (key == "moon_disk_bright") moon_disk_bright = std::stof(val);
+            else if (key == "moon_scene_bright") moon_scene_bright = std::stof(val);
+            else if (key == "moon_tint_r") moon_tint[0] = std::stof(val);
+            else if (key == "moon_tint_g") moon_tint[1] = std::stof(val);
+            else if (key == "moon_tint_b") moon_tint[2] = std::stof(val);
             else if (key == "shaft_cloud_occ") shaft_cloud_occ = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
@@ -2833,6 +2845,8 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Lua: fase (elongacao)", &moon_elong_deg, 0.0f, 360.0f, "%.0f graus"); // 25-9a: 0=nova, 180=cheia
         ImGui::SliderFloat("Lua: disco (raio, graus)", &moon_disk_deg, 0.05f, 3.0f, "%.3f");
         ImGui::SliderFloat("Lua: brilho", &moon_disk_bright, 0.0f, 60.0f, "%.1f");
+        ImGui::SliderFloat("Lua: luz na cena", &moon_scene_bright, 0.0f, 1.0f, "%.3f"); // 25-9c
+        ImGui::SliderFloat3("Lua: cor da luz", moon_tint, 0.0f, 1.0f);
         ImGui::SliderFloat("Disco do sol (raio, graus)", &sun_disk_deg, 0.05f, 3.0f, "%.4f"); // 25-7: 0.2725 = real
         ImGui::SliderFloat("Disco do sol: brilho", &sun_disk_bright, 0.0f, 200.0f, "%.1f");
         ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
@@ -3084,7 +3098,37 @@ int main(int argc, char* argv[]) {
                 float noite_w = std::clamp(-to_sun_vec.y / 0.1f, 0.0f, 1.0f);
                 t_sol = t_sol * (1.0f - noite_w) + glm::vec3(noite_w); // "Lua minima" continua neutra
             }
-            glm::vec3 s_dir = -to_sun_vec;
+            // ================= M2.5-25-9c: O ASTRO DOMINANTE =================
+            // A luz direcional da CENA deixa de ser sempre o sol. Sol enquanto ele
+            // esta no ceu; lua quando ela domina. Direcao, cor, intensidade e o
+            // SHADOW MAP acompanham - o luar projeta sombra na direcao dela.
+            // Hillaire 2020 Â§3 trata sol e lua como N luzes direcionais; aqui a lua
+            // SUBSTITUI em vez de somar, porque os shaders da cena tem uma luz so.
+            // Simplificacao declarada: as duas quase nunca dominam ao mesmo tempo.
+            glm::vec3 t_moon = sun_transmittance(to_moon_vec.y); // o luar tambem avermelha no horizonte
+
+            // Lei de fase da esfera lambertiana: f(a) = (sin a + (pi - a) cos a) / pi
+            // a = angulo de fase (Sol-Lua-observador) = 180 - elongacao.
+            // Cheia -> 1 Â· quarto -> 1/pi ~ 0.318 Â· nova -> 0.
+            // A Lua real desvia disto (Hapke); a tese CosmoScout chama esta forma de
+            // "Ideal Diffuse Moon" e a documenta como alternativa valida. DECLARADO.
+            float elong = std::acos(std::clamp(glm::dot(to_sun_vec, to_moon_vec), -1.0f, 1.0f));
+            float fase_a = 3.14159265f - elong;
+            float moon_phase_f = (std::sin(fase_a) + (3.14159265f - fase_a) * std::cos(fase_a)) / 3.14159265f;
+
+            float sun_up_w  = glm::smoothstep(-0.06f, 0.03f, to_sun_vec.y);
+            float moon_up_w = glm::smoothstep(-0.02f, 0.06f, to_moon_vec.y);
+
+            float I_sol = sun_intensity * sun_up_w;
+            float I_lua = moon_scene_bright * moon_phase_f * moon_up_w * (1.0f - sun_up_w);
+
+            bool lua_manda = (I_lua > I_sol);
+            glm::vec3 astro_dir = lua_manda ? to_moon_vec : to_sun_vec;
+            glm::vec3 astro_col = lua_manda
+                ? glm::vec3(moon_tint[0], moon_tint[1], moon_tint[2]) * t_moon * I_lua
+                : glm::vec3(sun_color_arr[0], sun_color_arr[1], sun_color_arr[2]) * t_sol * I_sol;
+
+            glm::vec3 s_dir = -astro_dir;
 
             glm::vec3 c_cloud_day(0.95f, 0.95f, 0.95f);
             glm::vec3 c_cloud_sunset(0.95f, 0.85f, 0.70f);
@@ -3104,10 +3148,10 @@ int main(int argc, char* argv[]) {
 
             // M2.5-24: Computacao da Matriz Orto p/ Sombra
             glm::mat4 light_vp = glm::mat4(1.0f);
-            if (draw_shadows && to_sun_vec.y > 0.01f) {
+            if (draw_shadows && astro_dir.y > 0.01f) { // 25-9c: a lua tambem projeta sombra
                 float ortho_size = 340.0f; // cobre a geometria de teste em x=300
                 glm::mat4 light_proj = glm::orthoLH_ZO(-ortho_size, ortho_size, -ortho_size, ortho_size, -300.0f, 300.0f);
-                glm::mat4 light_view = glm::lookAtLH(to_sun_vec * 200.0f, glm::vec3(0.0f), glm::vec3(0, 1, 0));
+                glm::mat4 light_view = glm::lookAtLH(astro_dir * 200.0f, glm::vec3(0.0f), glm::vec3(0, 1, 0)); // 25-9c
                 light_vp = light_proj * light_view;
 
                 glm::vec3 origin_ndc = glm::vec3(light_vp * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
@@ -3320,9 +3364,10 @@ int main(int argc, char* argv[]) {
             // as nuvens e os shafts ja usavam. A "Lua minima" (0.1 a noite, calculada
             // logo acima) era jogada fora aqui - a cena rodava com a intensidade solar
             // de meio-dia durante a madrugada.
-            sun_params.color[0] = sun_color_arr[0] * t_sol.x * effective_intensity;
-            sun_params.color[1] = sun_color_arr[1] * t_sol.y * effective_intensity;
-            sun_params.color[2] = sun_color_arr[2] * t_sol.z * effective_intensity;
+            // M2.5-25-9c: a cor/intensidade vem do ASTRO DOMINANTE (sol ou lua)
+            sun_params.color[0] = astro_col.r;
+            sun_params.color[1] = astro_col.g;
+            sun_params.color[2] = astro_col.b;
             sun_params.cam_pos[0] = cam_pos.x;
             sun_params.cam_pos[1] = cam_pos.y;
             sun_params.cam_pos[2] = cam_pos.z;
