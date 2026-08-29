@@ -3093,11 +3093,12 @@ int main(int argc, char* argv[]) {
 
             // A luz vem DO sol PARA O CHAO (convencao da iluminacao do cenario mantida)
             // M2.5-25-1: sol fisico por hora do dia (Hillaire 2020) + interim noturno neutro (ate a lua do S7)
+            // M2.5-25-11: transmitancia do sol PURAMENTE FISICA.
+            // O interino da 25-1 (que empurrava t_sol para branco puro conforme o sol
+            // afundava) foi REMOVIDO: ele era o inverso da fisica e produzia um degrau
+            // de ~11x na iluminacao da cena bem no nascer/poente. Ele existia so para
+            // segurar a noite ate a lua existir - e a lua chegou na 25-9c.
             glm::vec3 t_sol = sun_transmittance(to_sun_vec.y);
-            {
-                float noite_w = std::clamp(-to_sun_vec.y / 0.1f, 0.0f, 1.0f);
-                t_sol = t_sol * (1.0f - noite_w) + glm::vec3(noite_w); // "Lua minima" continua neutra
-            }
             // ================= M2.5-25-9c: O ASTRO DOMINANTE =================
             // A luz direcional da CENA deixa de ser sempre o sol. Sol enquanto ele
             // esta no ceu; lua quando ela domina. Direcao, cor, intensidade e o
