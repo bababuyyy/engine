@@ -3032,7 +3032,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::SliderFloat("Nevoa aerea (1 = fisico)", &aerial_str, 0.0f, 8.0f, "%.2f"); // 25-13
         ImGui::SliderFloat3("Lua: cor da luz", moon_tint, 0.0f, 1.0f);
         ImGui::SliderFloat("Disco do sol (raio, graus)", &sun_disk_deg, 0.05f, 3.0f, "%.4f"); // 25-7: 0.2725 = real
-        ImGui::SliderFloat("Disco do sol: brilho (x fisico)", &sun_disk_bright, 0.0f, 4.0f, "%.2f"); // 26-2b: 1.0 = E/Omega
+        ImGui::SliderFloat("Disco do sol: brilho (x fisico)", &sun_disk_bright, 0.0f, 1.0f, "%.4f"); // 26-2d: %.2f mostrava 0.005 como "0.00"
         ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
         ImGui::SliderFloat("Shaft: oclusao de nuvem", &shaft_cloud_occ, 0.0f, 1.0f);
 
@@ -3550,7 +3550,16 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             sky_params.pad_p = 0.0f;
             for (int ci = 0; ci < 3; ++ci)
             {
-                float por_sol = sun_color_arr[ci] * (&t_sol.x)[ci] * effective_intensity * effective_intensity;
+                // M2.5-26-2d: O QUADRADO. Esta linha multiplicava por effective_intensity
+                // DUAS VEZES desde a 25-12. Com a regua antiga (intensidade ~1,2) o erro
+                // valia 1,44x - some dentro de qualquer calibracao de nuvem e ninguem ve.
+                // Com o sol em lux passou a valer 116.216x, e a luz direta das nuvens
+                // virou 1,35x10^10 cd/m2. Como astro_sky_col so usa por_sol quando o SOL
+                // manda, o estrago aparecia exatamente ao nascer do sol.
+                // Licao: bug latente escondido por um valor perto de 1. Trocar a regua
+                // nao criou o defeito - revelou. Vale reler as outras linhas de luz com
+                // esse olho antes de fechar a temporada.
+                float por_sol = sun_color_arr[ci] * (&t_sol.x)[ci] * effective_intensity;
                 float por_lua = moon_tint[ci] * (&t_moon.x)[ci] * I_lua;
                 sky_params.astro_sky_col[ci] = lua_manda ? por_lua : por_sol;
             }
