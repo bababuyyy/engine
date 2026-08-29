@@ -369,6 +369,20 @@ float exposure_speed = 2.0f;     // velocidade da adaptacao do "olho" (1/s)
 // ordem de grandeza junto. Ctrl+clique no slider digita o valor exato.
 float exposure_min = 1.0e-7f;
 float exposure_max = 1.0e-3f;
+// M2.5-26-2c: OS LIMITES DA EXPOSICAO PASSAM A SER EV100.
+// Com o sol em lux, a exposicao de meio-dia vale 2,6x10^-5 e a de noite de lua
+// cheia vale 1,71 - SsEIS ORDENS DE GRANDEZA de amplitude. Nenhum slider linear
+// expressa isso, e foi exatamente por isso que a 26-2b quebrou: o meu teto de
+// 1x10^-3 mordia a noite por 10,7 stops.
+// A fonte ja parametriza isso, Listing 28 (Frostbite 5.1):
+//     exposure = convertEV100toExposure(EV100) = 1 / (1.2 * 2^EV100)
+// EV alto = pouca exposicao (dia). EV baixo = muita exposicao (noite).
+// Logo:  exposure_max <-> ev_min   e   exposure_min <-> ev_max.
+// Referencias uteis (Tabela 7): EV100 15 = 4.096 cd/m2 = o meio-dia do Sunny 16.
+// Lua cheia neste motor da Lavg ~ 0,061 cd/m2, que e EV100 ~ -1.
+// Com ev_min = 4, a noite fica ~5 stops abaixo do meio-dia: escura e legivel.
+float ev_min = 4.0f;    // limite do ESCURO: quanto o olho pode abrir a noite
+float ev_max = 20.0f;   // limite do CLARO: quanto pode fechar em luz forte
 // M2.5-26-2b: agora em cd/m2 DE VERDADE. Item N3.1 da checklist da noite, com tres
 // fontes convergentes: o ceu sem lua vale 2x10^-4 cd/m2 (22,0 mag/arcsec2). Ate a
 // 25-U6 esse numero era inexprimivel - o passo minimo do slider valia 66.000x o
@@ -380,7 +394,18 @@ float sun_disk_deg = 0.2725f;
 // M2.5-26-2b: MULTIPLICADOR sobre a radiancia que conserva energia, L = E / Omega.
 // 1.0 = fisico. Mudar o raio do disco por direcao de arte deixa de mudar a energia
 // total que ele emite - so espalha a mesma energia numa area maior.
-float sun_disk_bright = 1.0f;
+// M2.5-26-2c: o multiplicador cai para 0.005 e ISSO E UMA LACUNA DECLARADA, nao
+// uma calibracao. A radiancia que conserva energia num disco de 3 graus vale
+// 1,35x10^7 cd/m2, que pos-exposicao da 351 - oito stops acima do limiar do bloom,
+// e o bloom inunda o quadro inteiro. A propria fonte avisa que nao resolveu isto:
+// sec. 4.6, Remark, VERBATIM: "We have no energy conserving factor for the disk
+// area light, as we have not found a correct one currently."
+// O caminho documentado para objetos que devem florescer de forma CONSISTENTE em
+// qualquer exposicao e o Listing 29 (sec. 5.1.3): exprimir o brilho como
+// COMPENSACAO DE EXPOSICAO sobre o EV corrente, e nao em cd/m2 absolutos -
+// "VFX artists want consistent bloom strength for their effect either in the day
+// or in the night". Isso e a 26-2d. Ate la, 0.005 e um freio de mao honesto.
+float sun_disk_bright = 0.005f;
 // M2.5-25-8: cor do piso noturno. NAO vem da fonte (ver comentario no sky.hlsl):
 // default azul-acinzentado, que e como o olho adaptado ao escuro ve o ceu sem lua.
 float night_tint[3] = { 0.55f, 0.66f, 1.00f };
@@ -496,6 +521,8 @@ auto save_tuning = []() {
     f << "exposure_speed=" << exposure_speed << "\n";
     f << "exposure_min=" << exposure_min << "\n";
     f << "exposure_max=" << exposure_max << "\n";
+    f << "ev_min=" << ev_min << "\n";
+    f << "ev_max=" << ev_max << "\n";
     f << "night_sky_floor=" << night_sky_floor << "\n";
     f << "sun_disk_deg=" << sun_disk_deg << "\n";
     f << "sun_disk_bright=" << sun_disk_bright << "\n";
@@ -609,6 +636,8 @@ auto load_tuning = []() {
             else if (key == "exposure_speed") exposure_speed = std::stof(val);
             else if (key == "exposure_min") exposure_min = std::stof(val);
             else if (key == "exposure_max") exposure_max = std::stof(val);
+            else if (key == "ev_min") ev_min = std::stof(val);
+            else if (key == "ev_max") ev_max = std::stof(val);
             else if (key == "night_sky_floor") night_sky_floor = std::stof(val);
             else if (key == "sun_disk_deg") sun_disk_deg = std::stof(val);
             else if (key == "sun_disk_bright") sun_disk_bright = std::stof(val);
@@ -652,6 +681,9 @@ auto load_tuning = []() {
         sky_gain          = 1.0f;       // legado, sem funcao
         exposure_min      = 1.0e-7f;
         exposure_max      = 1.0e-3f;
+        ev_min            = 4.0f;       // 26-2c: noite ~5 stops abaixo do meio-dia
+        ev_max            = 20.0f;
+        sun_disk_bright   = 0.005f;     // 26-2c: ver o comentario do disco solar
         SDL_Log("[26-2b] tuning.ini era da regua antiga (sol=%.3f) - valores de LUZ resetados para as unidades fisicas. A ARTE nao foi tocada. Salvar Config para persistir.", 1.0f);
     }
     SDL_Log("Tuning carregado de config/tuning.ini");
@@ -2987,8 +3019,10 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::SliderFloat("Chave (cinza medio)", &exposure_key, 0.01f, 0.25f, "%.3f"); // 25-4b: regua honesta
         ImGui::SliderFloat("Compensacao (EV)", &exposure_bias_ev, -4.0f, 4.0f, "%.2f");
         ImGui::SliderFloat("Adaptacao (1/s)", &exposure_speed, 0.1f, 8.0f);
-        ImGui::SliderFloat("Exposicao min", &exposure_min, 0.0f, 1.0e-4f, "%.9f"); // 26-2b: ctrl+clique digita
-        ImGui::SliderFloat("Exposicao max", &exposure_max, 0.0f, 1.0e-2f, "%.7f"); // 26-2b
+        ImGui::SliderFloat("EV100 min (limite do escuro)", &ev_min, -6.0f, 22.0f, "%.2f EV"); // 26-2c
+        ImGui::SetItemTooltip("Quanto o olho pode ABRIR. Menor = noite mais clara. Lua cheia pede ~-1 para ficar totalmente exposta.");
+        ImGui::SliderFloat("EV100 max (limite do claro)", &ev_max, -6.0f, 22.0f, "%.2f EV"); // 26-2c
+        ImGui::SetItemTooltip("Quanto o olho pode FECHAR. Sunny 16: o meio-dia deve cair perto de EV100 15.");
         ImGui::SliderFloat("Piso do ceu noturno (cd/m2)", &night_sky_floor, 0.0f, 0.01f, "%.5f"); // 26-2b: N3.1 = 0.0002
         ImGui::SliderFloat3("Cor do ceu noturno", night_tint, 0.0f, 1.0f); // 25-8: ARTE, nao vem da fonte
         ImGui::SliderFloat("Lua: fase (elongacao)", &moon_elong_deg, 0.0f, 360.0f, "%.0f graus"); // 25-9a: 0=nova, 180=cheia
@@ -3806,8 +3840,13 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 struct ExpoBlock { float key, ec, emin, emax, speed, dt, p0, p1; } ep;
                 ep.key = exposure_key;
                 ep.ec = auto_exposure ? exposure_bias_ev : 0.0f;
-                ep.emin = auto_exposure ? exposure_min : exposure;
-                ep.emax = auto_exposure ? exposure_max : exposure;
+                // M2.5-26-2c: os limites vem de EV100 (Listing 28): exposure = 1/(1.2*2^EV).
+                // EV alto = pouca exposicao, entao ev_max define o MINIMO de exposicao.
+                float e_from_ev_hi = 1.0f / (1.2f * std::pow(2.0f, ev_max)); // menos exposicao
+                float e_from_ev_lo = 1.0f / (1.2f * std::pow(2.0f, ev_min)); // mais exposicao
+                exposure_min = e_from_ev_hi; exposure_max = e_from_ev_lo;    // espelho p/ diagnostico
+                ep.emin = auto_exposure ? e_from_ev_hi : exposure;
+                ep.emax = auto_exposure ? e_from_ev_lo : exposure;
                 ep.speed = exposure_speed;
                 ep.p0 = 0.0f; ep.p1 = 0.0f;
                 static uint64_t expo_last_ms = SDL_GetTicks();
