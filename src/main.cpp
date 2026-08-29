@@ -144,7 +144,8 @@ struct SkyParams {
     float to_moon[3];       float moon_disk_deg;
     float moon_disk_bright; float pad_o[3]; // 25-9a: a lua no ceu
     float to_astro[3];      float pad_p;
-    float astro_sky_col[3]; float aerial_str; // 25-12 + 25-13 (368B)
+    float astro_sky_col[3]; float aerial_str; // 25-12 + 25-13
+    float moon_illum[3];    float pad_r; // 25-15: a lua na marcha atmosferica (352B)
 };
 
 struct ObjIdParams {
@@ -3356,6 +3357,12 @@ int main(int argc, char* argv[]) {
                 sky_params.astro_sky_col[ci] = lua_manda ? por_lua : por_sol;
             }
             sky_params.aerial_str = aerial_str; // 25-13
+            // 25-15: iluminancia CRUA da lua (a marcha calcula a propria transmitancia,
+            // como ja acontece com o sol em sun_illum)
+            sky_params.moon_illum[0] = moon_tint[0] * I_lua;
+            sky_params.moon_illum[1] = moon_tint[1] * I_lua;
+            sky_params.moon_illum[2] = moon_tint[2] * I_lua;
+            sky_params.pad_r = 0.0f;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;

@@ -86,6 +86,8 @@ cbuffer SkyBlock : register(b0, space3)
     float pad_p;
     float3 astro_sky_col;  // M2.5-25-12: cor JA multiplicada pela intensidade
     float aerial_str;      // M2.5-25-13: 1.0 = extincao fisica; acima = bruma de arte
+    float3 moon_illum;     // M2.5-25-15: iluminancia da lua (E_i da Eq. 11)
+    float pad_r;
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -278,6 +280,29 @@ float atmo_ray_sphere(float3 p, float3 d, float r)
     return (t0 < 0.0f) ? t1 : t0;
 }
 
+// M2.5-25-15: contribuicao de UMA luz direcional num ponto da marcha.
+// Extraida para funcao porque a Eq. 11 do Hillaire soma sobre Nlight luzes e a
+// forma e identica para todas - so mudam a direcao, as fases e a iluminancia.
+// A Transmittance LUT e a MS LUT sao parametrizadas pelo cosseno de zenite DA LUZ,
+// entao servem para qualquer direcional (sol, lua, o que vier).
+float3 atmo_light(float3 up_local, float h, float3 ss_r, float3 ss_m,
+                  float3 L_dir, float pr, float pm)
+{
+    float mu = dot(up_local, L_dir);
+    float3 Tl = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(h, mu), 0).rgb;
+    float3 psi = ms_lut.SampleLevel(lut_samp, float2(saturate(0.5f + 0.5f * mu), saturate(h / (kRt - kRg))), 0).rgb;
+    return (ss_r * pr + ss_m * pm) * Tl + (ss_r + ss_m) * psi;
+}
+
+// Fases de Rayleigh e de Mie para um cosseno de angulo de espalhamento (Hillaire Â§4).
+void atmo_phases(float cos_t, out float pr, out float pm)
+{
+    pr = 3.0f * (1.0f + cos_t * cos_t) / (16.0f * 3.14159265f);
+    const float g = 0.8f; // Cornette-Shanks, padrao do paper
+    pm = (3.0f / (8.0f * 3.14159265f)) * ((1.0f - g * g) * (1.0f + cos_t * cos_t)) /
+         ((2.0f + g * g) * pow(max(1.0f + g * g - 2.0f * g * cos_t, 1e-4f), 1.5f));
+}
+
 float3 atmo_sky(float3 dir)
 {
     // mundo: 1 unidade ~ 1 metro -> km
@@ -299,13 +324,10 @@ float3 atmo_sky(float3 dir)
         }
     }
 
-    float cos_theta = dot(dir, to_sun);
-    // Rayleigh (Â§4): 3(1+cos^2)/16pi
-    float pr = 3.0f * (1.0f + cos_theta * cos_theta) / (16.0f * 3.14159265f);
-    // Mie (Â§4): Cornette-Shanks, g = 0.8 por padrao
-    const float g = 0.8f;
-    float pm = (3.0f / (8.0f * 3.14159265f)) * ((1.0f - g * g) * (1.0f + cos_theta * cos_theta)) /
-               ((2.0f + g * g) * pow(max(1.0f + g * g - 2.0f * g * cos_theta, 1e-4f), 1.5f));
+    // M2.5-25-15: uma fase por LUZ (Eq. 11 soma sobre Nlight)
+    float pr_s, pm_s, pr_m, pm_m;
+    atmo_phases(dot(dir, to_sun),  pr_s, pm_s);
+    atmo_phases(dot(dir, to_moon), pr_m, pm_m);
 
     const int N = 20; // Tabela 2
     float dt = t_max / (float)N;
@@ -325,13 +347,11 @@ float3 atmo_sky(float3 dir)
         float3 ss_m = kMieS * dm_;
         float3 st = atmo_sigma_t(h);
 
-        float mu_s = dot(x / r, to_sun);
-        float3 Tsun = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(h, mu_s), 0).rgb;
-        // Psi_ms: Â§5.5.2 verbatim (u = 0.5+0.5cos(theta_s), v = altitude)
-        float3 psi = ms_lut.SampleLevel(lut_samp, float2(saturate(0.5f + 0.5f * mu_s), saturate(h / (kRt - kRg))), 0).rgb;
-
-        // Eq. 11: Lscat = sigma_s * (T*S*fase + Psi_ms) * E
-        float3 S = (ss_r * pr + ss_m * pm) * Tsun + (ss_r + ss_m) * psi;
+        // M2.5-25-15: Eq. 11 verbatim - SOMA sobre as luzes direcionais, cada uma
+        // com sua fase, sua transmitancia, seu Psi_ms e sua iluminancia E_i.
+        float3 up_local = x / r;
+        float3 S = atmo_light(up_local, h, ss_r, ss_m, to_sun,  pr_s, pm_s) * sun_illum
+                 + atmo_light(up_local, h, ss_r, ss_m, to_moon, pr_m, pm_m) * moon_illum;
         float3 e = exp(-st * dt);
         float3 Sint = (S - S * e) / max(st, 1e-7f); // Hillaire 2015 sl.28
         L += T * Sint;
@@ -345,12 +365,17 @@ float3 atmo_sky(float3 dir)
     {
         float3 pg = p0 + dir * t_max;
         float3 ng = pg / length(pg);
-        float ns = max(0.0f, dot(ng, to_sun));
-        float3 Tg = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(0.0f, dot(ng, to_sun)), 0).rgb;
-        L += T * Tg * ns * (0.3f / 3.14159265f);
+        // M2.5-25-15: o chao tambem e iluminado pelas DUAS luzes (Eq. 1 por fonte)
+        float mu_gs = dot(ng, to_sun);
+        float mu_gm = dot(ng, to_moon);
+        float3 Tg_s = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(0.0f, mu_gs), 0).rgb;
+        float3 Tg_m = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(0.0f, mu_gm), 0).rgb;
+        float3 Lo = Tg_s * max(0.0f, mu_gs) * sun_illum + Tg_m * max(0.0f, mu_gm) * moon_illum;
+        L += T * Lo * (0.3f / 3.14159265f); // albedo 0.3 (Â§4)
     }
 
-    return L * sun_illum;
+    // 25-15: a iluminancia E_i ja foi aplicada POR LUZ dentro da soma
+    return L;
 }
 PSOutput PSMain(PSInput input)
 {
