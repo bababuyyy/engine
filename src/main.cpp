@@ -3289,20 +3289,24 @@ int main(int argc, char* argv[]) {
             // Sem readback GPU->CPU (regra da doutrina), sem latencia, sem reducao nova.
             {
                 const float kR = 0.2126f, kG = 0.7152f, kB = 0.0722f; // luma Rec.709
-                float e_sun = (kR * sun_color_arr[0] * t_sol.x +
-                               kG * sun_color_arr[1] * t_sol.y +
-                               kB * sun_color_arr[2] * t_sol.z) *
-                              effective_intensity * std::max(0.0f, to_sun_vec.y);
-                float e_sky = (kR * atmo_amb[0] * sun_color_arr[0] +
-                               kG * atmo_amb[1] * sun_color_arr[1] +
-                               kB * atmo_amb[2] * sun_color_arr[2]) *
-                              effective_intensity * sky_gain * 3.14159265f;
-                // Superficie lambertiana com albedo medio de cena 0.2 (convencao do
-                // cartao cinza da fotografia; premissa da casa, nao numero de fonte):
-                // L = E * albedo / pi
-                // 25-5a: o piso noturno tambem conta para a media (luma 0.9 do tom da fonte)
-                e_sky += night_sky_floor * 0.9f * sky_gain * 3.14159265f;
-                float l_avg = (e_sun + e_sky) * 0.2f / 3.14159265f;
+                // M2.5-25-16: o estimador le as MESMAS grandezas que o renderizador
+                // usa neste frame, em vez de recalcular a partir do sol. Antes ele nao
+                // enxergava a lua (que entrou em 25-9c/25-12/25-15) e a noite reportava
+                // luminancia ~0, cravando a exposicao no teto - o mesmo numero do
+                // meio-dia era usado a meia-noite. Agora qualquer luz nova aparece de
+                // graca, porque ele mede o que existe.
+                //   astro_col / astro_dir        -> a luz direcional da cena (sol ou lua)
+                //   sky_params.sky_ambient_color -> o ceu (sol + lua + piso), com o ganho
+                // Continua sendo estimativa: a fonte (Frostbite 2014, sec. 5.1) manda MEDIR
+                // Lavg por histograma. Isto e coerencia, nao absolvicao - a remocao do
+                // estimador analitico segue marcada para a 26-4.
+                float e_direct = (kR * astro_col.r + kG * astro_col.g + kB * astro_col.b) *
+                                 std::max(0.0f, astro_dir.y);
+                float e_sky = (kR * sky_params.sky_ambient_color[0] +
+                               kG * sky_params.sky_ambient_color[1] +
+                               kB * sky_params.sky_ambient_color[2]) * 3.14159265f;
+                // albedo medio de cena 0.2 (cartao cinza da fotografia; premissa da casa)
+                float l_avg = (e_direct + e_sky) * 0.2f / 3.14159265f;
                 float alvo = exposure_key / std::max(l_avg, 1e-5f) * std::pow(2.0f, exposure_bias_ev);
                 alvo = std::clamp(alvo, std::min(exposure_min, exposure_max), std::max(exposure_min, exposure_max)); // 25-5a
 
