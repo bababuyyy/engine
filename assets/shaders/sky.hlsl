@@ -73,7 +73,7 @@ cbuffer SkyBlock : register(b0, space3)
     float sky_gain;      // M2.5-25-2: conversao de unidades
     float atmo_debug;    // M2.5-25-2: 0=off, 1=transmitancia, 2=multi-scattering
     float3 sun_illum;    // M2.5-25-2: iluminancia CRUA (offset 256 - float3 alinhado)
-    float pad_l;
+    float night_floor;   // M2.5-25-5a: piso do ceu noturno (ocupa o pad_l)
 };
 
 Texture2D weather_map : register(t0, space2);   // M2.5-24G-1: weather map 512^2 (R=coverage, G=tipo)
@@ -349,7 +349,13 @@ PSOutput PSMain(PSInput input)
     // crepusculo). O ceu agora e a atmosfera fisica de Hillaire 2020. O ganho e
     // conversao de UNIDADES (o paper e fotometrico; nosso sun_intensity e
     // arbitrario) - unico numero desta estacao que nao esta na fonte.
-    float3 ceu = atmo_sky(dir) * sky_gain;
+    // M2.5-25-5a: PISO DO CEU NOTURNO. Sem ele, o modelo fisico devolve preto
+    // absoluto a noite (transmitancia ao sol = 0). Composicao da fonte (ING sky
+    // brightness, 3 fontes convergentes): airglow 65% (verde, oxigenio 557.7nm)
+    // + luz zodiacal 27% (cor de sol) + luz estelar difusa 7% (branco-azulada)
+    // -> tom (0.674, 1.0, 0.646). O TOM e da fonte; a FORCA e do diretor.
+    // Somado sem condicional: de dia ele e desprezivel, como na natureza.
+    float3 ceu = (atmo_sky(dir) + night_floor * float3(0.674f, 1.0f, 0.646f)) * sky_gain;
 
     float cos_sun = dot(dir, to_sun);
 

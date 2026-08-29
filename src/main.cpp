@@ -140,7 +140,7 @@ struct SkyParams {
     float silver_k;         float silver_spread;    float clima_cov_teto;   float clima_type_teto; // 24G-3: tetos do clima (ex-pads)
     float curvatura;        float fade_ini;         float passo_far; float cloud_ms_str; // 24G-6 + 24J-3
     float cloud_ms_g2;      float cloud_iso_str; float sky_gain;  float atmo_debug; // 24J-3 + 24J-7 + 25-2
-    float sun_illum[3];     float pad_l; // 25-2: iluminancia CRUA do sol (a marcha faz a propria atenuacao) (272B)
+    float sun_illum[3];     float night_floor; // 25-2 + 25-5a: piso do ceu noturno (272B)
 };
 
 struct ObjIdParams {
@@ -329,6 +329,10 @@ bool  auto_exposure = true;      // desligado = o slider "Exposicao" manda, como
 float exposure_key = 0.18f;      // chave / cinza medio (Reinhard) - ARTE, e a unica escolha de gosto aqui
 float exposure_bias_ev = 0.0f;   // compensacao em STOPS (fotografia) - ARTE
 float exposure_speed = 2.0f;     // velocidade da adaptacao do "olho" (1/s)
+// M2.5-25-5a: limites da exposicao = ARTE (quanto a noite tem direito de ser escura)
+float exposure_min = 0.05f;
+float exposure_max = 8.0f;
+float night_sky_floor = 0.02f;   // forca do piso noturno (airglow+zodiacal+estelar); tom vem da fonte
 float exposure_auto_cur = 1.0f;  // valor suavizado corrente (nao persiste: converge sozinho)
 float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
 
@@ -416,6 +420,9 @@ auto save_tuning = []() {
     f << "exposure_key=" << exposure_key << "\n";
     f << "exposure_bias_ev=" << exposure_bias_ev << "\n";
     f << "exposure_speed=" << exposure_speed << "\n";
+    f << "exposure_min=" << exposure_min << "\n";
+    f << "exposure_max=" << exposure_max << "\n";
+    f << "night_sky_floor=" << night_sky_floor << "\n";
     f << "shaft_cloud_occ=" << shaft_cloud_occ << "\n";
     f << "out_z_cutoff=" << out_z_cutoff << "\n";
     f << "out_grazing_scale=" << out_grazing_scale << "\n";
@@ -512,6 +519,9 @@ auto load_tuning = []() {
             else if (key == "exposure_key") exposure_key = std::stof(val);
             else if (key == "exposure_bias_ev") exposure_bias_ev = std::stof(val);
             else if (key == "exposure_speed") exposure_speed = std::stof(val);
+            else if (key == "exposure_min") exposure_min = std::stof(val);
+            else if (key == "exposure_max") exposure_max = std::stof(val);
+            else if (key == "night_sky_floor") night_sky_floor = std::stof(val);
             else if (key == "shaft_cloud_occ") shaft_cloud_occ = std::stof(val);
             else if (key == "out_z_cutoff") out_z_cutoff = std::stof(val);
             else if (key == "out_grazing_scale") out_grazing_scale = std::stof(val);
@@ -2784,6 +2794,9 @@ int main(int argc, char* argv[]) {
         ImGui::SliderFloat("Chave (cinza medio)", &exposure_key, 0.01f, 0.25f, "%.3f"); // 25-4b: regua honesta
         ImGui::SliderFloat("Compensacao (EV)", &exposure_bias_ev, -4.0f, 4.0f, "%.2f");
         ImGui::SliderFloat("Adaptacao (1/s)", &exposure_speed, 0.1f, 8.0f);
+        ImGui::SliderFloat("Exposicao min", &exposure_min, 0.01f, 2.0f, "%.3f"); // 25-5a
+        ImGui::SliderFloat("Exposicao max", &exposure_max, 0.5f, 30.0f, "%.2f");
+        ImGui::SliderFloat("Piso do ceu noturno", &night_sky_floor, 0.0f, 0.2f, "%.4f");
         ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
         ImGui::SliderFloat("Shaft: oclusao de nuvem", &shaft_cloud_occ, 0.0f, 1.0f);
 
@@ -3205,9 +3218,11 @@ int main(int argc, char* argv[]) {
                 // Superficie lambertiana com albedo medio de cena 0.2 (convencao do
                 // cartao cinza da fotografia; premissa da casa, nao numero de fonte):
                 // L = E * albedo / pi
+                // 25-5a: o piso noturno tambem conta para a media (luma 0.9 do tom da fonte)
+                e_sky += night_sky_floor * 0.9f * sky_gain * 3.14159265f;
                 float l_avg = (e_sun + e_sky) * 0.2f / 3.14159265f;
                 float alvo = exposure_key / std::max(l_avg, 1e-5f) * std::pow(2.0f, exposure_bias_ev);
-                alvo = std::clamp(alvo, 0.02f, 60.0f);
+                alvo = std::clamp(alvo, std::min(exposure_min, exposure_max), std::max(exposure_min, exposure_max)); // 25-5a
 
                 static uint64_t exp_last_ms = SDL_GetTicks();
                 uint64_t exp_now_ms = SDL_GetTicks();
@@ -3235,7 +3250,7 @@ int main(int argc, char* argv[]) {
             // 25-2: SEM t_sol aqui - a marcha da atmosfera calcula a propria transmitancia
             sky_params.sun_illum[0] = sun_color_arr[0] * effective_intensity;
             sky_params.sun_illum[1] = sun_color_arr[1] * effective_intensity;
-            sky_params.sun_illum[2] = sun_color_arr[2] * effective_intensity; sky_params.pad_l = 0.0f;
+            sky_params.sun_illum[2] = sun_color_arr[2] * effective_intensity; sky_params.night_floor = night_sky_floor;
 
             SunParams sun_params;
             sun_params.dir[0] = s_dir.x;
