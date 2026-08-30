@@ -7,6 +7,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <cstdint>
+#include <cstring> // M2.5-26-M: memcpy do half->float
 #include <cstdio>
 #include <vector>
 #include <string>
@@ -49,6 +50,13 @@ typedef unsigned char BYTE;
 #include "expo_adapt_ps.h"  // M2.5-26-4
 #include "shadow_vs.h"
 #include "shadow_ps.h"
+#include "lt_down_ps.h"    // M2.5-26-14b
+#include "lt_blur_ps.h"    // M2.5-26-14b
+#include "lt_bilat_ps.h"   // M2.5-26-16
+#include "lt_grid_ps.h"    // M2.5-26-23a: a grade bilateral
+#include "shaft_vs.h"       // M2.5-26-25: a marcha volumetrica, agora passe proprio
+#include "shaft_ps.h"
+
 #include "clouds/cloud_noise.h"
 #include "sky/atmosphere.h" // M2.5-25-2: LUTs da atmosfera (Hillaire 2020)
 
@@ -123,7 +131,26 @@ struct SunParams {
     float fog_color[3];      float cloud_cover;
     float shadow_str;        float grass_backlight; float grass_specular; float obj_shadow_str;
     float obj_shadow_bias;   float debug_shadows;   float pad_0[2];
+    // M2.5-26-7: O CEU VIRA FONTE DE LUZ DA CENA.
+    // Frostbite (Lagarde & de Rousiers, SIGGRAPH 2014), Tabela 8: o Sol usa
+    // ILLUMINANCE (lx) e o Ceu usa LUMINANCE (cd/m2) - sao fontes SEPARADAS, com
+    // unidades diferentes. E, verbatim: "the lighting from the sky is handled with
+    // a distant light probe". Nos tinhamos so o sol; o 'ambient' era uma FRACAO
+    // dele fazendo as vezes do ceu.
+    // Medido (sonda 26-7, sol a -0,55 graus = 5h56): o ceu entrega 1.091 lx a cena,
+    // o que poe o chao em ~347 cd/m2. O 'ambient' entregava ~20. Erro de 17x, e por
+    // isso o amanhecer tinha 10,6 stops de amplitude: nao era o ceu brilhante
+    // demais, era o CHAO sem a luz que o ilumina.
+    // sky_light = a MESMA sky_ambient_color que ja alimenta as nuvens desde a 25-3
+    // (media do hemisferio pela marcha do Hillaire). Ja estava calculada.
+    float sky_light[3];      float sky_light_str; // 26-7 (str: 1.0 = fisico)
     float light_vp[16];
+    // M2.5-26-8: perspectiva aerea da cena - as MESMAS grandezas que o ceu usa
+    // na marcha, para que os dois nao possam divergir.
+    float ap_to_sun[3];     float ap_steps;
+    float ap_sun_illum[3];  float ap_str;
+    float ap_to_moon[3];    float ap_on;
+    float ap_moon_illum[3]; float ap_pad;
 };
 
 struct SkyParams {
@@ -142,10 +169,10 @@ struct SkyParams {
     float curvatura;        float fade_ini;         float passo_far; float cloud_ms_str; // 24G-6 + 24J-3
     float cloud_ms_g2;      float cloud_iso_str; float sky_gain;  float atmo_debug; // 24J-3 + 24J-7 + 25-2
     float sun_illum[3];     float night_floor; // 25-2 + 25-5a
-    float sun_disk_deg;     float sun_disk_bright; float pad_m[2]; // 25-7: disco solar fisico
+    float sun_disk_deg;     float sun_disk_bright; float stars_str; float stars_mag_lim; // 25-7 + 25-18 (os dois pads viram as estrelas)
     float night_tint[3];    float pad_n; // 25-8: cor do piso noturno = ARTE
     float to_moon[3];       float moon_disk_deg;
-    float moon_disk_bright; float pad_o[3]; // 25-9a: a lua no ceu
+    float moon_disk_bright; float stars_size; float stars_dens; float stars_slope; // 25-9a + 25-18 (os tres pads viram as estrelas)
     float to_astro[3];      float pad_p;
     float astro_sky_col[3]; float aerial_str; // 25-12 + 25-13
     float moon_illum[3];    float pad_r; // 25-15: a lua na marcha atmosferica (352B)
@@ -164,15 +191,51 @@ struct FsParams { // M2.5-24H: shafts volumetricos
     float sun_color[3];  float shaft_samples;
     float tex_size[2];   float wind_off[2];
     float shaft_sigma;   float cloud_cover;   float shadow_str_fs; float bloom_intensity;
-    float tonemap_shoulder; float exposure; float shaft_cloud_occ; float cloud_mid; // 24I-3: altura media da camada
+    float tonemap_shoulder; float tonemap_modo; float shaft_cloud_occ; float cloud_mid; // 26-11: exposure estava MORTO aqui desde a 26-2a (a pre-exposicao passou a vir da textura 1x1); o campo vira o seletor de curva, sem mudar um byte de layout
     float shaft_debug;      float shaft_height_falloff; float dither_amt; float expo_auto; // 25-U6d + 26-4 ocupam os dois pad_j
+    // M2.5-26-14: operador local (Patry 2021, slide 137)
+    float lt_on;            float lt_c; float lt_d; float lt_m;
+    // M2.5-26-15: contraste do lado BAIXO, separado (slide 145)
+    // M2.5-26-23c: os tres pads viram o eixo Z da grade, e o bloco cresce 4.
+    float lt_c_lo;          float bg_sr; float bg_lo; float bg_hi;
+    // M2.5-26-23c: +4 floats (68 -> 72 = 288 B, multiplo de 16) para o peso da
+    // mistura da grade. O static_assert abaixo continua guardando o alinhamento.
+    float bg_mix;           float bg_pad0; float bg_pad1; float bg_pad2;
+    // M2.5-26-24: +12 floats (72 -> 84 = 336 B, multiplo de 16) para a matriz de
+    // adaptacao cromatica. Ela comeca em indice 72, que e multiplo de 4, entao a
+    // linha 0 pousa no componente 0 de um registrador - sem straddle.
+    // NAO usar array no cbuffer do HLSL: la cada elemento de array ocupa um
+    // registrador INTEIRO de 16 bytes. Do lado do HLSL sao nove escalares.
+    float wb_m[9];          float wb_pad0; float wb_pad1; float wb_pad2;
 };
 static_assert(sizeof(FsParams) % 16 == 0, "FsParams: alinhamento de 16 bytes quebrado");
+
+// ============================================================================
+// M2.5-26-25: os 52 floats (208 B) que a marcha usa, e nada mais.
+// Os NOMES sao identicos aos do FsParams de proposito: o corpo da marcha foi
+// movido verbatim e nao sofreu uma renomeacao sequer. Renomear um campo seria
+// criar um lugar onde a copia pode divergir do original em silencio.
+// POR QUE UM BLOCO PROPRIO e nao o FsParams: aquele so e preenchido dezenas de
+// linhas DEPOIS deste passe, e reordenar o preenchimento seria mexer em codigo
+// que funciona por uma razao que nao e a desta estacao.
+// ============================================================================
+struct ShaftBlock {
+    float inv_viewproj[16];
+    float light_vp[16];
+    float cam_pos[3];    float shaft_intensity;
+    float to_sun[3];     float shaft_g;
+    float sun_color[3];  float shaft_samples;
+    float wind_off[2];   float shaft_sigma; float shaft_height_falloff;
+    float shaft_cloud_occ; float cloud_mid; float cloud_cover; float shaft_pad0;
+};
+static_assert(sizeof(ShaftBlock) % 16 == 0, "ShaftBlock: alinhamento de 16 bytes quebrado");
 
 struct BloomParams {
     float texel[2];
     float threshold;
     float knee;
+    float cap;        // M2.5-26-11: teto do que ENTRA na piramide
+    float pad_bl[3];
 };
 
 struct OutlineParams {
@@ -238,7 +301,18 @@ float cloud_h_min = 120.0f;
 float cloud_h_max = 220.0f;
 float cloud_cap = 600.0f;
 float cloud_absorcao = 1.0f;
-float cloud_hg_g_frontal = 0.8f;
+// M2.5-26-13: g = 0.2, o valor da fonte. GPU Pro 7 cap. 4, sec. 4.4.3, p. 112,
+// VERBATIM: "We use A SINGLE Henyey-Greenstein phase function with an eccentricity
+// (directional component) g of 0.2, to make sure that more light in our clouds
+// scatters forward". Era 0.8, sem fonte.
+// E o "silver lining" NAO e um termo separado na fonte. HZD 2015, slide 53,
+// VERBATIM: "It is the probability of light scattering forward or backward in the
+// cloud. THIS IS RESPONSIBLE FOR THE SILVER LINING IN CLOUDS, one of our look
+// goals." Ou seja: o silver lining E o espalhamento frontal da propria HG.
+// O nosso segundo lobo e o max() do silver continuam no painel como ARTE declarada
+// (cloud_silver_k ja nasce em 0 = fisica pura). Nubis 2022 e 2023 compoem os dois
+// termos por SOMA, nunca por max - registrado como divergencia nossa, assumida.
+float cloud_hg_g_frontal = 0.2f;
 float cloud_powder_str = 0.5f;
 float shadow_str = 0.55f;
 
@@ -309,12 +383,152 @@ static glm::vec3 sun_transmittance(float cos_zenith)
     }
     return glm::vec3(std::exp(-od.x), std::exp(-od.y), std::exp(-od.z));
 }
+
+// ============================================================================
+// M2.5-26-24: BALANCO DE BRANCO POR ADAPTACAO CROMATICA.
+//
+// A FONTE, e ela e do mesmo deck que ja nos deu a grade bilateral e o operador
+// local. Ghost of Tsushima, SIGGRAPH 2021 "Advances in Real-Time Rendering",
+// slide 155, VERBATIM:
+//   "Before tossing our existing pipeline and LUTs, we tried adding white
+//    balance controls. Free, since we can roll it into the Rec.709 => tonemap
+//    matrix. WORKED SO WELL THAT WE DIDN'T NEED TO CHANGE OUR GRADING APPROACH."
+// slide 156, VERBATIM:
+//   "Rather than providing color temperature and hue sliders, WE LET THE ARTIST
+//    CHOOSE THE COLOR THEY WANTED WHITE TO CHANGE *TO*. [...] if you want the
+//    scene to be bluer, you pick a blue color, which the artists found more
+//    intuitive."
+//   "The transformation we used is called a chromatic adaptation matrix [...]
+//    Specifically, we used the VON KRIES transform in BRADFORD LMS color space."
+//
+// POR QUE ESTA ESTACAO EXISTE, e nao um slider de saturacao. A queixa medida foi
+// "quando a luz da lua bate nas nuvens, a diferenca das partes iluminadas para as
+// nao iluminadas e gritante". Esse gritante tem DUAS metades: brilho e MATIZ. A
+// metade de matiz foi medida aqui: a linha da cena e
+//     astro_col = moon_tint * t_moon * I_lua
+// e o t_moon (transmitancia na direcao da lua) avermelha. Rodando os coeficientes
+// do proprio motor, a razao R/B da transmitancia por elevacao da lua:
+//     30 graus 1.50x | 20 graus 1.81x | 10 graus 3.11x | 5 graus 8.06x
+// Multiplicando pelo moon_tint = {0.80, 0.88, 1.00} - que o comentario dele chama
+// de "luar levemente frio (arte)" - sobra 1.20x / 1.45x / 2.49x / 6.45x. Ou seja:
+// o artista pediu luar FRIO e a fisica ENTREGA LUAR QUENTE, invertendo a intencao.
+// Esta correto (o luar avermelha no horizonte igual ao sol) e e perceptualmente
+// errado - ninguem ve nuvem enluarada cor de areia. A correcao perceptual completa
+// e o Purkinje (Cao et al. 2008, slides 160-173), que espera a matriz M do slide
+// 164 - LACUNA declarada. Este e o outro instrumento que a mesma fonte prescreve,
+// e ele nao tem lacuna nenhuma.
+//
+// O QUE ESTA FUNCAO FAZ. Recebe a cor que o BRANCO deve virar e devolve a matriz
+// 3x3 que faz isso, em luz linear:
+//     M = XYZ2RGB . Bradford^-1 . diag(LMS_alvo/LMS_origem) . Bradford . RGB2XYZ
+//
+// LUMINANCIA PRESERVADA de proposito: o alvo e normalizado para o mesmo Y do
+// branco antes de virar razao de LMS. Sem isso o seletor de cor viraria um SEGUNDO
+// botao de exposicao e brigaria com o fotometro - exatamente o tipo de botao com
+// dois significados que esta temporada catalogou. So a CROMATICIDADE se move.
+// MEDIDO no bloco isolado antes de embarcar: com alvo (1,1,1) o desvio maximo da
+// identidade e 3.3e-07 (o default e no-op de verdade), o branco pousa na
+// cromaticidade do alvo com desvio 0.0000, e a luminancia varia 0.0008%.
+//
+// ONDE ELA ENTRA. Em luz LINEAR, depois do operador local e ANTES da curva - e a
+// fonte e explicita ("roll it into the Rec.709 => tonemap matrix"). O Frostbite
+// poe "style" DEPOIS do tonemap na ordem do deck dele; seguimos o Ghost aqui, e a
+// razao e fisica: a adaptacao cromatica de Von Kries modela o sistema visual se
+// adaptando ao ILUMINANTE, e so vale em luz linear. Aplicada depois de uma curva
+// nao-linear ela deixa de ser o modelo que diz ser. Divergencia declarada.
+//
+// AS MATRIZES SAO PUBLICADAS, nenhuma e nossa: Rec.709/sRGB com branco D65 <-> XYZ
+// da IEC 61966-2-1, e a Bradford da literatura padrao de adaptacao cromatica.
+// ============================================================================
+static void wb_matriz(const float alvo[3], float out9[9])
+{
+    const float R2X[9] = { 0.4124564f, 0.3575761f, 0.1804375f,
+                           0.2126729f, 0.7151522f, 0.0721750f,
+                           0.0193339f, 0.1191920f, 0.9503041f };
+    const float X2R[9] = { 3.2404542f,-1.5371385f,-0.4985314f,
+                          -0.9692660f, 1.8760108f, 0.0415560f,
+                           0.0556434f,-0.2040259f, 1.0572252f };
+    const float MA[9]  = { 0.8951f, 0.2664f,-0.1614f,
+                          -0.7502f, 1.7135f, 0.0367f,
+                           0.0389f,-0.0685f, 1.0296f };
+    const float MAi[9] = { 0.9869929f,-0.1470543f, 0.1599627f,
+                           0.4323053f, 0.5183603f, 0.0492912f,
+                          -0.0085287f, 0.0400428f, 0.9684867f };
+    auto mm = [](const float A[9], const float B[9], float O[9]) {
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) {
+            float s = 0.0f; for (int k = 0; k < 3; ++k) s += A[r * 3 + k] * B[k * 3 + c];
+            O[r * 3 + c] = s;
+        }
+    };
+    auto mv = [](const float A[9], const float v[3], float o[3]) {
+        for (int r = 0; r < 3; ++r) o[r] = A[r*3+0]*v[0] + A[r*3+1]*v[1] + A[r*3+2]*v[2];
+    };
+
+    const float branco[3] = { 1.0f, 1.0f, 1.0f };
+    float a[3] = { std::max(alvo[0], 1e-4f), std::max(alvo[1], 1e-4f), std::max(alvo[2], 1e-4f) };
+
+    float xyz_o[3], xyz_d[3];
+    mv(R2X, branco, xyz_o);
+    mv(R2X, a,      xyz_d);
+    float k = (xyz_d[1] > 1e-6f) ? (xyz_o[1] / xyz_d[1]) : 1.0f;  // Y igual: so a cromaticidade anda
+    xyz_d[0] *= k; xyz_d[1] *= k; xyz_d[2] *= k;
+
+    float lms_o[3], lms_d[3];
+    mv(MA, xyz_o, lms_o);
+    mv(MA, xyz_d, lms_d);
+    float D[9] = { 0,0,0, 0,0,0, 0,0,0 };
+    for (int i = 0; i < 3; ++i)
+        D[i * 3 + i] = (std::fabs(lms_o[i]) > 1e-6f) ? (lms_d[i] / lms_o[i]) : 1.0f;
+
+    float t1[9], t2[9], t3[9];
+    mm(D,   MA,  t1);
+    mm(MAi, t1,  t2);
+    mm(t2,  R2X, t1);
+    mm(X2R, t1,  t3);
+    for (int i = 0; i < 9; ++i) out9[i] = t3[i];
+}
+
+// ============================================================================
+// M2.5-26-26: CONFORMIDADE. O sigma_t do AR LIMPO, derivado dos MESMOS
+// coeficientes da Tabela 1 do Hillaire que a sun_transmittance ja usa acima.
+//
+// POR QUE ELE E FUNCAO E NAO CONSTANTE: se alguem mexer nos coeficientes da
+// Tabela 1, este numero se corrige sozinho. Uma constante escrita a mao seria
+// mais um lugar de onde a verdade pode divergir em silencio - a classe de
+// defeito que esta temporada catalogou cinco vezes.
+//
+// PONDERADO POR LUMINANCIA (Rec.709) porque os sliders que o consomem sao
+// ESCALARES: os shafts e a nevoa da cena marcham com um sigma so, enquanto a
+// atmosfera marcha com os tres canais. Aproximacao declarada; a unificacao
+// completa e o WeatherContext.
+//
+// O QUE ELE VALE: 2.1716e-05 por metro. E o que os dois sliders que o
+// consomem NAO CONSEGUIAM EXPRESSAR ate esta estacao - o de Sigma tinha minimo
+// 0.0002 (9,2x acima do fisico) e o de Fog tinha passo 1e-4. Nao era calibracao
+// ruim: o EIXO estava errado, exatamente como o Defeito 3 da
+// referencia-calibracao previu.
+// ============================================================================
+static float sigma_ar_limpo()
+{
+    const float kR[3] = { 5.802e-3f, 13.558e-3f, 33.1e-3f }; // Rayleigh, por km
+    const float kMie  = 3.996e-3f + 4.40e-3f;                // Mie: espalha + absorve
+    const float r = 0.2126f * kR[0] + 0.7152f * kR[1] + 0.0722f * kR[2];
+    return (r + kMie) * 1e-3f; // por km -> por metro
+}
+
 bool sol_hora_manual = false;  // M2.5-24G-5: override de apresentacao (nao persiste de proposito)
 float sol_hora = 12.0f;
 float arco_inclinacao = 25.0f;
 float sun_yaw = 45.0f;
 float sun_pitch = -45.0f;
-float sun_ambient = 0.55f;
+float sun_ambient = 0.55f;       // 26-7: LEGADO - nao ilumina mais nada
+// M2.5-26-7: forca do ceu como fonte. 1.0 = fisico (a luminancia que a marcha do
+// Hillaire devolve). E o unico numero de ARTE desta estacao, e o default e o fisico.
+float sky_light_str = 1.0f;
+// M2.5-26-8: perspectiva aerea da cena (Hillaire 5.4 por marcha curta).
+bool  aerial_cena = true;         // desligado = a nevoa antiga, para comparacao A/B
+int   aerial_steps = 6;           // 6 passos: o meio e quase homogeneo nos km da cena
+float aerial_cena_str = 1.0f;     // multiplicador do sigma_t: 1.0 = ar fisico
 // M2.5-26-2b: O SOL EM LUX (iluminancia no TOPO da atmosfera - o E_i da Eq. 3/11
 // do Hillaire). Derivacao a partir da Tabela 11 do Frostbite (medicao com fotometro,
 // Estocolmo, julho, ceu limpo), linha "Sol" as 12h = 90.700 lx no plano horizontal:
@@ -329,12 +543,35 @@ float sun_ambient = 0.55f;
 // modelo do Hillaire e de ceu LIMPO. Fica registrado para a contraprova Sunny 16.
 // MARCHA ABSOLVIDA: 20 passos entregam 8.032 lx contra 8.338 com 320 passos - 3,7%
 // de diferenca. A resolucao da marcha nao e a causa.
-float sun_intensity = 116216.0f;
+// M2.5-26-9a: 133.334 lx, NAO 116.216. O valor antigo saiu de 90.700/(T*mu) com a
+// Tabela 11 do Frostbite (12h) e o cosseno ESQUECIDO: Estocolmo em julho ao meio-dia
+// tem o sol a ~51,7 graus de elevacao, logo mu ~ 0,785, nao 1. O acervo da o numero
+// direto, sem intermediario. Kuzminykh, Bachelorarbeit, eq. 2.17, VERBATIM:
+//   "E_earth,sun ~ I_sun/d^2_au * cos(theta_sun) = 133 334 cos(theta_sun) lx when we
+//    ignore Earth's atmosphere. E.g., given theta_sun = 0 and an atmosphere-less
+//    Earth, the illuminance is around 133 334 lx."
+// E este e o lugar certo do numero: o nosso sun_illum entra no TOPO da atmosfera e a
+// Transmittance LUT aplica a extincao depois. Usar um valor ja atenuado (Tabela 11 e
+// medida ao NIVEL DO SOLO) atenuava duas vezes.
+// Referencia cruzada, Frostbite sec. 4.6 nota 29, VERBATIM: "lux due to the Sun at
+// Earth surface in direction perpendicular to the ground without considering
+// participating media should be in the range 105 000 and 114 000 lux" - esse e o
+// valor NA SUPERFICIE (L=1.6e9 * Omega), nao no topo. Os dois numeros sao coerentes
+// entre si; nos e que estavamos usando o de baixo no lugar do de cima.
+float sun_intensity = 133334.0f;
 
 float ray_strength = 0.6f;
 float ray_decay = 0.97f;
 int ray_samples = 48;
-float shaft_g = 0.55f;      // M2.5-24I-5: 0.5-0.7 = faixa da pesquisa para shafts
+// M2.5-26-26: 0.55 -> 0.80. A auditoria de conformidade achou uma divergencia
+// INTERNA: o atmo_common.hlsli marcha o ar com "const float g = 0.8f;
+// // Cornette-Shanks, padrao do paper" (Hillaire, Tabela 1) e os shafts
+// marchavam O MESMO AR com 0.55, herdado da linhagem Killzone, anterior ao
+// Hillaire. Medido: olhando para o sol, g=0.80 espalha 5,88x mais que g=0.55
+// (+2,56 stops). Duas fisicas para o mesmo ar, no mesmo quadro.
+// A referencia-calibracao ja tinha decidido isto, verbatim: "discordo do nosso
+// proprio botao: o 0,55 e anterior ao Hillaire".
+float shaft_g = 0.80f;      // Cornette-Shanks (Hillaire T1) - o MESMO da atmosfera
 float shaft_height_falloff = 0.015f; // M2.5-24J (B6): queda exp. da densidade do ar com a altura (1/u); 0 = ar uniforme
 // M2.5-25-U6d: forca do dither de saida, em unidades de 1/255 (meio degrau = 1.0).
 // ARTE por eliminacao: nenhuma fonte primaria do acervo prescreve dither de saida.
@@ -353,22 +590,249 @@ float out_crease_brighten = 1.25f;
 bool draw_bloom = true;
 float bloom_intensity = 0.25f;
 float bloom_threshold = 0.75f;
+// M2.5-26-11: teto do que entra na piramide da bloom. Forma com fonte (Frostbite
+// 5.1.3: sensor saturado tem capacidade finita); NUMERO com precedente de producao
+// (Godot glow_hdr_luminance_cap, default 12.0) e sem fonte no acervo - arte declarada.
+float bloom_cap = 12.0f;
+// M2.5-26-11: 0 = ombro exponencial da 24I (satura em tc 1,757), 1 = Khronos PBR
+// Neutral (satura em tc 13,45; preserva bandas entre 0.08 e 0.8 por translacao rigida).
+int tonemap_modo = 1;
+// M2.5-26-14: operador LOCAL de tonemap (Patry, SIGGRAPH 2021, slide 137).
+// c = escala de contraste. A fonte usa "75% High Contrast, 100% Low Contrast" como
+// ajuste tipico em jogo (slide 145) - adotamos 0.75.
+// d = forca do detalhe. Default 1.0; a fonte mostra 1.5 como "50% detail strength
+// boost" (slide 146), usado "sparingly".
+// M (ponto medio em log) NAO e slider: e derivado de exposure_key. A exposicao e
+// definida para que a luminancia media caia em 0,1041667 na tela, entao log dessa
+// chave E o ponto medio por construcao. Um numero a menos para calibrar.
+bool  lt_on = true;
+float lt_c  = 0.75f;
+float lt_d  = 1.0f;
+// M2.5-26-15: O CONTRASTE TEM DOIS LADOS.
+// Patry, SIGGRAPH 2021, slide 145, TITULO VERBATIM:
+//   "Typical In-Game Settings (75% High Contrast, 100% Low Contrast)"
+// Ou seja: a fonte roda o jogo com DUAS escalas de contraste, e a de BAIXO em
+// 100% - isto e, o que esta ABAIXO do ponto medio nao e tocado. So o que esta
+// ACIMA e comprimido. As notas do palestrante nao explicam o titulo, entao a
+// leitura "duas escalas, separadas em M" e INFERENCIA nossa - mas e a unica em
+// que "100% Low Contrast" quer dizer alguma coisa, ja que 1.0 significa "nao
+// mexe". Registrado como leitura, nao como citacao.
+// POR QUE IMPORTA, com medida nossa (5h50): com um c unico de 0.75 e o M 0.74
+// stop acima da media real do quadro, o ganho no pixel medio era exp((c-1)(B-M))
+// = 1.138. O quadro inteiro clareava 13.8% - foi o "deixou tudo mais claro".
+// Com lt_c_lo = 1.0 esse ganho vira exp(0) = 1.000 POR CONSTRUCAO.
+float lt_c_lo = 1.0f;
+// M2.5-26-16: SIGMA DA FAIXA do bilateral, em log-luminancia. A fonte NAO publica
+// este numero - ela usa uma grade de 64 caixas e nunca diz a largura delas. 1.0 em
+// log significa: diferencas acima de ~1,5 stop sao tratadas como BORDA (preservadas)
+// e abaixo disso como ruido (suavizado). ARTE DECLARADA, no painel.
+// M2.5-26-26: 1.00 -> 0.921. Durand & Dorsey, SIGGRAPH 2002, VERBATIM: "The
+// value sigma_r = 0.4 performed consistently well for all our experiments" - em
+// log10. O nosso PS_Down escreve log() natural, entao 0.4 * ln(10) = 0.921.
+// O 1.00 estava +8,6% do valor publicado, sem motivo declarado.
+float lt_sr = 0.921f;
+// M2.5-26-16: peso do bilateral na mistura. Slide 140, VERBATIM: "we used a
+// weighting of 40% for the bilateral blur and 60% for the Gaussian blur". Nasce no
+// valor da fonte. MEDIDO NO NOSSO CASO (quadro das 5h54): com 0.40 nenhum 'c'
+// positivo alcanca a faixa, porque a nossa gaussiana e cega a ela; a mistura
+// precisa passar de ~0.80. A divergencia fica no slider, medida, nao num default.
+float lt_mix = 0.40f;
+// ============================================================================
+// M2.5-26-23a: A GRADE BILATERAL. Todo numero aqui tem fonte nomeada.
+//
+// grid_sr = 0.921 ln. Durand & Dorsey, SIGGRAPH 2002, VERBATIM:
+//   "The value sigma_r = 0.4 performed consistently well for all our
+//    experiments" - em log10. 0.4 * ln(10) = 0.9210.
+// E Chen, Paris & Durand 2007 sec. 3.2, VERBATIM: "we set the sampling rates
+// s_s and s_r to correspond to the bandwidths of the Gaussian sigma_s and
+// sigma_r" - ou seja, A LARGURA DA CAIXA Z E O RANGE SIGMA. Um parametro, nao
+// dois. A profundidade de 12 fatias sai disso: faixa exposta medida nesta
+// engine as 5h54 = ln(156.55/0.002986) = 10.87 ln, dividida por 0.921 = 11.8.
+//
+// grid_lo/grid_hi em unidades de sigma_r, ABAIXO e ACIMA do ponto medio M.
+// A SOMA e 12 por construcao - e a profundidade derivada acima, e manter a soma
+// em 12 mantem a largura da caixa igual a sigma_r, que e a regra do Chen.
+// A REPARTICAO 2/10 vem de MEDIDA, no quadro real das 5h54 (ev_min 4.00): com
+// M = -3.768 ln, o piso do quadro esta em ln(0.00299) = -5.81 = 2.22 sigma_r
+// abaixo, e a faixa do horizonte em ln(156.5) = +5.05 = 9.58 sigma_r acima.
+// Arredondado para 2 e 10, mantendo a soma. O vies para o lado CLARO e
+// deliberado: e o lado que o operador local precisa separar. A assimetria bate
+// com a da propria camera - Frostbite 5.1.2 poe a media em 12,7% da saturacao,
+// entao sobra pouco abaixo dela e a cena vai muito alem acima.
+// Amostras fora da faixa grampeiam na fatia extrema mas entram com o seu valor
+// VERDADEIRO no (wiVi) - politica identica a do histograma da 26-12. Nada e
+// perdido; o que se perde no extremo grampeado e SEPARACAO, nao energia.
+// LACUNA DECLARADA, e ela e da fonte: nem Patry nem Chen publicam o intervalo
+// absoluto do eixo Z. Chen normaliza a guia para [0,1] e a faixa e ENTRADA da
+// aplicacao, nao constante do algoritmo. Estes dois sao sliders por isso.
+//
+// grid_taps = 13. NAO e escolhido, e derivado: a celula tem 2560/64 x 1417/32 =
+// 40 x 44.3 = 1771 pixels da fonte, e 13x13 = 169 amostras = 9.54% deles.
+// Chen sec. 3.5, VERBATIM: "using only 10% of the input pixels produces an
+// output with no visual artifacts", valido "for typical values of sigma_s in
+// [10,50] and sigma_r in [0.05,0.4]" - e nos satisfazemos AS DUAS metades
+// (s_s = 40 e 44.3; sigma_r = 1/12 = 0.083). Modo de falha declarado pela
+// fonte: "except at hard scene transitions".
+// ============================================================================
+bool  grid_on   = true;
+// M2.5-26-23c: de onde o operador local tira o B. false = o caminho antigo
+// (PS_Down + blur, que faz media de bloco ANTES de qualquer bilateral e por isso
+// e cego a faixas finas); true = a grade bilateral da 26-23a. E um botao para
+// comparar os dois a um clique de distancia, que e o unico jeito honesto de
+// julgar - o [MEDIDA] le o composite, ANTES do operador local, e nunca vai ver
+// a diferenca. Aqui o instrumento e a retina, e nao ha instrumento melhor.
+bool  lt_b_grade = false;
+float grid_mix   = 0.40f;  // Patry slide 140: 40% bilateral, 60% gaussiana
+float grid_sr   = 0.921f;  // Durand & Dorsey 2002: 0.4 log10
+float grid_lo   = 2.0f;    // sigma_r abaixo de M
+float grid_hi   = 10.0f;   // sigma_r acima de M
+int   grid_taps = 13;      // 13x13 = 169 = 9.54% da celula (Chen sec. 3.5)
 float tonemap_shoulder = 0.75f; // M2.5-24I: inicio do ombro (abaixo = cores intactas)
+// M2.5-26-24: a cor que o BRANCO deve virar (Ghost of Tsushima, slide 156).
+// (1,1,1) = identidade EXATA - medido, desvio 3.3e-07. O default nao faz nada.
+float wb_alvo[3] = { 1.0f, 1.0f, 1.0f };
 float exposure = 1.0f;          // M2.5-24I-2: a chave do HDR (Lagarde 2014 via Hillaire)
+                                // M2.5-26-6b: NAO E MAIS UM CONTROLE. Virou valor DERIVADO
+                                // de exposure_ev a cada frame. Continua sendo o numero que
+                                // os shaders recebem; so nao e mais o que o dedo toca.
+// M2.5-26-6b: A EXPOSICAO MANUAL PASSA A SER EV100.
+// Divida da 26-2a, cobrada agora. Depois que a pre-exposicao entrou, o slider
+// "Exposicao" multiplica TODA a iluminacao antes de gravar no buffer - mas ficou
+// com o intervalo 0,1-4,0 da regua antiga, enquanto a exposicao fisica de meio-dia
+// vale ~2,6x10^-5. Desligar o automatico e mexer nele estourava tudo em branco.
+// E o mesmo erro de forma do Defeito 3 desta temporada: controle LINEAR para uma
+// grandeza que a fonte parametriza em STOPS. Frostbite (Lagarde & de Rousiers,
+// SIGGRAPH 2014) eq. 69 e Listing 28: exposure = 1/(1.2*2^EV100). Um EV = um stop =
+// um fator 2; a faixa util (-6 a 22) cobre luar e neve ao sol no MESMO slider.
+// Default 15,0: sec. 5.1.4, regra Sunny 16 -> EV100 ~ 14,97 para o meio-dia claro.
+float exposure_ev = 15.0f;
 // M2.5-25-4: exposicao automatica analitica (ver comentario no calculo, no loop de frame)
 bool  auto_exposure = true;      // desligado = o slider "Exposicao" manda, como antes
 float exposure_key = 0.1041667f; // M2.5-25-17: NAO e arte. E K/(1.2*100) com K=12.5, a constante
                                  // do fotometro do Frostbite (eq. 69 + Listing 28, 2014). Substituindo
                                  // uma na outra: exposure = 0.1041667/Lavg - que e exatamente a forma
                                  // do nosso alvo. O gosto mora no EC (Compensacao), como a fonte define.
-float exposure_bias_ev = 0.0f;   // compensacao em STOPS (fotografia) - ARTE
-float exposure_speed = 2.0f;     // velocidade da adaptacao do "olho" (1/s)
+// M2.5-26-18b: RESOLUCAO DE RENDER. Globais para persistirem no tuning.ini.
+// modo 2 = NATIVO e o default; a escada continua inteira (o 180 nunca saiu)
+// porque a direcao de arte pode voltar a ela a qualquer momento.
+int pixel_mode = 2;
+const int alturas[] = { 180, 240, 270, 360, 450, 540, 720, 900, 1080 };
+int altura_idx = 3;
+int pixel_divisor = 4;
+// ============================================================================
+// M2.5-26-22: A COMPENSACAO GANHA VALOR, E ELE E DO ARTHUR.
+//
+// A FONTE reserva este parametro para exatamente isto. Frostbite, eq. 68:
+//     EV100' = EV100 - EC
+// e o texto de 5.1.1, VERBATIM: "artists can apply an exposure compensation
+// (EC, in f-stops) in order to over-expose (i.e. brighten) or under-expose
+// (i.e. darken) the image". A fonte NAO publica um valor - ela assume um
+// artista decidindo por cena.
+//
+// POR QUE PRECISA DE UM. Medido no quadro de meio-dia com EC = 0:
+//     BLOCO min   1873 cd/m2 -> exposto 0.0199 ->  39/255
+//     Lavg        9818       -> exposto 0.1042 ->  91/255
+//     PIXEL max  11250       -> exposto 0.1194 ->  97/255
+// O quadro INTEIRO vivia entre 39 e 97 de 255 - nada alcancava o branco.
+// Nao e defeito: a camera poe a media em 12,7% da saturacao (5.1.2) e a nossa
+// cena de meio-dia tem 2,6 stops de faixa propria. Uma cena de 2,6 stops
+// centrada em 12,7% nao chega no branco POR CONSTRUCAO.
+//
+// DE ONDE VEM O 2,30. Do olho do Arthur, ajustando ate o quadro ter branco.
+// Extraido dos numeros dele: alvo = K/Lavg * 2^EC -> 6.19e-5 = 1.257e-5 * 2^EC
+// -> EC = +2.30. Com ele o meio-dia passa a ir de 75/255 ate estourar.
+// Isto e proveniencia legitima pela politica da casa: quando a documentacao nao
+// fixa o numero, vale quem tem os olhos e a direcao artistica. Neste projeto
+// essa pessoa e o Arthur, e o valor fica escrito aqui em vez de viver num
+// tuning.ini que ja se perdeu uma vez.
+//
+// O CUSTO, dito com numero antes de alguem se assustar: EC e GLOBAL, e o
+// crepusculo paga. Medido as 5h54 (BLOCO max 7095, exposicao 0.00544):
+//     EC = 0.00  ->  faixa exposta  38.6  (+5.27 stops acima da saturacao)
+//     EC = 2.30  ->  faixa exposta 190.0  (+7.57 stops)
+// Sao os mesmos 2,30 stops, na hora em que menos se pode pagar. A NOITE nao
+// paga: com o grampo do ev_min mordendo, o EC nao alcanca (o alvo ja esta acima
+// do teto), entao dia e noite ficam desacoplados por construcao.
+// A saida estrutural e o EC (ou o EV) ser FUNCAO DA HORA, tabelado - e esta e a
+// primeira linha dessa tabela. Enquanto ela nao existe, se o amanhecer incomodar
+// mais que o meio-dia apagado, baixe isto para 0 e espere a grade bilateral.
+// ============================================================================
+float exposure_bias_ev = 2.30f;  // eq. 68 - ARTE, calibrada no olho do Arthur
+// ============================================================================
+// M2.5-26-19: A ADAPTACAO PASSA A ANDAR EM STOPS POR SEGUNDO, E NAO EM
+// "MULTIPLICADOR POR SEGUNDO".
+//
+// O DEFEITO, medido no nosso proprio codigo (aritmetica, nao opiniao). Ate aqui:
+//     cur = prev + (alvo - prev) * (1 - exp(-dt * speed))
+// e uma interpolacao no MULTIPLICADOR. A mesma constante de tempo produz taxas
+// completamente diferentes em STOPS conforme a direcao, porque o multiplicador e
+// exponencial no EV. Simulado com speed = 2,0 e um salto de 11 stops (EV 4 -> 15):
+//     escuro -> claro (a exposicao FECHA):  ~2,9 stops/s, converge em ~5 s
+//     claro -> escuro (a exposicao ABRE):  10,3 stops NO PRIMEIRO MEIO SEGUNDO
+// Ou seja: ~7x mais rapido numa direcao que na outra, e na direcao ERRADA.
+//
+// A DIRECAO CERTA, VERBATIM - Unity HDRP, documentacao de Exposure:
+//     "The human eye adapts slower to darkness than to lightness"
+// O olho fecha rapido na luz e abre devagar no escuro. O nosso fazia o oposto.
+//
+// AS UNIDADES E OS NUMEROS, de quem ja resolveu isto:
+//   Unreal Engine, Post Process Volume, Exposure:
+//     "Speed Up"   - adaptacao indo para um ambiente MAIS CLARO, em f-stops/s
+//     "Speed Down" - adaptacao indo para um ambiente MAIS ESCURO, em f-stops/s
+//   Defaults publicados: Speed Up 3.0, Speed Down 1.0 (razao 3:1).
+//
+// A TRANSICAO LINEAR -> EXPONENCIAL:
+//   Unreal, r.EyeAdaptation.ExponentialTransitionDistance, default 1.5
+//   Acima dessa distancia do alvo a adaptacao e uma RAMPA de taxa constante
+//   (o salto nao pode ser instantaneo por construcao); dentro dela vira
+//   exponencial, para assentar sem batida.
+//
+// CHECAGEM NOSSA do 1,5 (derivacao, marcada como tal): a taxa instantanea do
+// trecho exponencial d*(1-2^(-dt*v)) vale d*v*ln2 stops/s. Ela iguala a taxa da
+// rampa (v stops/s) exatamente em d = 1/ln2 = 1,4427 stops. O 1,5 publicado pela
+// Epic esta a 4% do ponto de continuidade C1 - a forma fecha sozinha.
+//
+// O QUE E MEU AQUI: a montagem em duas pecas (rampa + exponencial) e a conversao
+// exposicao <-> EV. Nenhum NUMERO desta estacao e meu.
+// ============================================================================
+float expo_vel_up = 3.0f;   // stops/s indo para o CLARO  (Unreal Speed Up)
+float expo_vel_dn = 1.0f;   // stops/s indo para o ESCURO (Unreal Speed Down)
+float expo_ev_trans = 1.5f; // stops: onde a rampa vira exponencial (Unreal 1.5)
+// ============================================================================
+// M2.5-26-19: OS PERCENTIS DEIXAM DE SER MEUS.
+//
+// Frostbite sec. 5.1.1 nomeia o METODO (histograma) e nao publica os percentis.
+// A 26-12 preencheu a lacuna com 5% / 95%, que eram MEUS - e o resultado foi uma
+// janela que cobre 90% do quadro, ou seja, praticamente a media de tudo.
+//
+// Quem publica os numeros, VERBATIM - Unreal Engine, Post Process Volume,
+// Exposure, Metering Mode Auto Exposure Histogram:
+//   "Low Percent - a good starting range is 70 to 80"
+//   "High Percent - a good starting range is 80 to 95"
+//
+// A LEITURA CERTA DO PARAMETRO, que a 26-12 errou: nao e "apara as caudas". E uma
+// JANELA ESTREITA E ALTA. Ela pergunta "qual e a luminancia do decil superior do
+// quadro", nao "qual e o brilho medio". Por isso 75/85 e nao 5/95: sao 10% do
+// quadro, escolhidos no alto da distribuicao.
+//
+// MEDIDO NO HISTOGRAMA REAL DAS 5h50 (hist <0:458 0:468 1:54 2:43 3:1):
+//   5/95   -> Lavg ~1,3 cd/m2   EV100 3,4   exposicao 0,077
+//   75/85  -> Lavg ~5,9 cd/m2   EV100 5,6   exposicao 0,018
+//   = 2,1 stops A MENOS de exposicao, que e exatamente o sinal do estouro.
+// APROXIMACAO DECLARADA nesta conta: o histograma so nos da a contagem por
+// DECADA; a distribuicao DENTRO de cada decada foi assumida uniforme em log10.
+// Reconstrucoes diferentes dao entre 2,1 e 2,4 stops.
+// ============================================================================
+float expo_perc_lo = 0.75f;  // Unreal: "Low Percent - a good starting range is 70 to 80"
+float expo_perc_hi = 0.85f;  // Unreal: "High Percent - a good starting range is 80 to 95"
 // M2.5-25-5a: limites da exposicao = ARTE (quanto a noite tem direito de ser escura)
 // M2.5-26-2b: com Lavg de meio-dia perto de 4.000 cd/m2 (Tabela 7: EV100 15), a
 // exposicao passa a viver perto de 0,104167/4000 = 2,6x10^-5. Os limites mudam de
 // ordem de grandeza junto. Ctrl+clique no slider digita o valor exato.
-float exposure_min = 1.0e-7f;
-float exposure_max = 1.0e-3f;
+// M2.5-26-17: exposure_min/exposure_max FORAM REMOVIDOS. Desde a 26-2c quem manda
+// e ev_min/ev_max; estes dois viraram espelho, continuaram sendo salvos no
+// tuning.ini e alimentavam o estimador de CPU que a 26-17 matou. Peso morto que
+// so servia para confundir quem lesse o arquivo de config.
 // M2.5-26-2c: OS LIMITES DA EXPOSICAO PASSAM A SER EV100.
 // Com o sol em lux, a exposicao de meio-dia vale 2,6x10^-5 e a de noite de lua
 // cheia vale 1,71 - SsEIS ORDENS DE GRANDEZA de amplitude. Nenhum slider linear
@@ -377,12 +841,75 @@ float exposure_max = 1.0e-3f;
 // A fonte ja parametriza isso, Listing 28 (Frostbite 5.1):
 //     exposure = convertEV100toExposure(EV100) = 1 / (1.2 * 2^EV100)
 // EV alto = pouca exposicao (dia). EV baixo = muita exposicao (noite).
-// Logo:  exposure_max <-> ev_min   e   exposure_min <-> ev_max.
+// Logo:  ev_min = o teto de exposicao (noite)   e   ev_max = o piso (dia).
+// M2.5-26-17: este comentario citava exposure_min/exposure_max, que deixaram de
+// existir. Comentario que descreve variavel morta e a mesma classe de mentira que
+// o painel: alguem le, acredita, e decide errado.
 // Referencias uteis (Tabela 7): EV100 15 = 4.096 cd/m2 = o meio-dia do Sunny 16.
 // Lua cheia neste motor da Lavg ~ 0,061 cd/m2, que e EV100 ~ -1.
-// Com ev_min = 4, a noite fica ~5 stops abaixo do meio-dia: escura e legivel.
-float ev_min = 4.0f;    // limite do ESCURO: quanto o olho pode abrir a noite
-float ev_max = 20.0f;   // limite do CLARO: quanto pode fechar em luz forte
+// ============================================================================
+// M2.5-26-19: OS LIMITES PASSAM A SER OS DO INSTRUMENTO, NAO OS DA ARTE.
+//
+// Frostbite sec. 5.1 NAO TEM GRAMPO. Verificado, NOT FOUND: nao existe piso de
+// EV, teto, nem limite de auto-exposicao em toda a secao. O nosso grampo era
+// arte vestida com nome de fisica - e a vistoria 26-x mostrou que ele estava
+// grampeando as 5h50 em EV 4,00 com cinco digitos de coincidencia.
+//
+// OS LIMITES DO INSTRUMENTO, pela propria formula da fonte (Listing 28,
+// EV100 = log2(Lux/pi) na leitura por iluminancia):
+//   EV100 = -8  - o limite de captura de luz de ESTRELAS
+//   EV100 = 18  - luz solar direta com margem
+// Fora dessa faixa nao existe cena; dentro dela o medidor nunca deveria ser
+// impedido de medir.
+//
+// O QUE MUDA NA PRATICA, medido: com a janela 75/85 o alvo das 5h50 vale
+// EV 5,56 - fica 1,56 stop DENTRO do antigo grampo de EV 4. Ou seja, as duas
+// mudancas desta estacao sao independentes: a janela conserta o crepusculo, e
+// tirar o grampo conserta a noite. Com 5/95 elas brigavam (a vistoria 26-x
+// mostrou que abrir o grampo PIORAVA o estouro em 0,57 stop); com 75/85 nao.
+//
+// ONDE A ARTE VOLTA A MORAR: em "Compensacao (EV)", que e o parametro que a
+// fonte reserva para isso (eq. 68, EV100' = EV100 - EC). Se a noite ficar clara
+// demais, o ajuste e la - ou subindo este slider de volta, agora sabendo que
+// isso e uma decisao de arte e nao um limite do medidor.
+// ============================================================================
+// ============================================================================
+// M2.5-26-22: O PISO DA NOITE VOLTA, AGORA COM O NOME CERTO.
+//
+// A 26-19 tirou este grampo alegando que Frostbite 5.1 nao tem nenhum
+// (verificado, NOT FOUND) e o pos no limite do instrumento (-8). O resultado
+// foi imediato e o Arthur reportou em uma frase: "a noite esta tao clara que
+// parece quase dia".
+//
+// A ALGEBRA DE POR QUE ISSO ERA INEVITAVEL. Eq. 69 + Listing 28 dao
+// alvo = K / Lavg, logo Lavg * alvo = K = 0,104 para QUALQUER cena. Medido:
+//     noite, chao   Lavg 0.09424 x exposicao 1.004      = 0.0946
+//     noite, ceu    Lavg 0.12    x exposicao 0.8604     = 0.1032
+//     dia 11h89     Lavg 9818    x exposicao 1.061e-05  = 0.1042
+// A media exposta e SEMPRE 0,104. Noite e dia recebem o mesmo brilho medio na
+// tela - e isso e o que exposicao automatica FAZ, nao um defeito dela.
+//
+// E POR ISSO CONSERTAR A LUA NAO RESOLVE: divida moon_scene_bright por 10 e o
+// alvo multiplica por 10; a tela nao muda um valor. (A lua CONTINUA errada por
+// 3,4 stops, por dois caminhos independentes - so nao e este o sintoma.)
+//
+// A UNICA coisa que escurecia a noite era este grampo:
+//     ev_min 4.06 -> exposicao maxima 0.0507 ; alvo da noite 0.4518
+//     = 3,18 stops de escurecimento
+//
+// DE ONDE VEM O 4,06. Do olho do Arthur, subindo o slider ate a noite parecer
+// noite. O valor que estava aqui antes da 26-19 era 4,00. O olho dele
+// reproduziu o numero antigo com 0,06 de diferenca, o que e a melhor prova que
+// a gente vai ter de que isto sempre foi ARTE e nunca foi fisica.
+// Nao existe resposta publicada para "quao escura a noite deve ser". A
+// Frostbite nao tem grampo porque assume um artista decidindo. Aqui o artista
+// e o Arthur, e o numero e dele.
+//
+// ev_max continua em 18 (limite do instrumento, EV100 = log2(lux/pi), sol
+// direto com margem). Ele nunca mordeu em cena nenhuma - o meio-dia mede 16.
+// ============================================================================
+float ev_min = 4.06f;   // ARTE, olho do Arthur: o piso da noite (era 4.00 antes da 26-19)
+float ev_max = 18.0f;   // limite do CLARO: EV100 18 = sol direto com margem
 // M2.5-26-2b: agora em cd/m2 DE VERDADE. Item N3.1 da checklist da noite, com tres
 // fontes convergentes: o ceu sem lua vale 2x10^-4 cd/m2 (22,0 mag/arcsec2). Ate a
 // 25-U6 esse numero era inexprimivel - o passo minimo do slider valia 66.000x o
@@ -431,7 +958,22 @@ float moon_scene_bright = 1.754f;
 // 1.0 = extincao fisica pura (Tabela 1 do Hillaire). Acima disso e bruma de ARTE.
 float aerial_str = 1.0f;
 float moon_tint[3] = { 0.80f, 0.88f, 1.00f }; // luar levemente frio (arte)
-float exposure_auto_cur = 1.0f;  // valor suavizado corrente (nao persiste: converge sozinho)
+// ============================================================================
+// M2.5-25-18: AS ESTRELAS. Item 5 do VEREDITO da checklist da noite, e o
+// primeiro depois que as unidades fisicas destravaram - o mapa-do-projeto diz
+// por que ele esperava, verbatim: "A conversao canonica e magnitude aparente ->
+// luminancia (Pogson, N3.4). Magnitude e uma escala fotometrica: com o ceu ja
+// em cd/m2 ela entra direto, SEM GANHO ARBITRARIO."
+// A escala absoluta NAO e slider: sai de N3.1 + N3.4 e vive no shader. O que e
+// slider aqui e o que a fonte nao fixa.
+// ============================================================================
+float stars_str     = 1.0f;   // 1.0 = a luminancia fisica. Acima disso e ARTE.
+float stars_mag_lim = 6.50f;  // magnitude mais fraca desenhada (limite do olho nu)
+float stars_size    = 0.70f;  // sigma do borrao, em PIXELS. NAO muda o brilho:
+                              // a energia e conservada, so o espalhamento muda.
+float stars_dens    = 40.0f;  // celulas por lado de face do cubo: 6*40^2 = 9.600
+float stars_slope   = 0.50f;  // LACUNA: a inclinacao da contagem por magnitude
+                              // nao tem fonte no acervo. Entra como arte.
 float shaft_cloud_occ = 0.95f;  // M2.5-24I-5: quase-binario de verdade (T ~ 0.05 sob nuvem)
 
 bool draw_grass = true;
@@ -443,6 +985,29 @@ bool draw_shadows = true;
 bool debug_shadows = false;
 float obj_shadow_str = 0.8f;
 float obj_shadow_bias = 0.005f;
+
+// M2.5-26-M: half-float -> float, para ler de volta o mapa de log-luminancia.
+static float h2f(uint16_t h)
+{
+    uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+    uint32_t f;
+    if (e == 0u) {
+        if (m == 0u) { f = s << 31; }
+        else { uint32_t ee = 127u - 15u + 1u;
+               while ((m & 0x400u) == 0u) { m <<= 1; --ee; }
+               m &= 0x3FFu; f = (s << 31) | (ee << 23) | (m << 13); }
+    } else if (e == 31u) { f = (s << 31) | 0x7F800000u | (m << 13); }
+    else { f = (s << 31) | ((e - 15u + 127u) << 23) | (m << 13); }
+    float r; std::memcpy(&r, &f, 4); return r;
+}
+static bool g_medir_pedido = false; // M2.5-26-M: botao "Medir agora"
+// M2.5-26-17: o painel passa a mostrar a ULTIMA MEDIDA, com o tick em que ela foi
+// tirada. E um retrato datado em vez de uma estimativa continua que nao renderiza.
+static double   g_med_expo = 0.0;
+static double   g_med_ev   = 0.0;
+static uint64_t g_med_tick = 0;
+static double   g_med_lavg = 0.0; // M2.5-26-20: a replica de CPU do l_avg, para
+                                  // confrontar com o que a GPU de fato calculou
 
 auto save_tuning = []() {
     std::filesystem::create_directories("config");
@@ -502,6 +1067,10 @@ auto save_tuning = []() {
     f << "sun_yaw=" << sun_yaw << "\n";
     f << "sun_pitch=" << sun_pitch << "\n";
     f << "sun_ambient=" << sun_ambient << "\n";
+    f << "sky_light_str=" << sky_light_str << "\n"; // 26-7
+    f << "aerial_cena=" << (aerial_cena ? 1 : 0) << "\n";   // 26-8
+    f << "aerial_steps=" << aerial_steps << "\n";
+    f << "aerial_cena_str=" << aerial_cena_str << "\n";
     f << "sun_intensity=" << sun_intensity << "\n";
     f << "ray_strength=" << ray_strength << "\n";
     f << "ray_decay=" << ray_decay << "\n";
@@ -513,14 +1082,38 @@ auto save_tuning = []() {
     f << "draw_bloom=" << (draw_bloom ? "1" : "0") << "\n";
     f << "bloom_intensity=" << bloom_intensity << "\n";
     f << "bloom_threshold=" << bloom_threshold << "\n";
+    f << "bloom_cap=" << bloom_cap << "\n";           // 26-11
+    f << "tonemap_modo=" << tonemap_modo << "\n";     // 26-11
+    f << "lt_on=" << (lt_on ? 1 : 0) << "\n";          // 26-14
+    f << "lt_c=" << lt_c << "\n";
+    f << "lt_d=" << lt_d << "\n";
+    f << "lt_c_lo=" << lt_c_lo << "\n";   // 26-15
+    f << "lt_sr=" << lt_sr << "\n";       // 26-16
+    f << "lt_mix=" << lt_mix << "\n";
+    f << "lt_b_grade=" << (lt_b_grade ? 1 : 0) << "\n"; // 26-23c
+    f << "grid_mix=" << grid_mix << "\n";
+    f << "grid_on=" << (grid_on ? 1 : 0) << "\n";   // 26-23a
+    f << "grid_sr=" << grid_sr << "\n";
+    f << "grid_lo=" << grid_lo << "\n";
+    f << "grid_hi=" << grid_hi << "\n";
+    f << "grid_taps=" << grid_taps << "\n";
     f << "tonemap_shoulder=" << tonemap_shoulder << "\n";
+    f << "wb_alvo_r=" << wb_alvo[0] << "\n";   // 26-24
+    f << "wb_alvo_g=" << wb_alvo[1] << "\n";
+    f << "wb_alvo_b=" << wb_alvo[2] << "\n";
     f << "exposure=" << exposure << "\n";
+    f << "exposure_ev=" << exposure_ev << "\n"; // 26-6b
     f << "auto_exposure=" << (auto_exposure ? 1 : 0) << "\n";
     f << "exposure_key=" << exposure_key << "\n";
     f << "exposure_bias_ev=" << exposure_bias_ev << "\n";
-    f << "exposure_speed=" << exposure_speed << "\n";
-    f << "exposure_min=" << exposure_min << "\n";
-    f << "exposure_max=" << exposure_max << "\n";
+    f << "expo_vel_up=" << expo_vel_up << "\n";     // 26-19
+    f << "expo_vel_dn=" << expo_vel_dn << "\n";
+    f << "expo_ev_trans=" << expo_ev_trans << "\n";
+    f << "expo_perc_lo=" << expo_perc_lo << "\n"; // 26-12
+    f << "expo_perc_hi=" << expo_perc_hi << "\n";
+    f << "pixel_mode=" << pixel_mode << "\n";       // 26-18b
+    f << "altura_idx=" << altura_idx << "\n";
+    f << "pixel_divisor=" << pixel_divisor << "\n";
     f << "ev_min=" << ev_min << "\n";
     f << "ev_max=" << ev_max << "\n";
     f << "night_sky_floor=" << night_sky_floor << "\n";
@@ -534,6 +1127,11 @@ auto save_tuning = []() {
     f << "moon_disk_bright=" << moon_disk_bright << "\n";
     f << "moon_scene_bright=" << moon_scene_bright << "\n";
     f << "aerial_str=" << aerial_str << "\n";
+    f << "stars_str=" << stars_str << "\n";           // 25-18
+    f << "stars_mag_lim=" << stars_mag_lim << "\n";
+    f << "stars_size=" << stars_size << "\n";
+    f << "stars_dens=" << stars_dens << "\n";
+    f << "stars_slope=" << stars_slope << "\n";
     f << "moon_tint_r=" << moon_tint[0] << "\n";
     f << "moon_tint_g=" << moon_tint[1] << "\n";
     f << "moon_tint_b=" << moon_tint[2] << "\n";
@@ -608,7 +1206,24 @@ auto load_tuning = []() {
             else if (key == "sky_gain") sky_gain = std::stof(val);
             else if (key == "cloud_silver_spread") cloud_silver_spread = std::stof(val);
             else if (key == "clima_cov_teto") clima_cov_teto = std::stof(val);
-            else if (key == "clima_type_teto") clima_type_teto = std::stof(val);
+            // ================================================================
+            // M2.5-26-24a: A CADEIA DE 'else if' E QUEBRADA AQUI, DE PROPOSITO.
+            //
+            // O DEFEITO, medido: o MSVC conta cada 'else if' como um BLOCO
+            // ANINHADO. O limite dele e 128 (C1061 - "blocos com aninhamento
+            // muito profundo"), e esta cadeia tinha 123 ramos mais o try, o
+            // while e a funcao em volta. A 26-24 acrescentou tres chaves e
+            // estourou. O g++ compila sem reclamar; so o MSVC morre.
+            //
+            // POR QUE ISTO E SEGURO: as chaves sao UNICAS. Se um ramo do trecho
+            // anterior casou, este trecho roda as comparacoes dele e nenhuma
+            // casa - mesmo resultado, algumas comparacoes de string a mais, uma
+            // vez so no arranque. O comportamento nao muda em nada.
+            //
+            // NAO EXISTE 'else' SOLTO nesta regiao (conferido antes do corte);
+            // se existisse, cortar mudaria a quem ele se liga.
+            // ================================================================
+            if (key == "clima_type_teto") clima_type_teto = std::stof(val);
             else if (key == "cloud_curvatura") cloud_curvatura = std::stof(val);
             else if (key == "cloud_fade_ini") cloud_fade_ini = std::stof(val);
             else if (key == "cloud_passo_far") cloud_passo_far = std::stof(val);
@@ -617,6 +1232,10 @@ auto load_tuning = []() {
             else if (key == "sun_yaw") sun_yaw = std::stof(val);
             else if (key == "sun_pitch") sun_pitch = std::stof(val);
             else if (key == "sun_ambient") sun_ambient = std::stof(val);
+            else if (key == "sky_light_str") sky_light_str = std::stof(val); // 26-7 (chave nova: default 1.0 se ausente)
+            else if (key == "aerial_cena") aerial_cena = (std::stoi(val) != 0);      // 26-8
+            else if (key == "aerial_steps") aerial_steps = std::stoi(val);
+            else if (key == "aerial_cena_str") aerial_cena_str = std::stof(val);
             else if (key == "sun_intensity") sun_intensity = std::stof(val);
             else if (key == "ray_strength") ray_strength = std::stof(val);
             else if (key == "ray_decay") ray_decay = std::stof(val);
@@ -628,14 +1247,58 @@ auto load_tuning = []() {
             else if (key == "draw_bloom") draw_bloom = (val == "1");
             else if (key == "bloom_intensity") bloom_intensity = std::stof(val);
             else if (key == "bloom_threshold") bloom_threshold = std::stof(val);
+            else if (key == "bloom_cap") bloom_cap = std::stof(val);         // 26-11
+            else if (key == "tonemap_modo") tonemap_modo = std::stoi(val);   // 26-11
+            else if (key == "lt_on") lt_on = (std::stoi(val) != 0);          // 26-14
+            else if (key == "lt_c") lt_c = std::stof(val);
+            else if (key == "lt_d") lt_d = std::stof(val);
+            else if (key == "lt_c_lo") lt_c_lo = std::stof(val);            // 26-15
+            else if (key == "lt_sr") lt_sr = std::stof(val);                // 26-16
+            else if (key == "lt_mix") lt_mix = std::stof(val);
+            else if (key == "lt_b_grade") lt_b_grade = (std::stoi(val) != 0); // 26-23c
+            else if (key == "grid_mix") grid_mix = std::stof(val);
+            else if (key == "grid_on") grid_on = (std::stoi(val) != 0);      // 26-23a
+            else if (key == "grid_sr") grid_sr = std::stof(val);
+            else if (key == "grid_lo") grid_lo = std::stof(val);
+            else if (key == "grid_hi") grid_hi = std::stof(val);
+            else if (key == "grid_taps") grid_taps = std::stoi(val);
             else if (key == "tonemap_shoulder") tonemap_shoulder = std::stof(val);
-            else if (key == "exposure") exposure = std::stof(val);
+            else if (key == "wb_alvo_r") wb_alvo[0] = std::stof(val);   // 26-24
+            else if (key == "wb_alvo_g") wb_alvo[1] = std::stof(val);
+            else if (key == "wb_alvo_b") wb_alvo[2] = std::stof(val);
+            // ================================================================
+            // M2.5-26-24a: A CADEIA DE 'else if' E QUEBRADA AQUI, DE PROPOSITO.
+            //
+            // O DEFEITO, medido: o MSVC conta cada 'else if' como um BLOCO
+            // ANINHADO. O limite dele e 128 (C1061 - "blocos com aninhamento
+            // muito profundo"), e esta cadeia tinha 123 ramos mais o try, o
+            // while e a funcao em volta. A 26-24 acrescentou tres chaves e
+            // estourou. O g++ compila sem reclamar; so o MSVC morre.
+            //
+            // POR QUE ISTO E SEGURO: as chaves sao UNICAS. Se um ramo do trecho
+            // anterior casou, este trecho roda as comparacoes dele e nenhuma
+            // casa - mesmo resultado, algumas comparacoes de string a mais, uma
+            // vez so no arranque. O comportamento nao muda em nada.
+            //
+            // NAO EXISTE 'else' SOLTO nesta regiao (conferido antes do corte);
+            // se existisse, cortar mudaria a quem ele se liga.
+            // ================================================================
+            if (key == "exposure") exposure = std::stof(val);
+            else if (key == "exposure_ev") exposure_ev = std::stof(val); // 26-6b: chave NOVA -
+            // ausente no tuning.ini antigo, entao o default 15,0 (Sunny 16) prevalece sozinho
+            // e nenhuma migracao e necessaria. O "exposure=" velho continua sendo lido e e
+            // sobrescrito no primeiro frame pelo valor derivado - fica so como historico.
             else if (key == "auto_exposure") auto_exposure = (std::stoi(val) != 0);
             else if (key == "exposure_key") exposure_key = std::stof(val);
             else if (key == "exposure_bias_ev") exposure_bias_ev = std::stof(val);
-            else if (key == "exposure_speed") exposure_speed = std::stof(val);
-            else if (key == "exposure_min") exposure_min = std::stof(val);
-            else if (key == "exposure_max") exposure_max = std::stof(val);
+            else if (key == "expo_vel_up") expo_vel_up = std::stof(val);       // 26-19
+            else if (key == "expo_vel_dn") expo_vel_dn = std::stof(val);
+            else if (key == "expo_ev_trans") expo_ev_trans = std::stof(val);
+            else if (key == "expo_perc_lo") expo_perc_lo = std::stof(val); // 26-12
+            else if (key == "expo_perc_hi") expo_perc_hi = std::stof(val);
+            else if (key == "pixel_mode") pixel_mode = std::stoi(val);          // 26-18b
+            else if (key == "altura_idx") altura_idx = std::stoi(val);
+            else if (key == "pixel_divisor") pixel_divisor = std::stoi(val);
             else if (key == "ev_min") ev_min = std::stof(val);
             else if (key == "ev_max") ev_max = std::stof(val);
             else if (key == "night_sky_floor") night_sky_floor = std::stof(val);
@@ -649,6 +1312,11 @@ auto load_tuning = []() {
             else if (key == "moon_disk_bright") moon_disk_bright = std::stof(val);
             else if (key == "moon_scene_bright") moon_scene_bright = std::stof(val);
             else if (key == "aerial_str") aerial_str = std::stof(val);
+            else if (key == "stars_str") stars_str = std::stof(val);              // 25-18
+            else if (key == "stars_mag_lim") stars_mag_lim = std::stof(val);
+            else if (key == "stars_size") stars_size = std::stof(val);
+            else if (key == "stars_dens") stars_dens = std::stof(val);
+            else if (key == "stars_slope") stars_slope = std::stof(val);
             else if (key == "moon_tint_r") moon_tint[0] = std::stof(val);
             else if (key == "moon_tint_g") moon_tint[1] = std::stof(val);
             else if (key == "moon_tint_b") moon_tint[2] = std::stof(val);
@@ -673,18 +1341,38 @@ auto load_tuning = []() {
     // exposicao automatica esconderia o estrago, porque ela normaliza o brilho medio.
     // Detectamos pelo proprio valor: nenhuma calibracao em lux fica abaixo de 100.
     if (sun_intensity < 100.0f) {
-        sun_intensity     = 116216.0f;  // Tabela 11 (12h, 90.700 lx) / T*mu
+        sun_intensity     = 133334.0f;  // 26-9a: Kuzminykh eq. 2.17 (topo da atmosfera)
         moon_scene_bright = 1.754f;     // N2.4 (ceu de lua cheia 0,03 cd/m2)
         night_sky_floor   = 0.0002f;    // N3.1 (2x10^-4 cd/m2)
         sun_disk_bright   = 1.0f;       // E / Omega
         moon_disk_bright  = 1.0f;       // rho/pi * E_sol
         sky_gain          = 1.0f;       // legado, sem funcao
-        exposure_min      = 1.0e-7f;
-        exposure_max      = 1.0e-3f;
-        ev_min            = 4.0f;       // 26-2c: noite ~5 stops abaixo do meio-dia
-        ev_max            = 20.0f;
+        ev_min            = 4.06f;      // 26-22: ARTE, o piso da noite (olho do Arthur)
+        ev_max            = 18.0f;      // 26-19: limite do instrumento (sol direto)
         sun_disk_bright   = 0.005f;     // 26-2c: ver o comentario do disco solar
         SDL_Log("[26-2b] tuning.ini era da regua antiga (sol=%.3f) - valores de LUZ resetados para as unidades fisicas. A ARTE nao foi tocada. Salvar Config para persistir.", 1.0f);
+    }
+
+    // M2.5-26-10a: O RAIO ANGULAR DOS DISCOS E GEOMETRIA, NAO ARTE.
+    // Guarda propria, independente da migracao de lux acima, porque o estrago e de
+    // outra natureza e pode sobreviver a um "Salvar Config".
+    // Sol: raio 0,2725 graus (diametro 0,545) - Frostbite sec. 4.6 nota 28, verbatim:
+    //   "The sun has an angular diameter between 0.526 and 0.545 [...] this mean a
+    //    solid angle between 0.000066 and 0.000071 as seen from Earth."
+    // Lua: raio ~0,26 graus (diametro ~0,52) - N1.1 da checklist da noite.
+    // POR QUE ISTO E URGENTE, com numero: a luminancia do disco da LUA e
+    //   L = (rho/pi) * E_sol * N.L
+    // - uma radiancia de SUPERFICIE, que NAO depende do raio. O raio decide apenas
+    // quantos pixels recebem esse valor, e area cresce com o quadrado. Um disco de
+    // 3 graus contra os 0,26 reais emite (3/0,26)^2 = 133x a energia certa. Com a
+    // bloom em cima, a lua vira um sol - foi exatamente o relato da retina.
+    // (O disco do SOL e outro caso: ele divide por Omega, entao mudar o raio
+    // CONSERVA energia - espalha a mesma luz por 121x a area. Nao estoura mais,
+    // mas vira um bolo branco em vez de um ponto. Tambem errado, sem ser explosivo.)
+    if (sun_disk_deg > 1.0f || moon_disk_deg > 1.0f) {
+        SDL_Log("[26-10a] discos com raio %.3f / %.3f graus (sol/lua) - sao GEOMETRIA e estavam com valores da era da regua arbitraria. Restaurados para 0.2725 / 0.26. Salvar Config para persistir.", sun_disk_deg, moon_disk_deg);
+        sun_disk_deg  = 0.2725f;
+        moon_disk_deg = 0.26f;
     }
     SDL_Log("Tuning carregado de config/tuning.ini");
     };
@@ -732,7 +1420,7 @@ int main(int argc, char* argv[]) {
     ps_info.entrypoint = "PSMain";
     ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    ps_info.num_samplers = 5; // M2.5-26-2a: + a exposicao (pre-exposicao no epilogo)
+    ps_info.num_samplers = 7; // M2.5-26-8: + as duas LUTs da atmosfera (t5/t6)
     ps_info.num_uniform_buffers = 2;
     SDL_GPUShader* ps = SDL_CreateGPUShader(device, &ps_info);
     if (!ps) return 1;
@@ -753,7 +1441,7 @@ int main(int argc, char* argv[]) {
     fs_ps_info.entrypoint = "PSMain";
     fs_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     fs_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    fs_ps_info.num_samplers = 7; // M2.5-26-4: + a exposicao medida (1x1)
+    fs_ps_info.num_samplers = 9; // M2.5-26-23a: + o atlas da grade bilateral (t8)
     fs_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* fs_ps = SDL_CreateGPUShader(device, &fs_ps_info);
     if (!fs_ps) return 1;
@@ -816,7 +1504,7 @@ int main(int argc, char* argv[]) {
     grass_ps_info.entrypoint = "PSMain";
     grass_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
     grass_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-    grass_ps_info.num_samplers = 5; // M2.5-26-2a: + a exposicao (pre-exposicao no epilogo)
+    grass_ps_info.num_samplers = 7; // M2.5-26-8: + as duas LUTs da atmosfera (t5/t6)
     grass_ps_info.num_uniform_buffers = 1;
     SDL_GPUShader* grass_ps = SDL_CreateGPUShader(device, &grass_ps_info);
     if (!grass_ps) return 1;
@@ -896,6 +1584,55 @@ int main(int argc, char* argv[]) {
     expo_adapt_info.num_uniform_buffers = 1;
     SDL_GPUShader* expo_adapt_ps = SDL_CreateGPUShader(device, &expo_adapt_info);
     if (!expo_adapt_ps) { SDL_Log("FALHA expo_adapt_ps: %s", SDL_GetError()); return 1; }
+
+    // M2.5-26-14: shaders do operador local (Patry, SIGGRAPH 2021). Reaproveitam o
+    // vertex shader da exposicao - e o mesmo triangulo de tela cheia.
+    SDL_GPUShaderCreateInfo lt_down_info = {};
+    lt_down_info.code = g_lt_down_ps;
+    lt_down_info.code_size = sizeof(g_lt_down_ps);
+    lt_down_info.entrypoint = "PS_Down";
+    lt_down_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    lt_down_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    lt_down_info.num_samplers = 2; // 26-15: cena + bloom
+    lt_down_info.num_uniform_buffers = 1;
+    SDL_GPUShader* lt_down_ps = SDL_CreateGPUShader(device, &lt_down_info);
+    if (!lt_down_ps) { SDL_Log("FALHA lt_down_ps: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo lt_blur_info = {};
+    lt_blur_info.code = g_lt_blur_ps;
+    lt_blur_info.code_size = sizeof(g_lt_blur_ps);
+    lt_blur_info.entrypoint = "PS_Blur";
+    lt_blur_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    lt_blur_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    lt_blur_info.num_samplers = 1;
+    lt_blur_info.num_uniform_buffers = 1;
+    SDL_GPUShader* lt_blur_ps = SDL_CreateGPUShader(device, &lt_blur_info);
+    if (!lt_blur_ps) { SDL_Log("FALHA lt_blur_ps: %s", SDL_GetError()); return 1; }
+
+    // M2.5-26-16: o bilateral. Le a log-luminancia crua (t0) e o B gaussiano (t1).
+    SDL_GPUShaderCreateInfo lt_bilat_info = {};
+    lt_bilat_info.code = g_lt_bilat_ps;
+    lt_bilat_info.code_size = sizeof(g_lt_bilat_ps);
+    lt_bilat_info.entrypoint = "PS_Bilat";
+    lt_bilat_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    lt_bilat_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    lt_bilat_info.num_samplers = 2;
+    lt_bilat_info.num_uniform_buffers = 1;
+    SDL_GPUShader* lt_bilat_ps = SDL_CreateGPUShader(device, &lt_bilat_info);
+    if (!lt_bilat_ps) { SDL_Log("FALHA lt_bilat_ps: %s", SDL_GetError()); return 1; }
+
+    // M2.5-26-23a: a construcao da grade. TRES samplers: a cena pre-exposta (t0),
+    // o bloom (t1) e a exposicao 1x1 (t2, para o ponto medio M).
+    SDL_GPUShaderCreateInfo lt_grid_info = {};
+    lt_grid_info.code = g_lt_grid_ps;
+    lt_grid_info.code_size = sizeof(g_lt_grid_ps);
+    lt_grid_info.entrypoint = "PS_Grid";
+    lt_grid_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    lt_grid_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    lt_grid_info.num_samplers = 3;
+    lt_grid_info.num_uniform_buffers = 1;
+    SDL_GPUShader* lt_grid_ps = SDL_CreateGPUShader(device, &lt_grid_info);
+    if (!lt_grid_ps) { SDL_Log("FALHA lt_grid_ps: %s", SDL_GetError()); return 1; }
 
     SDL_GPUShaderCreateInfo shadow_vs_info = {};
     shadow_vs_info.code = g_shadow_vs;
@@ -1203,14 +1940,18 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUTransferBuffer(device, dome_tb);
 
 
-    int pixel_mode = 1;
-    const int alturas[] = { 180, 240, 270, 360, 450, 540 };
-    int altura_idx = 3;
-    int pixel_divisor = 4;
+    // M2.5-26-18b: as tres viraram GLOBAIS (topo do arquivo) para poderem ser
+    // salvas no tuning.ini - save/load sao funcoes livres e nao enxergam locais
+    // de main(). Sem isso a escolha de resolucao nao sobrevive a um restart, que
+    // e metade do valor de ter o dial.
     bool resize_needed = false;
 
     int internal_w, internal_h;
-    if (pixel_mode == 0) {
+    if (pixel_mode == 2) {                 // M2.5-26-18: NATIVO
+        internal_w = std::max(2, win_w) & ~1;
+        internal_h = std::max(1, win_h);
+    }
+    else if (pixel_mode == 0) {
         internal_w = std::max(1, win_w / pixel_divisor);
         internal_h = std::max(1, win_h / pixel_divisor);
     }
@@ -1345,6 +2086,10 @@ int main(int argc, char* argv[]) {
 
     // M2.5-21: Leitura silenciosa dos parametros antes da simulacao
     load_tuning();
+    // M2.5-26-18b: o load roda DEPOIS de a resolucao ter sido calculada e das
+    // texturas criadas (a ordem do arquivo). Sem forcar o resize, a resolucao
+    // vinda do ini so valeria apos um redimensionamento manual da janela.
+    resize_needed = true;
 
     social::Relations rels;
     {
@@ -2062,6 +2807,52 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
     SDL_GPUGraphicsPipeline* fs_pipeline = SDL_CreateGPUGraphicsPipeline(device, &fs_pipe_info);
     if (!fs_pipeline) { SDL_Log("FALHA fs_pipeline: %s", SDL_GetError()); return 1; }
 
+    // ========================================================================
+    // M2.5-26-25: O PIPELINE DA MARCHA VOLUMETRICA.
+    // Alvo: o composite_color (R16G16B16A16_FLOAT), nao o swapchain - e a
+    // diferenca inteira desta estacao. BLEND ADITIVO, o mesmo estado que o
+    // bloom_up ja usa desde a 23: ONE/ONE, BLENDOP_ADD.
+    // QUATRO samplers so: profundidade, shadow map, weather map e a exposicao
+    // anterior. A marcha nunca precisou de mais que isso; ela e que estava
+    // hospedada num shader de nove.
+    // ========================================================================
+    SDL_GPUShaderCreateInfo sh_vs_info = {};
+    sh_vs_info.code = g_shaft_vs; sh_vs_info.code_size = sizeof(g_shaft_vs);
+    sh_vs_info.entrypoint = "VSMain"; sh_vs_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    sh_vs_info.stage = SDL_GPU_SHADERSTAGE_VERTEX;
+    SDL_GPUShader* shaft_vs = SDL_CreateGPUShader(device, &sh_vs_info);
+    if (!shaft_vs) { SDL_Log("FALHA shaft_vs: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUShaderCreateInfo sh_ps_info = {};
+    sh_ps_info.code = g_shaft_ps; sh_ps_info.code_size = sizeof(g_shaft_ps);
+    sh_ps_info.entrypoint = "PSMain"; sh_ps_info.format = SDL_GPU_SHADERFORMAT_DXBC;
+    sh_ps_info.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    sh_ps_info.num_samplers = 4;
+    sh_ps_info.num_uniform_buffers = 1;
+    SDL_GPUShader* shaft_ps = SDL_CreateGPUShader(device, &sh_ps_info);
+    if (!shaft_ps) { SDL_Log("FALHA shaft_ps: %s", SDL_GetError()); return 1; }
+
+    SDL_GPUColorTargetDescription sh_color_desc = {};
+    sh_color_desc.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    sh_color_desc.blend_state.enable_blend = true;
+    sh_color_desc.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    sh_color_desc.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    sh_color_desc.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    sh_color_desc.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    sh_color_desc.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    sh_color_desc.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+
+    SDL_GPUGraphicsPipelineCreateInfo sh_pipe_info = {};
+    sh_pipe_info.vertex_shader = shaft_vs;
+    sh_pipe_info.fragment_shader = shaft_ps;
+    sh_pipe_info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    sh_pipe_info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    sh_pipe_info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    sh_pipe_info.target_info.num_color_targets = 1;
+    sh_pipe_info.target_info.color_target_descriptions = &sh_color_desc;
+    SDL_GPUGraphicsPipeline* shaft_pipeline = SDL_CreateGPUGraphicsPipeline(device, &sh_pipe_info);
+    if (!shaft_pipeline) { SDL_Log("FALHA shaft_pipeline: %s", SDL_GetError()); return 1; }
+
     // M2.5-23: Criacao Unificada das 3 Permutacoes do Bloom Pipeline (LDR/Additive)
     SDL_GPUGraphicsPipelineCreateInfo b_pipe_info = {};
     b_pipe_info.vertex_shader = bloom_vs;
@@ -2112,6 +2903,24 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
     SDL_GPUGraphicsPipeline* expo_adapt_pipeline = SDL_CreateGPUGraphicsPipeline(device, &e_pipe_info);
     if (!expo_adapt_pipeline) { SDL_Log("FALHA expo_adapt_pipeline: %s", SDL_GetError()); return 1; }
 
+    // M2.5-26-14: pipelines do operador local. Mesmo molde da exposicao (alvo
+    // R16G16B16A16_FLOAT, tamanho fixo), entao herdam o e_pipe_info.
+    e_pipe_info.fragment_shader = lt_down_ps;
+    SDL_GPUGraphicsPipeline* lt_down_pipeline = SDL_CreateGPUGraphicsPipeline(device, &e_pipe_info);
+    if (!lt_down_pipeline) { SDL_Log("FALHA lt_down_pipeline: %s", SDL_GetError()); return 1; }
+
+    e_pipe_info.fragment_shader = lt_blur_ps;
+    SDL_GPUGraphicsPipeline* lt_blur_pipeline = SDL_CreateGPUGraphicsPipeline(device, &e_pipe_info);
+    if (!lt_blur_pipeline) { SDL_Log("FALHA lt_blur_pipeline: %s", SDL_GetError()); return 1; }
+
+    e_pipe_info.fragment_shader = lt_bilat_ps; // M2.5-26-16
+    SDL_GPUGraphicsPipeline* lt_bilat_pipeline = SDL_CreateGPUGraphicsPipeline(device, &e_pipe_info);
+    if (!lt_bilat_pipeline) { SDL_Log("FALHA lt_bilat_pipeline: %s", SDL_GetError()); return 1; }
+
+    e_pipe_info.fragment_shader = lt_grid_ps; // M2.5-26-23a
+    SDL_GPUGraphicsPipeline* lt_grid_pipeline = SDL_CreateGPUGraphicsPipeline(device, &e_pipe_info);
+    if (!lt_grid_pipeline) { SDL_Log("FALHA lt_grid_pipeline: %s", SDL_GetError()); return 1; }
+
     SDL_GPUTextureCreateInfo expo_tex_info = {};
     expo_tex_info.type = SDL_GPU_TEXTURETYPE_2D;
     expo_tex_info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
@@ -2125,6 +2934,26 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
     SDL_GPUTexture* expo_tex[2] = { SDL_CreateGPUTexture(device, &expo_tex_info), SDL_CreateGPUTexture(device, &expo_tex_info) };
     if (!luma_map_tex || !expo_tex[0] || !expo_tex[1]) { SDL_Log("FALHA alvos da exposicao: %s", SDL_GetError()); return 1; }
     int expo_ping = 0;
+
+    // M2.5-26-14: os dois alvos 64x32 do operador local. A resolucao vem da fonte
+    // (Patry 2021, slide 135/140: grid 64 W x 32 H, blur de raio 13 sobre 64x32).
+    // M2.5-26-16: passam a ser TRES. [0] a log-luminancia crua (o bilateral precisa
+    // dela intacta), [2] o B gaussiano, [1] o B FINAL que o fullscreen le.
+    expo_tex_info.width = 64; expo_tex_info.height = 32;
+    SDL_GPUTexture* lt_tex[3] = { SDL_CreateGPUTexture(device, &expo_tex_info),
+                                  SDL_CreateGPUTexture(device, &expo_tex_info),
+                                  SDL_CreateGPUTexture(device, &expo_tex_info) };
+    if (!lt_tex[0] || !lt_tex[1] || !lt_tex[2]) { SDL_Log("FALHA alvos do tonemap local: %s", SDL_GetError()); return 1; }
+
+    // M2.5-26-23a: o atlas da grade bilateral. 12 fatias Z de 64x32, dispostas
+    // 4 x 3 = 256x96. O layout de fatias lado a lado numa textura 2D e o do
+    // proprio Chen et al. 2007, escolhido por eles para usar filtragem bilinear
+    // de hardware e reduzir os lookups do slicing de 8 para 2.
+    // PROFUNDIDADE 12, e ela e DERIVADA: faixa exposta medida / sigma_r =
+    // 10.87 ln / 0.921 ln = 11.8. Dentro do [2.5, 20] publicado pelo Chen.
+    expo_tex_info.width = 256; expo_tex_info.height = 96;
+    SDL_GPUTexture* grid_tex = SDL_CreateGPUTexture(device, &expo_tex_info);
+    if (!grid_tex) { SDL_Log("FALHA alvo da grade bilateral: %s", SDL_GetError()); return 1; }
 
     // Variaveis globais de Render Target mantidas nulas ate a hora certa
     SDL_GPUTexture* bloom_tex_a = nullptr;
@@ -2169,7 +2998,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
     float sun_color_arr[3] = { 1.0f, 1.0f, 1.0f };
 
     int view_mode = 0;
-    const char* view_modes[] = { "Final", "Normais+ID", "Sem outline", "Shafts (debug)", "MEDIDOR: EV100", "MEDIDOR: luminancia" };
+    const char* view_modes[] = { "Final", "Normais+ID", "Sem outline", "Shafts (debug)", "MEDIDOR: EV100", "MEDIDOR: luminancia", "MEDIDOR: grade bilateral" };
 
     int toon_cuts = 3;
     float toon_soft = 1.0f;
@@ -2778,25 +3607,31 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             replant_grass();
         }
 
-        const char* modos_pixel[] = { "Divisor", "Altura fixa" };
-        if (ImGui::Combo("Modo pixel", &pixel_mode, modos_pixel, 2)) {
+        // M2.5-26-18: o NATIVO entra como terceira opcao e vira o default.
+        const char* modos_pixel[] = { "Divisor", "Altura fixa", "Nativo (1:1)" };
+        if (ImGui::Combo("Resolucao de render", &pixel_mode, modos_pixel, 3)) {
             resize_needed = true;
         }
+        ImGui::SetItemTooltip("Nativo: um texel = um pixel, sem upscale. A escada continua aqui para quem quiser voltar ao pixel-art. CUSTO: a marcha de nuvem e POR PIXEL - de 360p para 1080p ela sai de 22 M para 199 M passos, 9x. Se a taxa cair, o primeiro alivio e 'Passos da nuvem', nao voltar a resolucao.");
         if (pixel_mode == 0) {
             if (ImGui::SliderInt("Pixel divisor", &pixel_divisor, 1, 8)) {
                 resize_needed = true;
             }
         }
-        else {
-            const char* alturas_str[] = { "180", "240", "270", "360", "450", "540" };
-            if (ImGui::Combo("Altura interna", &altura_idx, alturas_str, 6)) {
+        else if (pixel_mode == 1) {
+            const char* alturas_str[] = { "180", "240", "270", "360", "450", "540", "720", "900", "1080" };
+            if (ImGui::Combo("Altura interna", &altura_idx, alturas_str, 9)) {
                 resize_needed = true;
             }
         }
+        else {
+            ImGui::TextDisabled("Render em %dx%d (janela).", internal_w, internal_h);
+        }
 
-        ImGui::Combo("Vista", &view_mode, view_modes, 6);
+        ImGui::Combo("Vista", &view_mode, view_modes, 7);
         if (view_mode == 4) ImGui::TextDisabled("Tela cinza uniforme. EV100 = (nivel/255)*32 - 6");
         if (view_mode == 5) ImGui::TextDisabled("Cada pixel = log10(cd/m2) do proprio pixel. nivel/255*8 - 2");
+        if (view_mode == 6) ImGui::TextDisabled("Atlas 256x96: 12 fatias Z de 64x32 (4x3), da mais ESCURA (topo-esq) para a mais CLARA (base-dir). VERMELHO = celula vazia.");
 
         ImGui::Text("Instancias: 100000");
         ImGui::Text("Frame ms: %.3f", last_frame_ms);
@@ -2937,13 +3772,21 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             cloud_absorcao = 1.0f;   // Beer canonico
             cloud_powder_str = 0.5f; // Schneider 2015
             exposure_key = 0.1041667f; // 25-17: K/(1.2*100), K=12.5 - Frostbite eq.69 + Listing 28
+            // M2.5-26-22: este botao restaura a FISICA, e EC = 0 e o neutro fisico.
+            // Ele NAO restaura a calibracao de arte: apertar isto achata o
+            // meio-dia de volta para 39..97 de 255. O valor de arte e 2.30 (ver o
+            // comentario da declaracao de exposure_bias_ev) e volta digitando no
+            // slider "Compensacao (EV)", ou com "Recarregar" se ja estiver salvo.
             exposure_bias_ev = 0.0f;   // 25-17: EC=0 = sem compensacao; a compensacao e ARTE, mas o zero e o neutro
             app_log.add("Fisica da Pesquisa aplicada (arte intacta). Salvar Config p/ persistir.");
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(valores com fonte)");
         ImGui::Checkbox("Ceu (Processual)", &draw_sky);
-        ImGui::SliderFloat("Densidade do Fog", &fog_density, 0.0f, 0.02f, "%.4f");
+        // M2.5-26-26: mesmo conserto de EIXO do Sigma dos shafts. O passo era
+        // 1e-4 e o ar limpo vale 2.1716e-05: nao havia valor digitavel correto.
+        ImGui::SliderFloat("Densidade do Fog", &fog_density, 1.0e-6f, 0.02f, "%.6f /m", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Coeficiente de extincao da nevoa da CENA, por metro. Ar limpo da Tabela 1 = 2.1716e-05 /m. Ate a 26-26 o passo do controle era 1e-4 e nao existia valor digitavel certo. ATENCAO: hoje a atmosfera, os shafts e esta nevoa sao TRES donos do mesmo ar; o dono unico e o WeatherContext. Enquanto ele nao existe, mantenha este e o Sigma dos shafts na mesma ordem de grandeza, senao os raios e a nevoa contam historias diferentes sobre o mesmo mundo.");
 
         ImGui::Separator();
         ImGui::Text("Nuvens Volumetricas");
@@ -2989,7 +3832,26 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::SliderFloat("Yaw", &sun_yaw, 0.0f, 360.0f);
         ImGui::SliderFloat("Pitch", &sun_pitch, -89.0f, -10.0f);
         ImGui::EndDisabled();
-        ImGui::SliderFloat("Ambient (Dia)", &sun_ambient, 0.0f, 1.0f);
+        ImGui::SliderFloat("Ceu como luz (1 = fisico)", &sky_light_str, 0.0f, 4.0f, "%.2f"); // 26-7
+        ImGui::SetItemTooltip("A luz do CEU na cena (Frostbite Tabela 8: fonte separada do sol). 1.0 = a luminancia que a marcha do Hillaire devolve.");
+        ImGui::Checkbox("Perspectiva aerea fisica", &aerial_cena); // 26-8
+        ImGui::SetItemTooltip("Ligado: a cena usa a MESMA marcha atmosferica do ceu. Desligado: a nevoa exponencial antiga (fog_color constante) - so para comparar.");
+        ImGui::SliderInt("Aerea: passos", &aerial_steps, 1, 16); // 26-8
+        // M2.5-26-9a: alcance e escala do controle CORRIGIDOS.
+        // Medido: a extincao real do ar (Tabela 1, verde) vale 0,022 por km, entao
+        // sobre os ~340 m da ilha ela tira 0,7% - invisivel, e CORRETO. A nevoa antiga
+        // usava 0,006 por METRO = 6,0 por km, ou seja 273x o ar de verdade: nunca foi
+        // fisica, era PISTA DE PROFUNDIDADE artistica, e fazia um trabalho real.
+        // Logo o multiplicador precisa alcancar ~300 para reproduzir o que ela dava, e
+        // o meu teto de 20 era 15x curto. Escala LOGARITMICA porque a grandeza cobre
+        // quatro ordens - o mesmo erro de forma do Defeito 3 (controle linear para
+        // grandeza que se pensa em fatores), que ja nos custou uma estacao.
+        // Quando o mundo crescer ate o horizonte, o 1.0 fisico passa a ter o que fazer
+        // sozinho: a 20 km o ar tira 36%.
+        ImGui::SliderFloat("Aerea: bruma (1 = fisico)", &aerial_cena_str, 0.1f, 1000.0f, "%.2f",
+                           ImGuiSliderFlags_Logarithmic); // 26-9a
+        ImGui::SetItemTooltip("Multiplica o sigma_t da Tabela 1. 1.0 = ar de verdade. Acima disso e bruma por direcao de arte - a integral se auto-normaliza, entao satura na cor do ceu em vez de inventar energia.");
+        ImGui::SliderFloat("Ambient (LEGADO - sem funcao)", &sun_ambient, 0.0f, 1.0f); // 26-7: o ceu real substituiu
         ImGui::SliderFloat3("Color", sun_color_arr, 0.0f, 1.0f);
         ImGui::SliderFloat("Sol: iluminancia (lux)", &sun_intensity, 0.0f, 200000.0f, "%.0f lx"); // 26-2b: Tabela 11
 
@@ -3006,8 +3868,35 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::SliderFloat("Forca dos raios", &ray_strength, 0.0f, 2.0f);
         ImGui::SliderInt("Amostras", &ray_samples, 8, 32);
         ImGui::SliderFloat("Fase g", &shaft_g, 0.3f, 0.9f);
-        ImGui::SliderFloat("Sigma (densidade do ar)", &shaft_sigma, 0.0002f, 0.02f, "%.4f");
+        ImGui::SetItemTooltip("0.80 = Cornette-Shanks, Tabela 1 do Hillaire - o MESMO g que a marcha da atmosfera usa no atmo_common.hlsli. Ate a 26-26 isto estava em 0.55 (linhagem Killzone, anterior ao Hillaire) e o motor discordava de si mesmo sobre o mesmo ar: olhando para o sol, 0.80 espalha 5,88x mais que 0.55, ou +2,56 stops.");
+        // M2.5-26-26: O EIXO, nao o valor. O minimo era 0.0002 e o ar limpo da
+        // Tabela 1 vale 2.1716e-05 - NOVE VEZES abaixo do que o controle
+        // conseguia expressar. Agora e logaritmico, chega a 1e-6, e mostra seis
+        // casas. Nao era calibracao ruim; era o eixo errado.
+        ImGui::SliderFloat("Sigma (densidade do ar)", &shaft_sigma, 1.0e-6f, 0.02f, "%.6f /m", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Coeficiente de extincao do ar, por METRO. O ar limpo ao nivel do mar vale 2.1716e-05 /m, derivado dos coeficientes da Tabela 1 do Hillaire (Rayleigh 5.802/13.558/33.1e-3 por km + Mie 3.996e-3 + 4.40e-3), ponderado por luminancia porque este slider e escalar. Ate a 26-26 o minimo do controle era 0.0002 - 9,2x acima do fisico, impossivel de digitar. Valores altos sao NEVOA, o que e legitimo como clima e ilegitimo como default.");
         ImGui::SliderFloat("Queda por altura", &shaft_height_falloff, 0.0f, 0.05f, "%.4f");
+        // ====================================================================
+        // M2.5-26-26: O BOTAO DE CONFORMIDADE.
+        // Ele existe por um motivo pratico: mudar um DEFAULT no codigo nao muda
+        // o tuning.ini que ja esta salvo. Sem este botao, um valor corrigido na
+        // fonte continuaria divergente na maquina de quem ja rodou o jogo -
+        // e o conserto ficaria invisivel.
+        // So entram aqui numeros que a documentacao FIXA. O que a fonte deixa
+        // para o artista nao e tocado.
+        // ====================================================================
+        // O tooltip vem COLADO no botao, e o corpo depois: SetItemTooltip se
+        // liga ao ultimo item, e por um bloco de chaves no meio a leitura fica
+        // ambigua para quem revisa (a guarda G7 desta casa reprova, com razao).
+        const bool conf_clicou = ImGui::Button("Conformidade: por os valores da documentacao");
+        ImGui::SetItemTooltip("Poe de uma vez os quatro numeros que a documentacao FIXA e que estavam divergentes: Fase g = 0.80 (Cornette-Shanks, Tabela 1 do Hillaire - o mesmo da atmosfera), Sigma dos shafts e Densidade do Fog = 2.1716e-05 /m (ar limpo da Tabela 1, derivado dos coeficientes, nao digitado), e Local: bilateral sigma = 0.921 (Durand & Dorsey 2002, 0.4 em log10 convertido para ln). NAO toca em nada que a fonte deixe para a arte - iluminancia do sol, EC, forca do bloom, forca dos raios e o resto continuam seus. Existe porque mudar um default no codigo nao muda o tuning.ini ja salvo.");
+        if (conf_clicou)
+        {
+            shaft_g      = 0.80f;              // Cornette-Shanks, Hillaire T1
+            shaft_sigma  = sigma_ar_limpo();   // Tabela 1, ar limpo
+            fog_density  = sigma_ar_limpo();   // idem - um ar so
+            lt_sr        = 0.921f;             // Durand & Dorsey 2002 (0.4 log10)
+        }
         ImGui::SliderFloat("Dither (de-banding)", &dither_amt, 0.0f, 2.0f, "%.2f"); // 25-U6d: 0 = desligado, 1 = meio degrau de 8 bits
 
         ImGui::Separator();
@@ -3015,27 +3904,110 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         ImGui::Checkbox("Bloom", &draw_bloom);
         ImGui::SliderFloat("Bloom: Forca", &bloom_intensity, 0.0f, 1.0f);
         ImGui::SliderFloat("Bloom: Limiar", &bloom_threshold, 0.4f, 2.5f); // 24I: alcance HDR
-        ImGui::SliderFloat("Tonemap: ombro", &tonemap_shoulder, 0.5f, 0.95f);
-        ImGui::SliderFloat("Exposicao", &exposure, 0.1f, 4.0f);
+        // M2.5-26-11: a curva vira escolha, com o legado atras do seletor.
+        const char* tm_nomes[] = { "Ombro exponencial (24I - LEGADO)", "Khronos PBR Neutral" };
+        ImGui::Combo("Curva de tonemap", &tonemap_modo, tm_nomes, 2);
+        ImGui::SetItemTooltip("PBR Neutral: satura em tc 13,45 contra 1,757 do legado (+2,94 stops) e preserva bandas entre 0.08 e 0.8 por translacao rigida, sem desvio de matiz. Especificacao Khronos.");
+        ImGui::SliderFloat("Tonemap: ombro (so no LEGADO)", &tonemap_shoulder, 0.5f, 0.95f);
+        // M2.5-26-24: o balanco de branco, na interface que a fonte descreve.
+        ImGui::ColorEdit3("Balanco: a cor que o BRANCO vira", wb_alvo);
+        ImGui::SetItemTooltip("Ghost of Tsushima, SIGGRAPH 2021 slide 156, verbatim: \"we let the artist choose the color they wanted white to change *to* [...] if you want the scene to be bluer, you pick a blue color, which the artists found more intuitive\". E o inverso do Lightroom, onde voce clica no que DEVERIA ser branco. Adaptacao cromatica de Von Kries em espaco Bradford LMS, em luz linear, antes da curva. A LUMINANCIA e preservada de proposito - so a cromaticidade anda, entao isto nao briga com o fotometro. Branco (1,1,1) = identidade exata (medido: desvio 3.3e-07). Para tirar o tom areia do luar, puxe para o azul: medido, uma nuvem com R/B 1.45 cai para 1.17 com (0.80,0.88,1.00) e para 0.92 com (0.62,0.78,1.00).");
+        if (ImGui::Button("Balanco: neutro")) { wb_alvo[0] = wb_alvo[1] = wb_alvo[2] = 1.0f; }
+        ImGui::SetItemTooltip("Volta para (1,1,1). Identidade exata, nao aproximada.");
+        ImGui::SliderFloat("Bloom: teto (entrada)", &bloom_cap, 1.0f, 200.0f, "%.1f", ImGuiSliderFlags_Logarithmic); // 26-11
+        ImGui::SetItemTooltip("Limita o valor EXPOSTO que entra na piramide. Frostbite 5.1.3: a celula do sensor tem capacidade finita. O numero e arte (precedente: Godot glow_hdr_luminance_cap = 12.0).");
+        ImGui::Checkbox("Tonemap LOCAL (Patry 2021)", &lt_on); // 26-14
+        ImGui::SetItemTooltip("Io = c*(B-M) + d*(Ii-B) + M, em log-luminancia. Comprime o contraste GLOBAL e devolve o detalhe LOCAL - dodging & burning automatico. Desligado = so a curva global.");
+        ImGui::SliderFloat("Local: contraste (c)", &lt_c, 0.1f, 1.0f, "%.2f"); // 26-14
+        ImGui::SetItemTooltip("1.0 = sem compressao. A fonte usa 0.75 como ajuste tipico em jogo. Quanto menor, mais o quadro e puxado para o cinza medio.");
+        ImGui::SliderFloat("Local: detalhe (d)", &lt_d, 0.5f, 2.0f, "%.2f"); // 26-14
+        ImGui::SetItemTooltip("Multiplica (Ii - B), que E o detalhe local - a diferenca entre o pixel e a vizinhanca dele. 1.0 = detalhe INTACTO. ABAIXO DE 1.0 ELE E DESTRUIDO: 0.50 joga fora metade de todo o contraste local do quadro, e le como imagem borrada. A fonte mostra 1.5 como 'punchier' (slide 146, '50%% Detail Strength Boost' - o que confirma que 1.0 e o neutro), usado com parcimonia. Ficou em 0.50 da 26-14 ate a 26-22 e ninguem viu por seis estacoes.");
+        ImGui::SliderFloat("Local: contraste BAIXO", &lt_c_lo, 0.1f, 1.0f, "%.2f"); // 26-15
+        // M2.5-26-15b: o "%" precisa ser ESCAPADO. ImGui::SetItemTooltip e printf-style:
+        // em "100% Low Contrast" o parser le %% + espaco (flag) + L (modificador de long
+        // double) + o (conversao INTEIRA) = "%%Lo", combinacao ilegal. O CRT do MSVC aborta
+        // com 'Invalid integer length modifier'. Um %% literal se escreve %%%%.
+        ImGui::SetItemTooltip("Vale para o que esta ABAIXO do ponto medio. 1.00 = sombras intocadas, que e o ajuste de jogo da fonte (slide 145: 100%% Low Contrast). Abaixar isto CLAREIA o quadro - era o defeito da 26-14.");
+        ImGui::SliderFloat("Local: mistura bilateral", &lt_mix, 0.0f, 1.0f, "%.2f"); // 26-16
+        ImGui::SetItemTooltip("0.40 = o valor da fonte (slide 140). 0.00 = so a gaussiana, identico a 26-15. Medido aqui: a nossa gaussiana e cega a faixas finas, entao abaixo de ~0.80 nenhum contraste positivo alcanca o horizonte. Subir traz ringing, que e justamente o que a mistura da fonte existe para evitar.");
+        ImGui::SliderFloat("Local: bilateral sigma (log)", &lt_sr, 0.1f, 4.0f, "%.2f"); // 26-16
+        ImGui::SetItemTooltip("Sigma da FAIXA do bilateral, em ln de luminancia (o PS_Down grava log() natural, entao a unidade e ln). A FONTE PUBLICA ESTE NUMERO, e ele nao era orfao: Durand & Dorsey 2002, verbatim, \"The value sigma_r = 0.4 performed consistently well for all our experiments\" - em log10, ou seja 0.4 x ln(10) = 0.921 ln. O default de 1.00 esta a +8.6%% dele. Menor preserva mais bordas e produz mais ringing; maior vira gaussiana.");
+        ImGui::Separator();
+        ImGui::Checkbox("Grade bilateral (constroi)", &grid_on); // 26-23a
+        ImGui::SetItemTooltip("Constroi o atlas 256x96 (12 fatias Z de 64x32). Precisa estar LIGADA para o seletor abaixo funcionar.");
+        ImGui::Checkbox("Local: B vem da GRADE", &lt_b_grade); // 26-23c
+        ImGui::SetItemTooltip("DESMARCADO = B do caminho antigo (PS_Down faz media de blocos de ~40x44 px ANTES de qualquer bilateral, e por isso e cego a faixas finas). MARCADO = B da grade bilateral, amostrada trilinearmente e normalizada (Patry slide 136). Compare os dois no MESMO quadro - o [MEDIDA] le o composite, ANTES do operador local, e nunca vai mostrar a diferenca. Aqui quem julga e o olho. Para o blend ficar EXATO como o slide 140, ponha 'Local: mistura bilateral' em 0.00.");
+        ImGui::SliderFloat("Grade: mistura no B", &grid_mix, 0.0f, 1.0f, "%.2f"); // 26-23c
+        ImGui::SetItemTooltip("Peso da GRADE no B final. Patry slide 140, verbatim: \"Blend between bilateral filter and very wide 2D Gaussian\" - 40%% bilateral, 60%% gaussiana, e o 0.40 e o default por isso. 1.00 = so a grade (sem o anti-halo da fonte, entao espere halos). 0.00 = identico ao B antigo. Varra o intervalo inteiro uma vez para ver o que a grade faz antes de decidir onde parar.");
+        ImGui::SetItemTooltip("Constroi o atlas 256x96 (12 fatias Z de 64x32). NESTA ESTACAO NADA LE O RESULTADO alem da Vista 'MEDIDOR: grade bilateral' - a imagem final nao muda. Desligue para medir o custo.");
+        ImGui::SliderFloat("Grade: sigma_r (ln)", &grid_sr, 0.2f, 3.0f, "%.3f"); // 26-23a
+        ImGui::SetItemTooltip("Durand & Dorsey 2002: 0.4 log10 = 0.921 ln, \"performed consistently well for all our experiments\". Chen 2007 sec. 3.2: a largura da caixa Z E o range sigma - sao um parametro so, por decisao de projeto declarada.");
+        ImGui::SliderFloat("Grade: Z abaixo de M (sigma_r)", &grid_lo, 0.5f, 12.0f, "%.2f"); // 26-23a
+        ImGui::SetItemTooltip("Onde o eixo Z comeca, em sigma_r abaixo do ponto medio exposto M. 2.0 = 2.66 stops. Medido no quadro das 5h54: o piso esta a 2.22 sigma_r de M. LACUNA DA FONTE: nem Patry nem Chen publicam o intervalo absoluto; Chen normaliza a guia e diz que a faixa e ENTRADA da aplicacao. Por isso e slider.");
+        ImGui::SliderFloat("Grade: Z acima de M (sigma_r)", &grid_hi, 0.5f, 20.0f, "%.2f"); // 26-23a
+        ImGui::SetItemTooltip("Onde o eixo Z termina. 10.0 = 13.3 stops acima de M. Medido: a faixa do horizonte das 5h54 esta a 9.58 sigma_r de M, entao 9 a cortava. A assimetria 2/10 espelha a da camera: Frostbite 5.1.2 poe a media em 12,7%% da saturacao, entao sobra pouco abaixo e muito acima. MANTENHA lo + hi = 12: essa e a profundidade derivada (10.87 ln / 0.921) e e o que faz a largura da caixa valer sigma_r, a regra do Chen.");
+        ImGui::SliderInt("Grade: taps por eixo da celula", &grid_taps, 2, 24); // 26-23a
+        ImGui::SetItemTooltip("N x N amostras por celula. 13 nao e escolhido, e derivado: a celula tem 40x44.3 = 1771 pixels e 13x13 = 169 = 9.54%% deles. Chen 2007 sec. 3.5, verbatim: \"using only 10%% of the input pixels produces an output with no visual artifacts\". Custo total: 24.576 texels x N x N.");
+        { // leitura derivada, so para conferir na tela
+            float _sp = (grid_lo + grid_hi) * grid_sr;
+            ImGui::TextDisabled("Z: %.2f ln = %.2f stops | %.3f ln/fatia = %.2f stops/fatia | %d taps/celula",
+                _sp, _sp / 0.6931472f, _sp / 12.0f, _sp / 12.0f / 0.6931472f, grid_taps * grid_taps);
+        }
+        ImGui::Separator();
+        ImGui::SliderFloat("Exposicao manual (EV100)", &exposure_ev, -6.0f, 22.0f, "%.2f EV"); // 26-6b
+        ImGui::SetItemTooltip("So vale com o automatico DESLIGADO. EV100 15 = Sunny 16 (meio-dia claro); 0 = interior a noite; -6 = luar.");
         ImGui::Checkbox("Exposicao automatica", &auto_exposure); // M2.5-25-4
         ImGui::SliderFloat("Chave (cinza medio)", &exposure_key, 0.01f, 0.25f, "%.3f"); // 25-4b: regua honesta
         ImGui::SliderFloat("Compensacao (EV)", &exposure_bias_ev, -4.0f, 4.0f, "%.2f");
-        ImGui::SliderFloat("Adaptacao (1/s)", &exposure_speed, 0.1f, 8.0f);
-        ImGui::SliderFloat("EV100 min (limite do escuro)", &ev_min, -6.0f, 22.0f, "%.2f EV"); // 26-2c
-        ImGui::SetItemTooltip("Quanto o olho pode ABRIR. Menor = noite mais clara. Lua cheia pede ~-1 para ficar totalmente exposta.");
-        ImGui::SliderFloat("EV100 max (limite do claro)", &ev_max, -6.0f, 22.0f, "%.2f EV"); // 26-2c
-        ImGui::SetItemTooltip("Quanto o olho pode FECHAR. Sunny 16: o meio-dia deve cair perto de EV100 15.");
+        ImGui::SetItemTooltip("Frostbite eq. 68: EV100' = EV100 - EC. E o parametro que a fonte reserva para a ARTE decidir o brilho da cena, e ela nao publica valor. 2.30 = calibrado no olho, ate o meio-dia ter branco (com 0.00 o quadro inteiro vivia entre 39 e 97 de 255). CUIDADO: e GLOBAL. Medido as 5h54, cada stop daqui vai inteiro para o estouro do amanhecer. A saida certa e uma tabela de EC por HORA."); // 26-22
+        ImGui::SliderFloat("Adaptacao: p/ o CLARO (stops/s)", &expo_vel_up, 0.1f, 12.0f, "%.2f"); // 26-19
+        ImGui::SetItemTooltip("Quantos stops por segundo a exposicao FECHA quando a cena clareia. 3.0 = default do Unreal (Speed Up); a faixa que a fonte sugere e 3 a 6. O olho fecha rapido na luz.");
+        ImGui::SliderFloat("Adaptacao: p/ o ESCURO (stops/s)", &expo_vel_dn, 0.1f, 12.0f, "%.2f"); // 26-19
+        ImGui::SetItemTooltip("Quantos stops por segundo a exposicao ABRE quando a cena escurece. 1.0 = default do Unreal (Speed Down); a faixa sugerida e 1 a 2. Unity HDRP, verbatim: \"The human eye adapts slower to darkness than to lightness\".");
+        ImGui::SliderFloat("Adaptacao: assentamento (stops)", &expo_ev_trans, 0.1f, 6.0f, "%.2f"); // 26-19
+        ImGui::SetItemTooltip("A que distancia do alvo a rampa de taxa constante vira exponencial. 1.5 = default do Unreal (ExponentialTransitionDistance). Medido aqui: a continuidade C1 exata cai em 1/ln2 = 1.4427, entao o 1.5 da fonte esta a 4%% dela.");
+        ImGui::SliderFloat("Histograma: corte inferior", &expo_perc_lo, 0.0f, 0.9f, "%.2f"); // 26-12
+        ImGui::SetItemTooltip("Borda INFERIOR da janela de medida, em percentil. Unreal, verbatim: \"Low Percent - a good starting range is 70 to 80\". Isto NAO apara caudas: junto com o corte superior ele define uma janela ESTREITA e ALTA (10%% do quadro), que mede o decil claro em vez do brilho medio.");
+        ImGui::SliderFloat("Histograma: corte superior", &expo_perc_hi, 0.1f, 1.0f, "%.2f"); // 26-12
+        ImGui::SetItemTooltip("Borda SUPERIOR da janela. Unreal, verbatim: \"High Percent - a good starting range is 80 to 95\". Medido no histograma real das 5h50: mover de 5/95 para 75/85 mede 4,4x mais brilhante = 2,1 stops A MENOS de exposicao.");
+        if (ImGui::Button("Medir agora (EV100 + histograma no log)")) { g_medir_pedido = true; } // 26-M
+        ImGui::SliderFloat("EV100 min (limite do escuro)", &ev_min, -10.0f, 22.0f, "%.2f EV"); // 26-19: faixa aberta ate -10
+        ImGui::SetItemTooltip("Quanto o medidor pode ABRIR. -8 = limite de captura de luz de estrelas (EV100 = log2(lux/pi)). Frostbite 5.1 NAO tem grampo nenhum: subir isto e uma decisao de ARTE sobre quao escura a noite tem direito de ser, nao um limite do instrumento.");
+        ImGui::SliderFloat("EV100 max (limite do claro)", &ev_max, -10.0f, 22.0f, "%.2f EV"); // 26-19
+        ImGui::SetItemTooltip("Quanto o medidor pode FECHAR. 18 = sol direto com margem. Sunny 16: o meio-dia deve cair perto de EV100 15, entao 18 nunca morde numa cena real.");
         ImGui::SliderFloat("Piso do ceu noturno (cd/m2)", &night_sky_floor, 0.0f, 0.01f, "%.5f"); // 26-2b: N3.1 = 0.0002
         ImGui::SliderFloat3("Cor do ceu noturno", night_tint, 0.0f, 1.0f); // 25-8: ARTE, nao vem da fonte
         ImGui::SliderFloat("Lua: fase (elongacao)", &moon_elong_deg, 0.0f, 360.0f, "%.0f graus"); // 25-9a: 0=nova, 180=cheia
         ImGui::SliderFloat("Lua: disco (raio, graus)", &moon_disk_deg, 0.05f, 3.0f, "%.3f");
+        ImGui::SetItemTooltip("GEOMETRIA: 0.26 = real. A luminancia do disco NAO depende do raio, entao aumentar o raio MULTIPLICA a energia pelo quadrado. 3.0 emite 133x demais.");
         ImGui::SliderFloat("Lua: brilho (x fisico)", &moon_disk_bright, 0.0f, 4.0f, "%.2f"); // 26-2b: 1.0 = rho/pi * E_sol
         ImGui::SliderFloat("Lua: iluminancia (lux)", &moon_scene_bright, 0.0f, 5.0f, "%.3f lx"); // 26-2b: N2.4 -> 1.754
         ImGui::SliderFloat("Nevoa aerea (1 = fisico)", &aerial_str, 0.0f, 8.0f, "%.2f"); // 25-13
         ImGui::SliderFloat3("Lua: cor da luz", moon_tint, 0.0f, 1.0f);
+        // M2.5-25-18: as estrelas
+        ImGui::SliderFloat("Estrelas: forca (1 = fisico)", &stars_str, 0.0f, 4.0f, "%.2f");
+        ImGui::SetItemTooltip("1.00 = a luminancia que a fotometria manda, sem ganho. A escala absoluta NAO e ajustavel e vive no shader: E(m) = 2.96606e-6 * 10^(-0.4 m) lux, derivada dos itens N3.1 (ceu sem lua = 2e-4 cd/m2 = 22,0 mag/arcsec2, tres fontes convergentes) e N3.4 (Pogson) da checklist da noite. Contraprova: a fotometria padrao da 2,54e-6 para m=0 e a nossa derivacao da 2,966e-6 - 0,22 stop entre dois caminhos independentes. Acima de 1.00 e ARTE declarada, nao fisica.");
+        ImGui::SliderFloat("Estrelas: magnitude limite", &stars_mag_lim, 2.0f, 9.0f, "%.2f");
+        ImGui::SetItemTooltip("A magnitude mais FRACA desenhada. 6.50 = o limite do olho nu a olho desarmado em ceu escuro. Numeros maiores acendem estrelas mais fracas (e mais numerosas); menores deixam so as brilhantes. Cada passo de 1 magnitude vale 2,512x em fluxo (Pogson).");
+        ImGui::SliderFloat("Estrelas: tamanho (px)", &stars_size, 0.10f, 3.0f, "%.2f");
+        ImGui::SetItemTooltip("Sigma do borrao gaussiano, em PIXELS, medido pelo proprio hardware com fwidth(dir). NAO muda o brilho da estrela: a luminancia de pico e E/(pi*sigma^2) e a integral sobre o borrao devolve E exatamente, para qualquer sigma - verificado numericamente, erro 0,000%%. Por isso o resultado nao depende da resolucao nem do campo de visao. Abaixo de ~0.5 as estrelas cintilam ao mover a camera (aliasing); acima de ~1.5 viram bolinhas.");
+        ImGui::SliderFloat("Estrelas: densidade", &stars_dens, 4.0f, 200.0f, "%.0f");
+        ImGui::SetItemTooltip("Celulas por lado de face do cubo. O total e 6*N^2: em 40 sao 9.600 estrelas. A grade e em FACE DE CUBO e nao em azimute/elevacao porque a segunda amontoa tudo nos polos; a face de cubo varia ~1,9x entre centro e canto, aproximacao declarada e invisivel contra a aleatoriedade da magnitude.");
+        ImGui::SliderFloat("Estrelas: inclinacao da contagem", &stars_slope, 0.10f, 1.20f, "%.2f");
+        ImGui::SetItemTooltip("LACUNA DECLARADA - este e o unico numero da estacao sem fonte no acervo. O numero de estrelas por magnitude segue N(<m) proporcional a 10^(a*m), e usamos a CDF inversa m = mag_lim + log10(u)/a. O 'a' entra como ARTE, com 0.50 de partida, e esta na fornada. Menor = mais estrelas brilhantes; maior = quase todas fracas. A N3.6 (catalogo Hipparcos/Tycho-2 x procedural) tambem segue aberta: isto e o caminho procedural.");
         ImGui::SliderFloat("Disco do sol (raio, graus)", &sun_disk_deg, 0.05f, 3.0f, "%.4f"); // 25-7: 0.2725 = real
+        ImGui::SetItemTooltip("GEOMETRIA: 0.2725 = real (Frostbite 4.6 nota 28). Este disco divide por Omega, entao mudar o raio CONSERVA energia - so espalha.");
         ImGui::SliderFloat("Disco do sol: brilho (x fisico)", &sun_disk_bright, 0.0f, 1.0f, "%.4f"); // 26-2d: %.2f mostrava 0.005 como "0.00"
-        ImGui::Text("Exposicao efetiva: %.3f", auto_exposure ? exposure_auto_cur : exposure);
+        { // M2.5-26-6b: a leitura tambem em EV100 - o numero decimal sozinho (2,6e-05)
+          // nao diz nada ao olho; o stop diz. EV = log2(1/(1.2*exposicao)).
+            // M2.5-26-17: com a automatica LIGADA nao existe numero honesto por frame
+            // sem readback (e readback no caminho de render e proibido pela doutrina).
+            // Entao mostramos o ultimo retrato, datado. Com a automatica DESLIGADA o
+            // valor e exato: nasce do EV100 do slider, na CPU, neste frame.
+            float e_eff = auto_exposure ? (float)g_med_expo : exposure;
+            ImGui::Text("Exposicao efetiva: %.3e  (EV100 %.2f)", e_eff,
+                        std::log2(1.0f / (1.2f * std::max(e_eff, 1e-30f))));
+        }
         ImGui::SliderFloat("Shaft: oclusao de nuvem", &shaft_cloud_occ, 0.0f, 1.0f);
 
         ImGui::Separator();
@@ -3078,6 +4050,10 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             else {
                 internal_h = alturas[altura_idx];
                 internal_w = std::max(2, (int)std::llround(internal_h * (double)win_w / (double)win_h)) & ~1;
+            }
+            if (pixel_mode == 2) {                 // M2.5-26-18: NATIVO
+                internal_w = std::max(2, win_w) & ~1;
+                internal_h = std::max(1, win_h);
             }
 
             depth_info.width = (uint32_t)internal_w;
@@ -3496,23 +4472,18 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 // Continua sendo estimativa: a fonte (Frostbite 2014, sec. 5.1) manda MEDIR
                 // Lavg por histograma. Isto e coerencia, nao absolvicao - a remocao do
                 // estimador analitico segue marcada para a 26-4.
-                float e_direct = (kR * astro_col.r + kG * astro_col.g + kB * astro_col.b) *
-                                 std::max(0.0f, astro_dir.y);
-                float e_sky = (kR * sky_params.sky_ambient_color[0] +
-                               kG * sky_params.sky_ambient_color[1] +
-                               kB * sky_params.sky_ambient_color[2]) * 3.14159265f;
-                // albedo medio de cena 0.2 (cartao cinza da fotografia; premissa da casa)
-                float l_avg = (e_direct + e_sky) * 0.2f / 3.14159265f;
-                float alvo = exposure_key / std::max(l_avg, 1e-5f) * std::pow(2.0f, exposure_bias_ev);
-                alvo = std::clamp(alvo, std::min(exposure_min, exposure_max), std::max(exposure_min, exposure_max)); // 25-5a
-
-                static uint64_t exp_last_ms = SDL_GetTicks();
-                uint64_t exp_now_ms = SDL_GetTicks();
-                float exp_dt = std::min((float)(exp_now_ms - exp_last_ms) / 1000.0f, 0.25f);
-                exp_last_ms = exp_now_ms;
-                // adaptacao exponencial do "olho": converge igual em 60 ou 240 fps
-                exposure_auto_cur += (alvo - exposure_auto_cur) *
-                                     (1.0f - std::exp(-exp_dt * std::max(exposure_speed, 0.01f)));
+                // M2.5-26-17: O SEGUNDO AVALIADOR MORREU AQUI.
+                // O comentario acima ja marcava a remocao "para a 26-4" e ela nunca
+                // aconteceu. Este bloco calculava uma exposicao ANALITICA completa -
+                // media de cena, alvo, clamp, adaptacao no tempo - e o resultado ia
+                // para exatamente UM lugar: o texto "Exposicao efetiva" do painel.
+                // Nao era o que renderizava. O que renderiza vem da textura 1x1 medida
+                // na GPU desde a 26-4.
+                // CUSTO REAL: o painel mostrou o numero errado por quatro estacoes, e
+                // eu consertei as coisas erradas olhando para ele. Um medidor que mente
+                // e pior que nenhum, porque produz decisao confiante e errada.
+                // Doutrina 24F-1: avaliador UNICO.
+                (void)kR; (void)kG; (void)kB;
             }
             sky_params.detail_str = cloud_detail_str;
 
@@ -3534,13 +4505,14 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             sky_params.sun_illum[1] = sun_color_arr[1] * effective_intensity;
             sky_params.sun_illum[2] = sun_color_arr[2] * effective_intensity; sky_params.night_floor = night_sky_floor;
             sky_params.sun_disk_deg = sun_disk_deg; sky_params.sun_disk_bright = sun_disk_bright;
-            sky_params.pad_m[0] = 0.0f; sky_params.pad_m[1] = 0.0f;
+            sky_params.stars_str = stars_str; sky_params.stars_mag_lim = stars_mag_lim; // 25-18
             sky_params.night_tint[0] = night_tint[0]; sky_params.night_tint[1] = night_tint[1];
             sky_params.night_tint[2] = night_tint[2]; sky_params.pad_n = 0.0f;
             sky_params.to_moon[0] = to_moon_vec.x; sky_params.to_moon[1] = to_moon_vec.y;
             sky_params.to_moon[2] = to_moon_vec.z; sky_params.moon_disk_deg = moon_disk_deg;
             sky_params.moon_disk_bright = moon_disk_bright;
-            sky_params.pad_o[0] = 0.0f; sky_params.pad_o[1] = 0.0f; sky_params.pad_o[2] = 0.0f;
+            sky_params.stars_size = stars_size; sky_params.stars_dens = stars_dens;
+            sky_params.stars_slope = stars_slope; // 25-18
 
             // M2.5-25-12 (A): o ASTRO DOMINANTE tambem ilumina as nuvens - o mesmo
             // que a cena usa desde a 25-9c, entao chao e nuvem concordam sobre de onde
@@ -3578,6 +4550,26 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             sun_params.dir[1] = s_dir.y;
             sun_params.dir[2] = s_dir.z;
             sun_params.ambient = effective_ambient;
+            // M2.5-26-7: o ceu entra como FONTE. sky_ambient_color ja e a luminancia
+            // media do hemisferio (atmo::sky_ambient, marcha do Hillaire), calculada
+            // acima nesta mesma funcao e ja usada pelas nuvens desde a 25-3.
+            sun_params.sky_light[0] = sky_params.sky_ambient_color[0];
+            sun_params.sky_light[1] = sky_params.sky_ambient_color[1];
+            sun_params.sky_light[2] = sky_params.sky_ambient_color[2];
+            sun_params.sky_light_str = sky_light_str;
+            // M2.5-26-8: a cena marcha a MESMA atmosfera do ceu. Copiado de
+            // sky_params (ja preenchido acima) e nao recalculado, de proposito:
+            // um valor so, uma fonte so.
+            for (int k = 0; k < 3; ++k) {
+                sun_params.ap_to_sun[k]     = sky_params.to_sun[k];
+                sun_params.ap_sun_illum[k]  = sky_params.sun_illum[k];
+                sun_params.ap_to_moon[k]    = sky_params.to_moon[k];
+                sun_params.ap_moon_illum[k] = sky_params.moon_illum[k];
+            }
+            sun_params.ap_steps = (float)aerial_steps;
+            sun_params.ap_str   = aerial_cena_str;
+            sun_params.ap_on    = aerial_cena ? 1.0f : 0.0f;
+            sun_params.ap_pad   = 0.0f;
             // M2.5-25-6 (BUG A): a CENA passa a usar effective_intensity, como o ceu,
             // as nuvens e os shafts ja usavam. A "Lua minima" (0.1 a noite, calculada
             // logo acima) era jogada fora aqui - a cena rodava com a intensidade solar
@@ -3687,14 +4679,16 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
 
             auto bind_3_samps = [&](SDL_GPUTexture* color_tex) {
                 // M2.5-24G-2: 4o par = weather map (sombra de nuvem sincronizada com o ceu)
-                SDL_GPUTextureSamplerBinding samps[5] = {
+                SDL_GPUTextureSamplerBinding samps[7] = {
                     { color_tex ? color_tex : fallback_tex, sampler },
                     { shadow_map, shadow_cmp },
                     { shadow_map, shadow_diag },
                     { weather_tex, sampler },
-                    { expo_prev, upscale_sampler } // M2.5-26-2a: t4 = exposicao anterior
+                    { expo_prev, upscale_sampler }, // M2.5-26-2a: t4 = exposicao anterior
+                    { trans_tex, lut_sampler },     // M2.5-26-8: t5 = transmitancia
+                    { ms_tex, lut_sampler }         // M2.5-26-8: t6 = multi-scattering
                 };
-                SDL_BindGPUFragmentSamplers(scene_pass, 0, samps, 5);
+                SDL_BindGPUFragmentSamplers(scene_pass, 0, samps, 7);
                 };
 
             bind_3_samps(fallback_tex);
@@ -3811,8 +4805,21 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             SDL_BindGPUGraphicsPipeline(o_pass, out_pipeline);
 
             OutlineParams op;
-            op.texel[0] = 1.0f / (float)internal_w;
-            op.texel[1] = 1.0f / (float)internal_h;
+            // M2.5-26-18b: ESPESSURA INVARIANTE. O outline amostra os vizinhos a
+            // UM texel, e foi calibrado com a interna em 360p - onde um texel virava
+            // ~3 pixels de tela depois do upscale. Em nativo um texel E um pixel:
+            // o contorno ficaria 3x mais fino e praticamente sumiria, e o z_cutoff
+            // dispararia menos porque a diferenca de profundidade entre vizinhos
+            // encolhe junto.
+            // Referenciando a amostragem na grade de 360p, o deslocamento em UV fica
+            // CONSTANTE em qualquer resolucao - logo a espessura aparente e o delta de
+            // profundidade tambem ficam, e o z_cutoff continua valendo sem recalibrar.
+            // Isso e o que torna o dial um experimento honesto: trocar a resolucao
+            // passa a mudar so o DETALHE, nao a assinatura do tracado.
+            const float kOutRefH = 360.0f;
+            float esp_out = std::max(1.0f, (float)internal_h / kOutRefH);
+            op.texel[0] = esp_out / (float)internal_w;
+            op.texel[1] = esp_out / (float)internal_h;
             op.z_cutoff = out_z_cutoff;
             op.grazing_scale = out_grazing_scale;
             op.crease_low = out_crease_low;
@@ -3835,6 +4842,71 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             SDL_DrawGPUPrimitives(o_pass, 3, 1, 0, 0);
             SDL_EndGPURenderPass(o_pass);
 
+            // ================================================================
+            // M2.5-26-25: A MARCHA DOS SHAFTS, AGORA ANTES DO MEDIDOR.
+            //
+            // Roda entre o outline e o passe da exposicao - ou seja, o
+            // composite_color ja carrega os shafts quando o medidor o le. Com
+            // isso os CINCO consumidores que eram cegos passam a enxerga-los:
+            // a exposicao, o bloom, o B do operador local, a grade, e o
+            // [MEDIDA]/[GRADE]/[OPER].
+            //
+            // O load_op: em modo normal e LOAD, e o blend aditivo soma a marcha
+            // no composite. No modo 3 da Vista (depuracao dos shafts) e CLEAR,
+            // entao o composite passa a conter SO a marcha - a mesma vista de
+            // antes, por outro mecanismo, e agora MENSURAVEL: com o modo 3
+            // ligado o [MEDIDA] reporta os shafts em cd/m2.
+            //
+            // O gate: se a forca esta em zero o passe nao roda. Isso preserva o
+            // comportamento antigo (o 'if (shaft_intensity > 0.001f)' que vivia
+            // dentro do PSMain) e evita um passe de tela cheia a toa.
+            // ================================================================
+            float sh_forca = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f;
+            if (sh_forca > 0.001f)
+            {
+                ShaftBlock sb = {};
+                glm::mat4 sh_inv_vp = glm::inverse(mvp);
+                memcpy(sb.inv_viewproj, glm::value_ptr(sh_inv_vp), 64);
+                memcpy(sb.light_vp, glm::value_ptr(light_vp), 64);
+                sb.cam_pos[0] = cam_pos.x; sb.cam_pos[1] = cam_pos.y; sb.cam_pos[2] = cam_pos.z;
+                sb.to_sun[0] = to_sun_vec.x; sb.to_sun[1] = to_sun_vec.y; sb.to_sun[2] = to_sun_vec.z;
+                sb.shaft_intensity = sh_forca;
+                sb.shaft_g = shaft_g;
+                // MESMA expressao do fs_params (25-1): o gate que apaga a marcha
+                // quando o sol afunda, vezes a transmitancia e a intensidade.
+                float sh_gate = std::clamp((to_sun_vec.y + 0.02f) / 0.14f, 0.0f, 1.0f);
+                sb.sun_color[0] = sun_color_arr[0] * t_sol.x * effective_intensity * sh_gate;
+                sb.sun_color[1] = sun_color_arr[1] * t_sol.y * effective_intensity * sh_gate;
+                sb.sun_color[2] = sun_color_arr[2] * t_sol.z * effective_intensity * sh_gate;
+                sb.shaft_samples = (float)ray_samples;
+                sb.wind_off[0] = cos(w_rad) * sun_params.cloud_time * -200.0f;
+                sb.wind_off[1] = sin(w_rad) * sun_params.cloud_time * -200.0f;
+                sb.shaft_sigma = shaft_sigma;
+                sb.shaft_height_falloff = shaft_height_falloff;
+                sb.shaft_cloud_occ = shaft_cloud_occ;
+                sb.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
+                sb.cloud_cover = draw_clouds ? cloud_cobertura : 0.0f;
+                sb.shaft_pad0 = 0.0f;
+
+                SDL_GPUColorTargetInfo sh_target = {};
+                sh_target.texture = composite_color;
+                sh_target.load_op = (view_mode == 3) ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+                sh_target.store_op = SDL_GPU_STOREOP_STORE;
+                sh_target.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+                SDL_GPURenderPass* sh_pass = SDL_BeginGPURenderPass(cmd_buffer, &sh_target, 1, nullptr);
+                SDL_BindGPUGraphicsPipeline(sh_pass, shaft_pipeline);
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &sb, sizeof(ShaftBlock));
+                SDL_GPUTextureSamplerBinding sh_binds[4] = {
+                    { depth_texture, point_sampler },
+                    { shadow_map, shadow_cmp },
+                    { weather_tex, sampler },
+                    { expo_prev, upscale_sampler }   // a MESMA exposicao que pre-expos o composite
+                };
+                SDL_BindGPUFragmentSamplers(sh_pass, 0, sh_binds, 4);
+                SDL_DrawGPUPrimitives(sh_pass, 3, 1, 0, 0);
+                SDL_EndGPURenderPass(sh_pass);
+            }
+
             // ============================================================================
             // M2.5-26-4: EXPOSICAO MEDIDA - dois passes minusculos, tudo na GPU.
             //   composite_color            -> luma_map_tex (32x32, log-luminancia)
@@ -3848,18 +4920,31 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             // carrega SEMPRE a exposicao de fato em uso, e todos os shaders leem a mesma
             // fonte de verdade - nao existe caminho manual paralelo para divergir.
             {
-                struct ExpoBlock { float key, ec, emin, emax, speed, dt, p0, p1; } ep;
+                // M2.5-26-17: entram texw/texh. O PS_Luma passa a ler TEXEL EXATO
+                // (Load) em vez de amostra bilinear, e para isso precisa do tamanho.
+                // M2.5-26-19: 'speed' vira 'vel_up' e os dois pads viram 'vel_dn'
+                // e 'ev_trans'. O tamanho do bloco NAO muda: continua 12 floats /
+                // 48 bytes, mesmo layout, sem risco de deslocamento de campo.
+                struct ExpoBlock { float key, ec, emin, emax, vel_up, dt, plo, phi;
+                                   float texw, texh, vel_dn, ev_trans; } ep;
                 ep.key = exposure_key;
                 ep.ec = auto_exposure ? exposure_bias_ev : 0.0f;
                 // M2.5-26-2c: os limites vem de EV100 (Listing 28): exposure = 1/(1.2*2^EV).
                 // EV alto = pouca exposicao, entao ev_max define o MINIMO de exposicao.
+                // M2.5-26-6b: a exposicao MANUAL nasce aqui, do EV100, pela mesma
+                // conversao dos limites (Listing 28). Fica neste bloco - e nao na UI -
+                // porque este bloco roda em TODO frame, com ou sem o painel aberto.
+                exposure = 1.0f / (1.2f * std::pow(2.0f, exposure_ev));
                 float e_from_ev_hi = 1.0f / (1.2f * std::pow(2.0f, ev_max)); // menos exposicao
                 float e_from_ev_lo = 1.0f / (1.2f * std::pow(2.0f, ev_min)); // mais exposicao
-                exposure_min = e_from_ev_hi; exposure_max = e_from_ev_lo;    // espelho p/ diagnostico
                 ep.emin = auto_exposure ? e_from_ev_hi : exposure;
                 ep.emax = auto_exposure ? e_from_ev_lo : exposure;
-                ep.speed = exposure_speed;
-                ep.p0 = 0.0f; ep.p1 = 0.0f;
+                ep.vel_up = expo_vel_up;   // 26-19: stops/s indo para o CLARO
+                ep.vel_dn = expo_vel_dn;   // 26-19: stops/s indo para o ESCURO
+                ep.ev_trans = expo_ev_trans;
+                ep.plo = expo_perc_lo; ep.phi = expo_perc_hi; // 26-12
+                ep.texw = (float)internal_w; ep.texh = (float)internal_h; // 26-17
+                // 26-19: os pads viraram campos com nome - ver a declaracao acima.
                 static uint64_t expo_last_ms = SDL_GetTicks();
                 static int expo_warm = 0;
                 uint64_t expo_now_ms = SDL_GetTicks();
@@ -3903,12 +4988,50 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             }
 
             // ============================================================================
+            // M2.5-26-23a: CONSTRUCAO DA GRADE BILATERAL.
+            // Roda DEPOIS do passe da exposicao (precisa do ponto medio M que o
+            // PS_Adapt acabou de escrever) e e independente do resto - nada le o
+            // resultado nesta estacao alem do modo de Vista.
+            // NAO altera um pixel da imagem final.
+            if (grid_on)
+            {
+                struct GridBlock { float texel[2]; float dir; float bloom;
+                                   float sr, mix, srcw, srch;
+                                   float gz_sr, gz_lo, gz_hi, gz_taps; } gb = {};
+                gb.texel[0] = 1.0f / 256.0f; gb.texel[1] = 1.0f / 96.0f;
+                gb.bloom = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
+                gb.sr = lt_sr; gb.mix = lt_mix;
+                gb.srcw = (float)internal_w; gb.srch = (float)internal_h;
+                gb.gz_sr = grid_sr; gb.gz_lo = grid_lo;
+                gb.gz_hi = grid_hi; gb.gz_taps = (float)grid_taps;
+
+                SDL_GPUColorTargetInfo gt = {};
+                gt.texture = grid_tex;
+                gt.load_op = SDL_GPU_LOADOP_CLEAR;
+                gt.store_op = SDL_GPU_STOREOP_STORE;
+                gt.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+                SDL_GPURenderPass* gp = SDL_BeginGPURenderPass(cmd_buffer, &gt, 1, nullptr);
+                SDL_BindGPUGraphicsPipeline(gp, lt_grid_pipeline);
+                SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &gb, sizeof(GridBlock));
+                SDL_GPUTextureSamplerBinding gb_binds[3] = {
+                    { composite_color, upscale_sampler },
+                    { bloom_tex_a ? bloom_tex_a : fallback_tex, upscale_sampler },
+                    { expo_prev, upscale_sampler }
+                };
+                SDL_BindGPUFragmentSamplers(gp, 0, gb_binds, 3);
+                SDL_DrawGPUPrimitives(gp, 3, 1, 0, 0);
+                SDL_EndGPURenderPass(gp);
+            }
+
+            // ============================================================================
             // M2.5-23: Dual-Kawase Bloom Ping-Pong Pass
             // ============================================================================
             if (draw_bloom && view_mode == 0) {
                 BloomParams bp;
                 bp.threshold = bloom_threshold;
                 bp.knee = 0.5f;
+                bp.cap = bloom_cap; // 26-11
+                bp.pad_bl[0] = bp.pad_bl[1] = bp.pad_bl[2] = 0.0f;
 
                 auto run_bloom_pass = [&](SDL_GPUTexture* dst, SDL_GPUTexture* src, SDL_GPUGraphicsPipeline* pipe, int w, int h) {
                     SDL_GPUColorTargetInfo t = {};
@@ -3942,6 +5065,64 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
                 run_bloom_pass(bloom_tex_c, bloom_tex_d, bloom_up_pipeline, std::max(1, internal_w / 16), std::max(1, internal_h / 16));
                 run_bloom_pass(bloom_tex_b, bloom_tex_c, bloom_up_pipeline, std::max(1, internal_w / 8), std::max(1, internal_h / 8));
                 run_bloom_pass(bloom_tex_a, bloom_tex_b, bloom_up_pipeline, std::max(1, internal_w / 4), std::max(1, internal_h / 4));
+            }
+
+            // ====================================================================
+            // M2.5-26-14/15: OPERADOR LOCAL - tres passes de tela cheia, 64x32.
+            //   composite + bloom -> lt_tex[0]  (log-luminancia)
+            //   lt_tex[0]         -> lt_tex[1]  (gaussiana horizontal, raio 13)
+            //   lt_tex[1]         -> lt_tex[0]  (gaussiana vertical)
+            // O fullscreen le lt_tex[0] com upsample bicubico B-spline.
+            //
+            // M2.5-26-15 DEFEITO CORRIGIDO: na 26-14 este bloco estava DEPOIS do
+            // passe fullscreen, apesar do comentario dizer o contrario. O fullscreen
+            // lia entao a log-luminancia do quadro ANTERIOR - um quadro de atraso
+            // que ninguem pediu. Agora roda onde sempre devia: depois do bloom (que
+            // ele precisa ler) e antes do fullscreen (que le o resultado).
+            // ====================================================================
+            if (lt_on)
+            {
+                // M2.5-26-23a: o bloco cresce de 8 para 12 floats (48 B).
+                struct LtBlock { float texel[2]; float dir; float bloom;
+                                 float sr, mix, srcw, srch;
+                                 float gz_sr, gz_lo, gz_hi, gz_taps; } lt = {};
+                lt.srcw = (float)internal_w; lt.srch = (float)internal_h;
+                lt.gz_sr = grid_sr; lt.gz_lo = grid_lo;
+                lt.gz_hi = grid_hi; lt.gz_taps = (float)grid_taps;
+                lt.texel[0] = 1.0f / 64.0f; lt.texel[1] = 1.0f / 32.0f;
+                // exatamente a mesma expressao que alimenta fs_params.bloom_intensity
+                lt.bloom = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
+                lt.sr = lt_sr; lt.mix = lt_mix; // 26-16
+
+                // M2.5-26-16: QUATRO passes. A segunda fonte de cada etapa muda de
+                // papel conforme o passe - no downsample e o bloom, no bilateral e o
+                // B gaussiano. Quem nao usa recebe o fallback e le 1 sampler so.
+                struct { SDL_GPUTexture* alvo; SDL_GPUTexture* fonte; SDL_GPUTexture* fonte2;
+                         SDL_GPUGraphicsPipeline* pipe; float dir; int nsamp; } etapas[4] = {
+                    { lt_tex[0], composite_color, bloom_tex_a ? bloom_tex_a : fallback_tex, lt_down_pipeline,  0.0f, 2 },
+                    { lt_tex[1], lt_tex[0],       fallback_tex,                             lt_blur_pipeline,  1.0f, 1 },
+                    { lt_tex[2], lt_tex[1],       fallback_tex,                             lt_blur_pipeline,  0.0f, 1 },
+                    { lt_tex[1], lt_tex[0],       lt_tex[2],                                lt_bilat_pipeline, 0.0f, 2 }
+                };
+                for (int k = 0; k < 4; ++k)
+                {
+                    SDL_GPUColorTargetInfo lti = {};
+                    lti.texture = etapas[k].alvo;
+                    lti.load_op = SDL_GPU_LOADOP_CLEAR;
+                    lti.store_op = SDL_GPU_STOREOP_STORE;
+                    lti.clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+                    SDL_GPURenderPass* ltp = SDL_BeginGPURenderPass(cmd_buffer, &lti, 1, nullptr);
+                    SDL_BindGPUGraphicsPipeline(ltp, etapas[k].pipe);
+                    lt.dir = etapas[k].dir;
+                    SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &lt, sizeof(LtBlock));
+                    SDL_GPUTextureSamplerBinding ltb[2] = {
+                        { etapas[k].fonte,  upscale_sampler },
+                        { etapas[k].fonte2, upscale_sampler }
+                    };
+                    SDL_BindGPUFragmentSamplers(ltp, 0, ltb, etapas[k].nsamp);
+                    SDL_DrawGPUPrimitives(ltp, 3, 1, 0, 0);
+                    SDL_EndGPURenderPass(ltp);
+                }
             }
 
             SDL_GPUColorTargetInfo upscale_color_target = {};
@@ -3984,14 +5165,33 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             fs_params.cloud_cover = draw_clouds ? cloud_cobertura : 0.0f;
             fs_params.shadow_str_fs = shadow_str;
             fs_params.tonemap_shoulder = tonemap_shoulder;
-            fs_params.exposure = auto_exposure ? exposure_auto_cur : exposure; // M2.5-25-4
+            fs_params.tonemap_modo = (float)tonemap_modo; // 26-11
+            wb_matriz(wb_alvo, fs_params.wb_m); // 26-24: 9 multiplicacoes 3x3 por quadro
+            fs_params.wb_pad0 = fs_params.wb_pad1 = fs_params.wb_pad2 = 0.0f;
+            // M2.5-26-23c: lt_on vira TRES estados, sem campo novo:
+            //   0 = operador local desligado
+            //   1 = ligado com o B antigo (PS_Down + blur, caminho da 26-14/16)
+            //   2 = ligado com o B da GRADE BILATERAL (26-23a)
+            fs_params.lt_on = lt_on ? (lt_b_grade ? 2.0f : 1.0f) : 0.0f; // 26-23c
+            fs_params.lt_c  = lt_c;
+            fs_params.lt_d  = lt_d;
+            fs_params.lt_c_lo = lt_c_lo; // 26-15
+            fs_params.bg_sr = grid_sr; fs_params.bg_lo = grid_lo; fs_params.bg_hi = grid_hi; // 26-23c
+            fs_params.bg_mix = grid_mix;
+            fs_params.bg_pad0 = 0.0f; fs_params.bg_pad1 = 0.0f; fs_params.bg_pad2 = 0.0f;
+            // M2.5-26-15: este M vira FALLBACK. O de verdade e lido na GPU da textura
+            // 1x1 da exposicao (canal G = a media medida), porque amarrar o ponto medio
+            // na CHAVE assume que a medicao esta no alvo - e o ev_min = 4 garante que
+            // ela NAO esta no crepusculo. Medido as 5h50: chave 0.10417 contra media
+            // real 0.06218, 0.74 stop de desvio.
+            fs_params.lt_m  = std::log(std::max(exposure_key, 1e-6f));
             fs_params.shaft_cloud_occ = shaft_cloud_occ;
             fs_params.cloud_mid = (cloud_h_min + cloud_h_max) * 0.5f;
-            fs_params.shaft_debug = (view_mode == 3) ? 1.0f : ((view_mode == 4) ? 2.0f : ((view_mode == 5) ? 3.0f : 0.0f)); // 26-I: medidores
+            fs_params.shaft_debug = (view_mode == 3) ? 1.0f : ((view_mode == 4) ? 2.0f : ((view_mode == 5) ? 3.0f : ((view_mode == 6) ? 4.0f : 0.0f))); // 26-23a: + a grade
             fs_params.shaft_height_falloff = shaft_height_falloff; fs_params.dither_amt = dither_amt;
             fs_params.expo_auto = auto_exposure ? 1.0f : 0.0f; // 26-4: liga a leitura da textura 1x1
             // Anular shafts nas views de debug para nao sujar a validacao
-            fs_params.shaft_intensity = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f; // 26-I: medidores tambem sem shafts
+            fs_params.shaft_intensity = (view_mode == 0 || view_mode == 3) ? ray_strength : 0.0f; // 26-I: medidores tambem sem shafts (a grade, 6, tambem)
             fs_params.bloom_intensity = (draw_bloom && view_mode == 0) ? bloom_intensity : 0.0f;
 
             SDL_PushGPUFragmentUniformData(cmd_buffer, 0, &fs_params, sizeof(FsParams));
@@ -4001,19 +5201,26 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
             else if (view_mode == 2) upscale_source = scene_color;
 
             // O Pass Fullscreen agora bebe da id_mask pra calcular a oclusão volumetrica da luz e da cor unificada do bloom kawase
-            SDL_GPUTextureSamplerBinding fs_samp_binds[7] = {
+            // M2.5-26-15 DEFEITO CORRIGIDO: a 26-14 declarou o vetor com 7 posicoes
+            // e escreveu na posicao 7 (a oitava). Isso e escrita FORA do vetor -
+            // comportamento indefinido, que so nao quebrou porque a pilha tinha folga.
+            // O oitavo binding agora nasce dentro do inicializador, onde deveria.
+            SDL_GPUTextureSamplerBinding fs_samp_binds[9] = {
                 { upscale_source, upscale_sampler },
                 { normal_id, upscale_sampler },
                 { bloom_tex_a ? bloom_tex_a : fallback_tex, upscale_sampler },
                 { depth_texture, point_sampler },
                 { shadow_map, shadow_cmp },
                 { weather_tex, sampler },
-                { expo_prev, upscale_sampler } // M2.5-26-2a: a MESMA exposicao que pre-expos a cena
+                { expo_prev, upscale_sampler }, // M2.5-26-2a: a MESMA exposicao que pre-expos a cena
+                { lt_tex[1], upscale_sampler }, // 26-16: t7 = B FINAL (bilateral+gaussiana)
+                { grid_tex, upscale_sampler }   // 26-23a: t8 = o atlas da grade
             };
-            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 7);
+            SDL_BindGPUFragmentSamplers(fs_pass, 0, fs_samp_binds, 9);
 
             SDL_DrawGPUPrimitives(fs_pass, 3, 1, 0, 0);
             SDL_EndGPURenderPass(fs_pass);
+
             expo_ping = 1 - expo_ping; // M2.5-26-4: alterna o ping-pong da exposicao
 
             SDL_GPUColorTargetInfo ui_target = {};
@@ -4027,6 +5234,606 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
         }
 
         SDL_SubmitGPUCommandBuffer(cmd_buffer);
+
+        // ====================================================================
+        // M2.5-26-M: MEDIR AGORA. Readback de UM quadro, disparado por clique.
+        // A regra da casa proibe readback no caminho de render (latencia); isto
+        // e diagnostico manual, roda so quando pedido, e a mesma maquina que a
+        // contraprova Sunny 16 vai precisar.
+        // Baixa o mapa 32x32 de LOG-luminancia (que o PS_Luma ja gravou com a
+        // pre-exposicao DESFEITA, ou seja em cd/m2 absolutos) e devolve:
+        //   Lavg (media geometrica) - EV100 - a exposicao resultante -
+        //   min/max e um histograma por decada. O histograma e o que separa
+        //   "o medidor esta errado" de "a cena esta errada".
+        // ====================================================================
+        if (g_medir_pedido)
+        {
+            g_medir_pedido = false;
+
+            // ================================================================
+            // M2.5-26-21: O RETRATO DA CONFIGURACAO, JUNTO COM A MEDIDA.
+            //
+            // PEDIDO DO ARTHUR, e ele esta certo: "uma coisa que eu acho que nos
+            // ajudaria e se o log tambem mostrasse as configuracoes atuais para
+            // evitar erros".
+            //
+            // POR QUE, com o historico a vista. Nesta temporada a gente perdeu
+            // rodadas inteiras por nao saber o estado dos sliders no momento da
+            // medida:
+            //   * uma medida das 5h50 saiu com as nuvens LIGADAS e outra com elas
+            //     desligadas - e o pico mudou 8x (2.5e4 -> 3.2e3) sem que nenhum
+            //     dos dois logs dissesse qual era qual;
+            //   * duas medidas foram tiradas com a curva Khronos DESLIGADA e isso
+            //     so apareceu depois, por lembranca;
+            //   * o tuning.ini do x64-Release foi apagado enquanto o binario lia o
+            //     do x64-Debug, e os defaults novos da 26-19 nunca chegaram a rodar
+            //     - o painel dizia ev_min 4 e ninguem percebeu por dois dias.
+            // Uma medida sem o estado que a produziu nao e um dado, e uma anedota.
+            //
+            // Isto e SO log. Nenhum valor muda, nenhum pixel muda.
+            // ================================================================
+            {
+                app_log.add("[CONFIG] hora %.2fh (manual %d) | interna %dx%d modo %d | nuvens %d cob %.3f passos %d",
+                    sol_hora, sol_hora_manual ? 1 : 0, internal_w, internal_h, pixel_mode,
+                    draw_clouds ? 1 : 0, cloud_cobertura, cloud_passos);
+                app_log.add("[CONFIG] expo auto %d | manual %.2f EV | chave %.4f | comp %.2f EV | percentis %.2f/%.2f | ev_min %.2f ev_max %.2f",
+                    auto_exposure ? 1 : 0, exposure_ev, exposure_key, exposure_bias_ev,
+                    expo_perc_lo, expo_perc_hi, ev_min, ev_max);
+                app_log.add("[CONFIG] adaptacao claro %.2f escuro %.2f assent %.2f stops/s",
+                    expo_vel_up, expo_vel_dn, expo_ev_trans);
+                app_log.add("[CONFIG] curva %s (ombro %.3f) | bloom %d forca %.3f limiar %.3f teto %.2f",
+                    (tonemap_modo > 0) ? "KHRONOS" : "LEGADO-24I", tonemap_shoulder,
+                    draw_bloom ? 1 : 0, bloom_intensity, bloom_threshold, bloom_cap);
+                app_log.add("[CONFIG] balanco de branco: o branco vira (%.3f %.3f %.3f)%s", // 26-24
+                    wb_alvo[0], wb_alvo[1], wb_alvo[2],
+                    (wb_alvo[0] == 1.0f && wb_alvo[1] == 1.0f && wb_alvo[2] == 1.0f) ? "  = NEUTRO" : "");
+                app_log.add("[CONFIG] tonemap local %d | c %.3f d %.3f c_lo %.3f mix %.3f sigma %.3f",
+                    lt_on ? 1 : 0, lt_c, lt_d, lt_c_lo, lt_mix, lt_sr);
+                app_log.add("[CONFIG] sol %.0f lx | lua %.3f lx | piso noturno %.5f | ceu-luz %.2f | aerea %.2f",
+                    sun_intensity, moon_scene_bright, night_sky_floor, sky_light_str, aerial_cena_str);
+                // M2.5-26-23b: a grade faltava no retrato. Falha da 26-23a - o
+                // primeiro [CONFIG] tirado depois dela nao dizia se ela estava
+                // sequer ligada, que e a primeira coisa que eu precisava saber.
+                app_log.add("[CONFIG] grade %d | sigma_r %.3f ln | Z -%.2f/+%.2f sigma_r | %d taps/eixo (%d por celula)",
+                    grid_on ? 1 : 0, grid_sr, grid_lo, grid_hi, grid_taps, grid_taps * grid_taps);
+
+                SDL_Log("[CONFIG] hora %.2fh manual %d | %dx%d | nuvens %d | auto %d EVman %.2f perc %.2f/%.2f evmin %.2f evmax %.2f",
+                    sol_hora, sol_hora_manual ? 1 : 0, internal_w, internal_h,
+                    draw_clouds ? 1 : 0, auto_exposure ? 1 : 0, exposure_ev,
+                    expo_perc_lo, expo_perc_hi, ev_min, ev_max);
+                SDL_Log("[CONFIG] curva %s | bloom %d forca %.3f limiar %.3f teto %.2f | local %d c %.3f d %.3f | sol %.0f lx lua %.3f lx",
+                    (tonemap_modo > 0) ? "KHRONOS" : "LEGADO-24I",
+                    draw_bloom ? 1 : 0, bloom_intensity, bloom_threshold, bloom_cap,
+                    lt_on ? 1 : 0, lt_c, lt_d, sun_intensity, moon_scene_bright);
+                // M2.5-26-24: a linha do console e a que sai colada num relatorio.
+                // Ela nao levava o EC, o estado do B da grade, a mistura nem o
+                // balanco - e cada um deles ja custou uma rodada de perguntas.
+                SDL_Log("[CONFIG] estrelas: forca %.2f | mag ate %.2f | sigma %.2f px | %.0f/face = %.0f estrelas | inclinacao %.2f", // 25-18
+                    stars_str, stars_mag_lim, stars_size, stars_dens, 6.0f * stars_dens * stars_dens, stars_slope);
+                SDL_Log("[CONFIG] EC %.2f | B da grade %d mistura %.2f | branco vira (%.3f %.3f %.3f)",
+                    exposure_bias_ev, lt_b_grade ? 1 : 0, grid_mix,
+                    wb_alvo[0], wb_alvo[1], wb_alvo[2]);
+                // ====================================================================
+                // M2.5-26-26: A CONFORMIDADE VIRA INSTRUMENTO PERMANENTE.
+                //
+                // A auditoria de 30/08 achou quatro numeros divergentes da fonte, e
+                // DOIS deles estavam la porque o controle nao alcancava o valor
+                // certo - o slider de Sigma tinha minimo 9,2x acima do fisico. Eles
+                // sobreviveram meses porque nada os cobrava.
+                //
+                // Esta linha cobra. So entram numeros que a documentacao FIXA; o que
+                // a fonte deixa para a arte nao aparece aqui e nunca vai aparecer.
+                // Tolerancia de 2% relativa - acima disso e divergencia, nao ruido.
+                // ====================================================================
+                {
+                    const float s_ar = sigma_ar_limpo();
+                    struct { const char* nome; float tem; float fonte; } cf[] = {
+                        { "fase_g",   shaft_g,     0.80f  },  // Cornette-Shanks, Hillaire T1
+                        { "sigma_ar", shaft_sigma, s_ar   },  // Tabela 1, ar limpo
+                        { "fog",      fog_density, s_ar   },  // idem
+                        { "lt_sigma", lt_sr,       0.921f },  // Durand & Dorsey 2002
+                    };
+                    char lin[256]; int pos = 0, fora = 0;
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        float razao = cf[i].tem / ((cf[i].fonte != 0.0f) ? cf[i].fonte : 1.0f);
+                        if (std::fabs(razao - 1.0f) <= 0.02f) { continue; }
+                        ++fora;
+                        int n = SDL_snprintf(lin + pos, sizeof(lin) - pos, "%s %.6g (fonte %.6g, %+.2f st) ",
+                                             cf[i].nome, cf[i].tem, cf[i].fonte,
+                                             std::log2(std::max(razao, 1e-9f)));
+                        if (n <= 0 || pos + n >= (int)sizeof(lin) - 1) { break; }
+                        pos += n;
+                    }
+                    if (fora == 0)
+                        SDL_Log("[CONFIG] conformidade: os 4 valores fixados pela fonte conferem");
+                    else
+                        SDL_Log("[CONFIG] conformidade: %d de 4 FORA da fonte -> %s", fora, lin);
+                }
+                SDL_Log("[CONFIG] grade %d | sigma_r %.3f | Z -%.2f/+%.2f | %d taps",  // 26-23b
+                    grid_on ? 1 : 0, grid_sr, grid_lo, grid_hi, grid_taps);
+            }
+            const int LW = 32, LH = 32;
+            const uint32_t bytes = (uint32_t)(LW * LH * 8); // RGBA16F
+            SDL_GPUTransferBufferCreateInfo dl_info = { SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, bytes };
+            SDL_GPUTransferBuffer* dl_tb = SDL_CreateGPUTransferBuffer(device, &dl_info);
+            if (dl_tb)
+            {
+                SDL_GPUCommandBuffer* dl_cmd = SDL_AcquireGPUCommandBuffer(device);
+                SDL_GPUCopyPass* dl_pass = SDL_BeginGPUCopyPass(dl_cmd);
+                SDL_GPUTextureRegion dl_reg = { luma_map_tex, 0, 0, 0, 0, 0, (Uint32)LW, (Uint32)LH, 1 };
+                SDL_GPUTextureTransferInfo dl_dst = { dl_tb, 0, (Uint32)LW, (Uint32)LH };
+                SDL_DownloadFromGPUTexture(dl_pass, &dl_reg, &dl_dst);
+                SDL_EndGPUCopyPass(dl_pass);
+                SDL_GPUFence* dl_fence = SDL_SubmitGPUCommandBufferAndAcquireFence(dl_cmd);
+                if (dl_fence) { SDL_WaitForGPUFences(device, true, &dl_fence, 1); SDL_ReleaseGPUFence(device, dl_fence); }
+
+                uint16_t* px = (uint16_t*)SDL_MapGPUTransferBuffer(device, dl_tb, false);
+                if (px)
+                {
+                    double soma = 0.0; int n = 0;
+                    // M2.5-26-19: O MEDIDOR PASSA A MEDIR O QUE O SHADER MEDE.
+                    // Ate aqui este bloco calculava a media log de TODOS os 1024
+                    // blocos e chamava aquilo de "Lavg" - mas o PS_Adapt aplica a
+                    // JANELA DE PERCENTIL desde a 26-12. Com 5/95 a diferenca era
+                    // pequena (a janela cobria 90% do quadro) e passou batida. Com
+                    // 75/85 ela vale ~2 stops: o painel reportaria um alvo que o
+                    // shader nunca usou. E a mesma classe de defeito que custou
+                    // quatro estacoes - um instrumento que mente com confianca.
+                    // Abaixo, as DUAS leituras, lado a lado e rotuladas.
+                    static float lgs[1024]; int nlg = 0;
+                    float lo = 1e30f, hi = -1e30f;
+                    float pico_real = -1e30f, vale_real = 1e30f; // 26-17: pixel, nao bloco
+                    int hist[10] = { 0,0,0,0,0,0,0,0,0,0 }; // decadas de log10(cd/m2): <-1 .. >=7
+                    for (int i = 0; i < LW * LH; ++i)
+                    {
+                        float lg = h2f(px[i * 4 + 0]); // R = MEDIA do log no bloco
+                        float pk = h2f(px[i * 4 + 1]); // G = PICO do bloco  (26-17)
+                        float vl = h2f(px[i * 4 + 2]); // B = VALE do bloco  (26-17)
+                        if (!(lg > -1e30f && lg < 1e30f)) { hist[9] += 1000; continue; } // inf/NaN
+                        soma += lg; ++n;
+                        if (nlg < 1024) lgs[nlg++] = lg; // 26-19
+                        if (lg < lo) lo = lg;
+                        if (lg > hi) hi = lg;
+                        if (pk > -1e30f && pk < 1e30f && pk > pico_real) pico_real = pk;
+                        if (vl > -1e30f && vl < 1e30f && vl < vale_real) vale_real = vl;
+                        float d = std::log10(std::exp(lg));
+                        int b = (int)std::floor(d) + 1; b = std::max(0, std::min(9, b));
+                        hist[b] += 1;
+                    }
+                    SDL_UnmapGPUTransferBuffer(device, dl_tb);
+                    if (n > 0)
+                    {
+                        float l_todos = (float)std::exp(soma / (double)n);
+                        // M2.5-26-19: replica EXATA do PS_Adapt - mesmas 64 caixas,
+                        // mesmos LN_MIN/LN_MAX, mesma busca de limiar por borda de
+                        // caixa, mesma segunda passagem exata. Se este bloco e o
+                        // shader divergirem, o painel volta a mentir.
+                        float l_avg = l_todos;
+                        {
+                            const int NB = 64;
+                            const float LN_MIN = -9.21034f, LN_MAX = 13.81551f;
+                            const float LN_ESC = (float)NB / (LN_MAX - LN_MIN);
+                            float hb[NB]; for (int b = 0; b < NB; ++b) hb[b] = 0.0f;
+                            for (int i = 0; i < nlg; ++i) {
+                                int b = (int)std::clamp((lgs[i] - LN_MIN) * LN_ESC, 0.0f, (float)(NB - 1));
+                                hb[b] += 1.0f;
+                            }
+                            float tot = (float)std::max(nlg, 1);
+                            float n_lo = std::clamp(expo_perc_lo, 0.0f, 0.98f) * tot;
+                            float n_hi = std::clamp(expo_perc_hi, 0.02f, 1.0f) * tot;
+                            if (n_hi <= n_lo) { n_lo = 0.0f; n_hi = tot; }
+                            float ln_lo = LN_MIN, ln_hi = LN_MAX, acc = 0.0f;
+                            for (int b = 0; b < NB; ++b) {
+                                float ini = acc; acc += hb[b];
+                                if (ini <= n_lo && acc > n_lo) ln_lo = LN_MIN + (float)b / LN_ESC;
+                                if (ini <  n_hi && acc >= n_hi) ln_hi = LN_MIN + (float)(b + 1) / LN_ESC;
+                            }
+                            double sj = 0.0; int nj = 0;
+                            for (int i = 0; i < nlg; ++i)
+                                if (lgs[i] >= ln_lo && lgs[i] <= ln_hi) { sj += lgs[i]; ++nj; }
+                            if (nj > 0) l_avg = (float)std::exp(sj / (double)nj);
+                            app_log.add("[MEDIDA] janela %.0f-%.0f pct: %d de %d blocos | Lavg JANELA=%.4g  (Lavg de TUDO=%.4g, %.2f stops de diferenca)",
+                                expo_perc_lo * 100.0f, expo_perc_hi * 100.0f, nj, nlg,
+                                l_avg, l_todos, std::log2(std::max(l_avg, 1e-9f) / std::max(l_todos, 1e-9f)));
+                        }
+                        float ev100 = std::log2(l_avg * 100.0f / 12.5f);
+                        float alvo = exposure_key / std::max(l_avg, 1e-5f) * std::pow(2.0f, exposure_bias_ev);
+                        float e_hi = 1.0f / (1.2f * std::pow(2.0f, ev_max));
+                        float e_lo = 1.0f / (1.2f * std::pow(2.0f, ev_min));
+                        float clamped = std::clamp(alvo, std::min(e_hi, e_lo), std::max(e_hi, e_lo));
+                        app_log.add("[MEDIDA] Lavg=%.4g cd/m2 | EV100=%.2f | alvo=%.4g | aplicada=%.4g%s",
+                            l_avg, ev100, alvo, clamped, (clamped != alvo) ? " (TETO/PISO MORDEU)" : "");
+                        // M2.5-26-17: as DUAS leituras, lado a lado. A de cima e a media
+                        // de bloco (o que existia); a de baixo e o pixel. A razao entre os
+                        // picos e quanto o medidor antigo estava escondendo.
+                        {
+                            float pk = std::exp(pico_real), vl = std::exp(vale_real);
+                            app_log.add("[MEDIDA] PIXEL  min=%.4g  max=%.4g cd/m2  (faixa %.1f stops)",
+                                        vl, pk, std::log2(std::max(pk, 1e-9f) / std::max(vl, 1e-9f)));
+                            app_log.add("[MEDIDA] o bloco 32x32 escondia %.1fx do pico (%.2f stops)",
+                                        pk / std::max(std::exp(hi), 1e-9f),
+                                        std::log2(pk / std::max(std::exp(hi), 1e-9f)));
+                            SDL_Log("[MEDIDA] PIXEL min=%.4g max=%.4g | bloco escondia %.1fx",
+                                    vl, pk, pk / std::max(std::exp(hi), 1e-9f));
+                            g_med_expo = clamped; g_med_ev = std::log2(1.0 / (1.2 * clamped));
+                            g_med_tick = sim_tick;
+                            g_med_lavg = l_avg; // 26-20: para o confronto GPU x CPU
+                        }
+                        app_log.add("[MEDIDA] BLOCO  min=%.4g  max=%.4g cd/m2  (razao %.0fx)",
+                            std::exp(lo), std::exp(hi), std::exp(hi - lo));
+                        app_log.add("[MEDIDA] hist log10(cd/m2) <0:%d 0:%d 1:%d 2:%d 3:%d 4:%d 5:%d 6:%d 7:%d inf:%d",
+                            hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7], hist[8], hist[9]);
+                        SDL_Log("[MEDIDA] Lavg=%.4g EV100=%.2f alvo=%.4g aplicada=%.4g min=%.4g max=%.4g",
+                            l_avg, ev100, alvo, clamped, std::exp(lo), std::exp(hi));
+                        SDL_Log("[MEDIDA] hist <0:%d 0:%d 1:%d 2:%d 3:%d 4:%d 5:%d 6:%d 7:%d inf:%d",
+                            hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7], hist[8], hist[9]);
+                    }
+                    else { SDL_Log("[MEDIDA] mapa inteiro invalido (inf/NaN) - o medidor esta envenenado."); }
+                }
+                SDL_ReleaseGPUTransferBuffer(device, dl_tb);
+            }
+            else { SDL_Log("[MEDIDA] falhou ao criar o transfer buffer: %s", SDL_GetError()); }
+
+            // ================================================================
+            // M2.5-26-20: O MEDIDOR PASSA A VER A EXPOSICAO QUE A GPU USOU.
+            //
+            // O QUE FALTAVA, e custou uma discussao inteira. O bloco [MEDIDA]
+            // imprime 'alvo' e 'aplicada' - MAS OS DOIS SAO CALCULADOS NA CPU:
+            //     alvo    = exposure_key / l_avg * 2^EC
+            //     aplicada = clamp(alvo, ...)
+            // Nenhum dos dois e o valor ADAPTADO que o PS_Adapt escreveu. Durante
+            // um transiente o painel mostra para onde a exposicao esta indo e
+            // nunca onde ela esta. E a mesma classe do exposure_auto_cur que a
+            // 26-17 matou, ressuscitada em outro lugar: um numero no painel que
+            // nao e o que renderiza.
+            //
+            // O QUE ISTO RESPONDE, com um numero so - O SUBNORMAL EM HALF.
+            // Frostbite 5.2, Tabela 14, VERBATIM: o menor valor do 16-bit float e
+            // 6.10 x 10^-5. A nossa textura 1x1 da exposicao e R16G16B16A16_FLOAT.
+            // Medido nesta engine ao meio-dia: exposicao 6.881e-06 olhando para o
+            // chao e 2.829e-05 olhando para o ceu - AS DUAS abaixo do piso. A
+            // fronteira cai em EV100 13,74, e toda cena de dia vive acima dela.
+            // Se a GPU faz flush-to-zero de subnormais, 'prev' volta ZERO, cai no
+            //     if (!(prev > 0.0f)) prev = alvo;
+            // e a adaptacao salta direto para o alvo, todo frame, o dia inteiro.
+            // Imprimindo o PADRAO DE BITS a duvida acaba:
+            //     0x0000            -> a GPU descartou. Hipotese confirmada.
+            //     expoente zero, mantissa != 0 -> guardou o subnormal. Descartada.
+            //
+            // E DE QUEBRA confronta o l_avg da GPU (canal G) com a replica de CPU
+            // da 26-19. Se os dois divergirem, a replica esta mentindo e eu quero
+            // saber disso antes de tirar qualquer conclusao de um [MEDIDA].
+            //
+            // CUSTO: 8 bytes, num botao que ja faz download de 8 KB. A regra da
+            // casa contra readback continua valendo no caminho de render - isto
+            // roda so no clique, igual ao resto do [MEDIDA].
+            // ================================================================
+            {
+                SDL_GPUTransferBufferCreateInfo ex_info = { SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD, 8u };
+                SDL_GPUTransferBuffer* ex_tb = SDL_CreateGPUTransferBuffer(device, &ex_info);
+                if (ex_tb)
+                {
+                    // Depois do flip da linha do expo_ping, a textura escrita NESTE
+                    // frame e a expo_tex[1 - expo_ping]. E a mesma que o proximo
+                    // frame vai pre-expor a cena, ou seja: a exposicao de verdade.
+                    SDL_GPUCommandBuffer* ex_cmd = SDL_AcquireGPUCommandBuffer(device);
+                    SDL_GPUCopyPass* ex_pass = SDL_BeginGPUCopyPass(ex_cmd);
+                    SDL_GPUTextureRegion ex_reg = { expo_tex[1 - expo_ping], 0, 0, 0, 0, 0, 1u, 1u, 1u };
+                    SDL_GPUTextureTransferInfo ex_dst = { ex_tb, 0, 1u, 1u };
+                    SDL_DownloadFromGPUTexture(ex_pass, &ex_reg, &ex_dst);
+                    SDL_EndGPUCopyPass(ex_pass);
+                    SDL_GPUFence* ex_fence = SDL_SubmitGPUCommandBufferAndAcquireFence(ex_cmd);
+                    if (ex_fence) { SDL_WaitForGPUFences(device, true, &ex_fence, 1); SDL_ReleaseGPUFence(device, ex_fence); }
+
+                    uint16_t* ex_px = (uint16_t*)SDL_MapGPUTransferBuffer(device, ex_tb, false);
+                    if (ex_px)
+                    {
+                        uint16_t bits_r = ex_px[0];
+                        uint16_t bits_g = ex_px[1];
+                        SDL_UnmapGPUTransferBuffer(device, ex_tb);
+                        float e_real = h2f(bits_r);
+                        float lavg_gpu = h2f(bits_g);
+                        const char* classe =
+                            (bits_r == 0u)                  ? "ZERO - a GPU DESCARTOU o subnormal" :
+                            ((bits_r & 0x7C00u) == 0u)      ? "SUBNORMAL - a GPU guardou, sem flush" :
+                                                              "normal (acima de 6.10e-5)";
+                        float ev_real = (e_real > 0.0f) ? std::log2(1.0f / (1.2f * e_real)) : 0.0f;
+                        app_log.add("[26-20] GPU exposicao REAL = %.4g  (EV100 %.2f)  bits 0x%04X  %s",
+                            e_real, ev_real, (unsigned)bits_r, classe);
+                        SDL_Log("[26-20] GPU exposicao REAL = %.4g (EV100 %.2f) bits 0x%04X %s",
+                            e_real, ev_real, (unsigned)bits_r, classe);
+                        app_log.add("[26-20] GPU l_avg (canal G) = %.4g  bits 0x%04X",
+                            lavg_gpu, (unsigned)bits_g);
+                        if (g_med_lavg > 0.0 && lavg_gpu > 0.0f)
+                            app_log.add("[26-20] l_avg  GPU %.4g  x  replica CPU %.4g  =  %+.3f stops de divergencia",
+                                lavg_gpu, (float)g_med_lavg,
+                                std::log2(lavg_gpu / (float)std::max(g_med_lavg, 1e-9)));
+                        if (g_med_expo > 0.0 && e_real > 0.0f)
+                            app_log.add("[26-20] adaptacao: REAL %.4g  x  alvo %.4g  =  %+.2f stops de atraso",
+                                e_real, (float)g_med_expo,
+                                std::log2((float)g_med_expo / e_real));
+                        SDL_Log("[26-20] l_avg GPU %.4g x CPU %.4g | adaptacao atrasada %+.2f stops",
+                            lavg_gpu, (float)g_med_lavg,
+                            (g_med_expo > 0.0 && e_real > 0.0f) ? std::log2((float)g_med_expo / e_real) : 0.0f);
+
+                        // ============================================================
+                        // M2.5-26-23b: A GRADE, LIDA EM NUMERO EM VEZ DE OLHADA.
+                        //
+                        // A 26-23a entregou um modo de Vista para inspecionar o atlas
+                        // com o olho. Sete pedidos de captura de tela depois, a licao
+                        // desta temporada inteira se aplica a ela mesma: quando o dado
+                        // nao chega, o certo e CONSTRUIR O INSTRUMENTO, nao pedir de
+                        // novo. Isto e mais preciso que a imagem, e cabe num log.
+                        //
+                        // Baixa o atlas 256x96 (192 KB, num botao que ja baixa 8 KB) e
+                        // devolve, por fatia Z:
+                        //   * quantas celulas de 2048 tem peso (ocupacao)
+                        //   * o B medio da fatia, em stops relativos a M
+                        // A PERGUNTA QUE ISSO RESPONDE: a grade separa por luminancia?
+                        //   ocupacao concentrada em UMA fatia -> nao separa nada, e
+                        //     ligar o B nela na 26-23c seria inutil
+                        //   ocupacao espalhada, com poucas celulas nas fatias CLARAS ->
+                        //     a faixa do horizonte esta isolada numa caixa propria, que
+                        //     e exatamente o que o B do PS_Down nao consegue fazer
+                        // E o numero de celulas VAZIAS diz se o eixo Z esta largo demais.
+                        // ============================================================
+                        if (grid_on && lavg_gpu > 0.0f && e_real > 0.0f)
+                        {
+                            const int GW = 256, GH = 96, GNZ = 12;
+                            SDL_GPUTransferBufferCreateInfo gr_info = { SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+                                                                        (uint32_t)(GW * GH * 8) };
+                            SDL_GPUTransferBuffer* gr_tb = SDL_CreateGPUTransferBuffer(device, &gr_info);
+                            if (gr_tb)
+                            {
+                                SDL_GPUCommandBuffer* gr_cmd = SDL_AcquireGPUCommandBuffer(device);
+                                SDL_GPUCopyPass* gr_pass = SDL_BeginGPUCopyPass(gr_cmd);
+                                SDL_GPUTextureRegion gr_reg = { grid_tex, 0, 0, 0, 0, 0, (Uint32)GW, (Uint32)GH, 1 };
+                                SDL_GPUTextureTransferInfo gr_dst = { gr_tb, 0, (Uint32)GW, (Uint32)GH };
+                                SDL_DownloadFromGPUTexture(gr_pass, &gr_reg, &gr_dst);
+                                SDL_EndGPUCopyPass(gr_pass);
+                                SDL_GPUFence* gr_f = SDL_SubmitGPUCommandBufferAndAcquireFence(gr_cmd);
+                                if (gr_f) { SDL_WaitForGPUFences(device, true, &gr_f, 1); SDL_ReleaseGPUFence(device, gr_f); }
+                                uint16_t* gp = (uint16_t*)SDL_MapGPUTransferBuffer(device, gr_tb, false);
+                                if (gp)
+                                {
+                                    int    ocup[12] = { 0,0,0,0,0,0,0,0,0,0,0,0 };
+                                    double bsum[12] = { 0,0,0,0,0,0,0,0,0,0,0,0 };
+                                    for (int py = 0; py < GH; ++py)
+                                        for (int px = 0; px < GW; ++px)
+                                        {
+                                            int idx = (py * GW + px) * 4;
+                                            float wv = h2f(gp[idx + 0]);
+                                            float w  = h2f(gp[idx + 1]);
+                                            int z = (py / 32) * 4 + (px / 64);
+                                            if (z < 0 || z >= GNZ) continue;
+                                            if (w > 1e-4f && wv > -1e30f && wv < 1e30f)
+                                            { ocup[z] += 1; bsum[z] += (double)(wv / w); }
+                                        }
+                                    // M2.5-26-23d: o unmap desceu para o FIM deste bloco.
+                                    // O medidor do operador, la embaixo, le os mesmos
+                                    // 256x96 texels - baixar o atlas duas vezes para ler
+                                    // duas coisas dele seria desperdicio e, pior, as duas
+                                    // leituras poderiam cair em quadros diferentes.
+                                    // M e o mesmo que o shader usa: log(l_avg * exposicao)
+                                    float Mg = std::log(std::max(lavg_gpu * e_real, 1e-9f));
+                                    float dz = (grid_lo + grid_hi) * grid_sr / (float)GNZ;
+                                    int tot = 0; for (int z = 0; z < GNZ; ++z) tot += ocup[z];
+                                    app_log.add("[GRADE] Z de %+.2f a %+.2f ln em torno de M=%.2f | dz %.3f ln = %.2f stops | %d de 24576 celulas com peso (%.1f%%)",
+                                        Mg - grid_lo * grid_sr, Mg + grid_hi * grid_sr, Mg, dz, dz / 0.6931472f,
+                                        tot, 100.0f * (float)tot / 24576.0f);
+                                    app_log.add("[GRADE] ocupacao 0(escura)->11(clara): %d %d %d %d %d %d %d %d %d %d %d %d",
+                                        ocup[0],ocup[1],ocup[2],ocup[3],ocup[4],ocup[5],
+                                        ocup[6],ocup[7],ocup[8],ocup[9],ocup[10],ocup[11]);
+                                    SDL_Log("[GRADE] M=%.2f dz=%.3f ln | ocup: %d %d %d %d %d %d %d %d %d %d %d %d",
+                                        Mg, dz, ocup[0],ocup[1],ocup[2],ocup[3],ocup[4],ocup[5],
+                                        ocup[6],ocup[7],ocup[8],ocup[9],ocup[10],ocup[11]);
+                                    // B medio de cada fatia ocupada, em stops relativos a M
+                                    char lin[256]; int pos = 0;
+                                    for (int z = 0; z < GNZ; ++z)
+                                    {
+                                        float bs = (ocup[z] > 0) ? (float)((bsum[z] / ocup[z] - Mg) / 0.6931472) : 0.0f;
+                                        int n = SDL_snprintf(lin + pos, sizeof(lin) - pos,
+                                                             (ocup[z] > 0) ? "%+.1f " : "  .  ", bs);
+                                        if (n <= 0 || pos + n >= (int)sizeof(lin) - 1) break;
+                                        pos += n;
+                                    }
+                                    app_log.add("[GRADE] B medio por fatia, em stops relativos a M: %s", lin);
+                                    SDL_Log("[GRADE] B/fatia (stops vs M): %s", lin);
+
+                                    // ================================================
+                                    // M2.5-26-23d: O OPERADOR LOCAL, MEDIDO.
+                                    //
+                                    // O PROBLEMA, e ele e ESTRUTURAL, nao um bug: o
+                                    // [MEDIDA] le o composite_color, que fica ANTES do
+                                    // operador local. As medidas com 'B da grade'
+                                    // ligado e desligado saem IDENTICAS AO DIGITO -
+                                    // PIXEL max, BLOCO max, histograma, tudo. Isso e
+                                    // CORRETO por construcao, e significa que nenhum
+                                    // instrumento deste motor conseguia dizer se a
+                                    // 26-23c mudou um pixel. So o olho podia.
+                                    // A licao desta temporada, aplicada mais uma vez:
+                                    // quando o dado nao chega, constroi-se o
+                                    // instrumento; nao se pede a captura de novo.
+                                    //
+                                    // O QUE ELE FAZ. Baixa tambem o lt_tex[1] (64x32,
+                                    // 16 KB - o B ANTIGO, o mesmo texel que o
+                                    // amostra_bspline le no canal R) e, para as 2048
+                                    // celulas, refaz na CPU o caminho inteiro que falta
+                                    // ate a tela, com CADA UM dos dois B:
+                                    //   Io = c_sel*(B-M) + d*(Ii-B) + M   (slide 137)
+                                    //   -> Khronos PBR Neutral -> sRGB -> 0..255
+                                    //
+                                    // DE ONDE VEM CADA INGREDIENTE - todos MEDIDOS,
+                                    // nenhum estimado:
+                                    //   M   = ln(l_avg * exposicao), os dois canais da
+                                    //         textura 1x1 que a 26-20 ja baixou. E a
+                                    //         MESMA linha do shader, nao uma replica.
+                                    //   Ii  = soma_z(wv) / soma_z(w) da celula no atlas.
+                                    //         O PS_Grid escreve V = log da luminancia de
+                                    //         (composite + bloom*intensidade), que e
+                                    //         exatamente o que o fullscreen chama de Ii,
+                                    //         e os pesos de Z de cada amostra somam ~1
+                                    //         (slide 136: "each sample contributes to
+                                    //         two nearest Z slices"). Logo a razao e a
+                                    //         media de Ii sobre os taps da celula.
+                                    //   B_ant = canal R do lt_tex[1].
+                                    //   B_gr  = o mesmo fatiamento em Z do fullscreen.
+                                    //   c_sel = (B >= M) ? lt_c : lt_c_lo  (slide 145).
+                                    //         Com lt_c_lo = 1.00 o ramo escuro tem ganho
+                                    //         exp(0) = 1: o operador so age no lado
+                                    //         CLARO. Por isso a conta abaixo mede o que
+                                    //         importa - a faixa do horizonte.
+                                    //
+                                    // TRES APROXIMACOES, DECLARADAS:
+                                    //  1. o shader le B com bicubic B-spline sobre 64x32
+                                    //     (slide 140); aqui e o texel da celula. A
+                                    //     diferenca e de subtexel.
+                                    //  2. a celula tem ~10x11 pixels e o Ii dela e a
+                                    //     media dos taps, nao o pixel de pico. O numero
+                                    //     e um PISO do estouro real, nunca um teto.
+                                    //  3. a curva Khronos e avaliada como se a celula
+                                    //     fosse CINZA NEUTRO. Para neutro a conta e
+                                    //     EXATA (o lerp de dessaturacao vira no-op);
+                                    //     para uma faixa alaranjada ela superestima o
+                                    //     byte. Declarado, nao escondido.
+                                    // ================================================
+                                    if (tonemap_modo > 0)
+                                    {
+                                        const int BW = 64, BH = 32;
+                                        SDL_GPUTransferBufferCreateInfo bo_info = { SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+                                                                                    (uint32_t)(BW * BH * 8) };
+                                        SDL_GPUTransferBuffer* bo_tb = SDL_CreateGPUTransferBuffer(device, &bo_info);
+                                        if (bo_tb)
+                                        {
+                                            SDL_GPUCommandBuffer* bo_cmd = SDL_AcquireGPUCommandBuffer(device);
+                                            SDL_GPUCopyPass* bo_pass = SDL_BeginGPUCopyPass(bo_cmd);
+                                            SDL_GPUTextureRegion bo_reg = { lt_tex[1], 0, 0, 0, 0, 0, (Uint32)BW, (Uint32)BH, 1 };
+                                            SDL_GPUTextureTransferInfo bo_dst = { bo_tb, 0, (Uint32)BW, (Uint32)BH };
+                                            SDL_DownloadFromGPUTexture(bo_pass, &bo_reg, &bo_dst);
+                                            SDL_EndGPUCopyPass(bo_pass);
+                                            SDL_GPUFence* bo_f = SDL_SubmitGPUCommandBufferAndAcquireFence(bo_cmd);
+                                            if (bo_f) { SDL_WaitForGPUFences(device, true, &bo_f, 1); SDL_ReleaseGPUFence(device, bo_f); }
+                                            uint16_t* bp = (uint16_t*)SDL_MapGPUTransferBuffer(device, bo_tb, false);
+                                            if (bp)
+                                            {
+                                                // Khronos PBR Neutral + sRGB, em cinza neutro.
+                                                // Constantes verbatim da especificacao, as mesmas
+                                                // do fullscreen.hlsl: F90 = 0.04, Ks = 0.76.
+                                                auto tela = [](float v) -> int {
+                                                    float c = (v > 0.0f) ? v : 0.0f;
+                                                    float off = (c < 0.08f) ? (c - 6.25f * c * c) : 0.04f;
+                                                    c -= off;
+                                                    const float sc = 0.76f;
+                                                    if (c >= sc) { const float dd = 1.0f - sc; c = 1.0f - dd * dd / (c + dd - sc); }
+                                                    c = std::clamp(c, 0.0f, 1.0f);
+                                                    float s = (c <= 0.0031308f) ? (c * 12.92f)
+                                                                                : (std::pow(c, 1.0f / 2.4f) * 1.055f - 0.055f);
+                                                    return (int)(s * 255.0f + 0.5f);
+                                                };
+                                                const float g_sr = std::max(grid_sr, 1e-3f);
+                                                const float g_lo = Mg - std::max(grid_lo, 0.1f) * g_sr;
+                                                const float g_hi = Mg + std::max(grid_hi, 0.1f) * g_sr;
+                                                const float g_dz = std::max((g_hi - g_lo) / (float)GNZ, 1e-4f);
+                                                const float mix  = std::clamp(grid_mix, 0.0f, 1.0f);
+                                                const float L2   = 0.6931472f;
+                                                // O PONTO DE SATURACAO DA CURVA, achado por bissecao
+                                                // na propria lambda acima - nao e constante escrita a
+                                                // mao, e uma PROPRIEDADE da curva que esta no shader.
+                                                // Se alguem trocar as constantes da Khronos, este
+                                                // numero se corrige sozinho. A 26-11 mediu 13,45 por
+                                                // outro caminho; a bissecao devolve 13,49 (0,3%).
+                                                // POR QUE ELE PRECISA EXISTIR: acima dele o byte da
+                                                // tela para em 255 e deixa de informar. Sem esta
+                                                // regua, "255 -> 255" pareceria "a grade nao fez
+                                                // nada" mesmo quando ela move o sinal 5 stops.
+                                                float sat_lo = 1.0f, sat_hi = 1.0e6f;
+                                                for (int it = 0; it < 40; ++it)
+                                                {
+                                                    float md = std::sqrt(sat_lo * sat_hi);
+                                                    if (tela(md) >= 255) sat_hi = md; else sat_lo = md;
+                                                }
+                                                const float SAT = sat_hi;
+                                                int   nval = 0, chap_a = 0, chap_g = 0, joe_a = 0, joe_g = 0;
+                                                double gsoma = 0.0; int gn = 0;
+                                                double xsoma_a = 0.0, xsoma_g = 0.0;
+                                                float pIi = -1e30f, pBa = 0.0f, pBg = 0.0f, pBm = 0.0f;
+                                                float pIoa = 0.0f, pIog = 0.0f; int pcx = -1, pcy = -1;
+                                                for (int cy = 0; cy < BH; ++cy)
+                                                    for (int cx = 0; cx < BW; ++cx)
+                                                    {
+                                                        double sv = 0.0, sw = 0.0;
+                                                        for (int z = 0; z < GNZ; ++z)
+                                                        {
+                                                            int gi = (((z / 4) * 32 + cy) * GW + (z % 4) * 64 + cx) * 4;
+                                                            float wv = h2f(gp[gi + 0]), w = h2f(gp[gi + 1]);
+                                                            if (w > 1e-6f && wv > -1e30f && wv < 1e30f) { sv += wv; sw += w; }
+                                                        }
+                                                        if (!(sw > 1e-6)) continue;
+                                                        float Ii = (float)(sv / sw);
+                                                        float B_ant = h2f(bp[(cy * BW + cx) * 4 + 0]);
+                                                        if (!(B_ant > -1e30f && B_ant < 1e30f)) continue;
+                                                        float fz = std::clamp((Ii - g_lo) / g_dz - 0.5f, 0.0f, (float)(GNZ - 1));
+                                                        int   z0 = (int)fz; float tz = fz - (float)z0;
+                                                        int   z1 = std::min(z0 + 1, GNZ - 1);
+                                                        int   i0 = (((z0 / 4) * 32 + cy) * GW + (z0 % 4) * 64 + cx) * 4;
+                                                        int   i1 = (((z1 / 4) * 32 + cy) * GW + (z1 % 4) * 64 + cx) * 4;
+                                                        float rr = h2f(gp[i0 + 0]) * (1.0f - tz) + h2f(gp[i1 + 0]) * tz;
+                                                        float ww = h2f(gp[i0 + 1]) * (1.0f - tz) + h2f(gp[i1 + 1]) * tz;
+                                                        float B_gr = (ww > 1e-6f) ? (rr / ww) : B_ant;
+                                                        float B_mx = B_ant + (B_gr - B_ant) * mix;
+                                                        float io_a = ((B_ant >= Mg) ? lt_c : lt_c_lo) * (B_ant - Mg) + lt_d * (Ii - B_ant) + Mg;
+                                                        float io_g = ((B_mx  >= Mg) ? lt_c : lt_c_lo) * (B_mx  - Mg) + lt_d * (Ii - B_mx ) + Mg;
+                                                        ++nval;
+                                                        int ta = tela(std::exp(io_a)), tg = tela(std::exp(io_g));
+                                                        if (ta >= 255) ++chap_a;
+                                                        if (tg >= 255) ++chap_g;
+                                                        // o joelho da curva em linear: c - 0.04 >= 0.76
+                                                        if (ta >= 255) { xsoma_a += (io_a - std::log(SAT)) / L2; xsoma_g += (io_g - std::log(SAT)) / L2; }
+                                                        if (std::exp(io_a) >= 0.80f) { ++joe_a; gsoma += (io_g - io_a) / L2; ++gn; }
+                                                        if (std::exp(io_g) >= 0.80f) ++joe_g;
+                                                        if (Ii > pIi) { pIi = Ii; pcx = cx; pcy = cy; pBa = B_ant; pBg = B_gr; pBm = B_mx; pIoa = io_a; pIog = io_g; }
+                                                    }
+                                                SDL_UnmapGPUTransferBuffer(device, bo_tb);
+                                                if (pcx >= 0)
+                                                {
+                                                    int ta = tela(std::exp(pIoa)), tg = tela(std::exp(pIog));
+                                                    app_log.add("[OPER] celula mais clara (%d,%d) de %d validas | Ii %+.2f st de M | B antigo %+.2f | B grade %+.2f | B usado %+.2f (mistura %.2f)",
+                                                        pcx, pcy, nval, (pIi - Mg) / L2, (pBa - Mg) / L2, (pBg - Mg) / L2, (pBm - Mg) / L2, mix);
+                                                    app_log.add("[OPER] saida no pico: B ANTIGO %+.2f st de M -> tela %d/255  |  com a GRADE %+.2f st -> tela %d/255  |  GANHO %+.2f stops, %d niveis",
+                                                        (pIoa - Mg) / L2, ta, (pIog - Mg) / L2, tg, (pIog - pIoa) / L2, tg - ta);
+                                                    // A REGUA QUE NAO SATURA. O byte para em 255; esta linha nao.
+                                                    app_log.add("[OPER] ESTOURO no pico (a curva satura em %.2f): antigo %+.2f stops da saturacao -> com a grade %+.2f  |  veredito: %s",
+                                                        SAT, (pIoa - std::log(SAT)) / L2, (pIog - std::log(SAT)) / L2,
+                                                        (pIog > std::log(SAT)) ? "AINDA CHAPA" : "NAO CHAPA MAIS");
+                                                    app_log.add("[OPER] celulas CHAPADAS (255/255): antigo %d de %d -> grade %d  |  estouro medio delas %+.2f -> %+.2f stops  |  acima do joelho: %d -> %d  |  ganho medio onde importa %+.2f stops",
+                                                        chap_a, nval, chap_g,
+                                                        (chap_a > 0) ? (float)(xsoma_a / chap_a) : 0.0f,
+                                                        (chap_a > 0) ? (float)(xsoma_g / chap_a) : 0.0f,
+                                                        joe_a, joe_g, (gn > 0) ? (float)(gsoma / gn) : 0.0f);
+                                                    SDL_Log("[OPER] pico (%d,%d) Ii %+.2f | Bant %+.2f Bgr %+.2f | tela %d -> %d | estouro %+.2f -> %+.2f st | chapadas %d -> %d",
+                                                        pcx, pcy, (pIi - Mg) / L2, (pBa - Mg) / L2, (pBg - Mg) / L2, ta, tg,
+                                                        (pIoa - std::log(SAT)) / L2, (pIog - std::log(SAT)) / L2, chap_a, chap_g);
+                                                }
+                                                else { app_log.add("[OPER] nenhuma celula com peso - a grade saiu vazia neste quadro"); }
+                                            }
+                                            SDL_ReleaseGPUTransferBuffer(device, bo_tb);
+                                        }
+                                        else { SDL_Log("[OPER] falhou ao criar o transfer buffer do B antigo: %s", SDL_GetError()); }
+                                    }
+                                    else { app_log.add("[OPER] curva LEGADO selecionada - este medidor so sabe a Khronos. Troque a curva para medir."); }
+                                    SDL_UnmapGPUTransferBuffer(device, gr_tb);
+                                }
+                                SDL_ReleaseGPUTransferBuffer(device, gr_tb);
+                            }
+                            else { SDL_Log("[GRADE] falhou ao criar o transfer buffer da grade: %s", SDL_GetError()); }
+                        }
+                    }
+                    SDL_ReleaseGPUTransferBuffer(device, ex_tb);
+                }
+                else { SDL_Log("[26-20] falhou ao criar o transfer buffer da exposicao: %s", SDL_GetError()); }
+            }
+        }
     }
 
     SDL_WaitForGPUIdle(device);
@@ -4090,6 +5897,7 @@ fs_color_desc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
     SDL_ReleaseGPUShader(device, shadow_ps);
 
     SDL_ReleaseGPUGraphicsPipeline(device, fs_pipeline);
+    SDL_ReleaseGPUGraphicsPipeline(device, shaft_pipeline); // 26-25
     SDL_ReleaseGPUShader(device, fs_vs);
     SDL_ReleaseGPUShader(device, fs_ps);
     SDL_ReleaseGPUSampler(device, upscale_sampler);

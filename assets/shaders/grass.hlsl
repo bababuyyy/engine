@@ -123,6 +123,12 @@ SamplerState weather_samp : register(s3, space2);
 // satura em 65504. Sem pre-exposicao as unidades fisicas nao cabem no buffer.
 Texture2D tex_expo : register(t4, space2);
 SamplerState samp_expo : register(s4, space2);
+
+// M2.5-26-8: a atmosfera da cena. t5/t6/s5 estavam livres nestes dois shaders.
+#define ATMO_T_TRANS t5
+#define ATMO_T_MS    t6
+#define ATMO_S_LUT   s5
+#include "atmo_common.hlsli"
 float expo_mul()
 {
     float e = tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r;
@@ -153,7 +159,21 @@ cbuffer SunBlock : register(b0, space3)
     float debug_shadows;
     float pad_g1;
     float pad_g2;
+    // M2.5-26-7: o ceu como fonte separada (Frostbite Tabela 8: Sol = lx, Ceu = cd/m2).
+    // Offset 112, alinhado: float3 comeca em linha nova de 16 bytes; light_vp vai p/ 128.
+    float3 sky_light;
+    float sky_light_str;
     float4x4 light_vp; // alinhamento 112 da entrega (o certo — reversao do meu over-fix)
+    // M2.5-26-8: perspectiva aerea. Offsets 192..255 (a matriz light_vp fecha em 191).
+    // Uma declaracao por linha, como o resto deste cbuffer.
+    float3 ap_to_sun;
+    float ap_steps;
+    float3 ap_sun_illum;
+    float ap_str;
+    float3 ap_to_moon;
+    float ap_on;
+    float3 ap_moon_illum;
+    float ap_pad;
 };
 
 float hash12w(float2 pp)
@@ -195,13 +215,25 @@ PSOutput PSMain(PSInput input)
     float dist = length(ps_cam_pos - input.world_pos);
     float fog_f = 1.0f - exp(-fog_density * dist);
 
+    // M2.5-26-13: o f_topo era 1.25 - um multiplicador MAIOR QUE 1 sobre a cor.
+    // Com sun_color em lux isso e criar 25% de energia do nada. Teto em 1.0.
     float f_base = lerp(0.55f, 1.0f, fog_f);
-    float f_topo = lerp(1.25f, 1.0f, fog_f);
+    float f_topo = 1.0f;
 
     float3 base = input.inst_color * f_base;
     float3 topo = input.inst_color * f_topo;
     float3 albedo = lerp(base, topo, input.h01);
-    albedo *= lerp(0.35f, 1.0f, input.h01);
+
+    // M2.5-26-13: OCLUSAO AMBIENTE SAI DO ALBEDO.
+    // Unity HDRP, documentacao, VERBATIM: "The HDRP can create ambient occlusion by
+    // reducing how much light a surface receives from indirect ambient light sources.
+    // Note: AMBIENT OCCLUSION DOESN'T AFFECT DIRECT LIGHTING."
+    // O Frostbite guarda AO como parametro SEPARADO do GBuffer, "sempre presente,
+    // independente do tipo de material" - justamente para nao multiplicar o BaseColor.
+    // Multiplicar o albedo por AO faz a lamina de grama parecer um MATERIAL diferente
+    // conforme a altura, e escurece tambem a luz DIRETA do sol, que a fonte diz que
+    // nao deve ser afetada. Agora ele modula so o termo do ceu, abaixo.
+    float ao_vertical = lerp(0.35f, 1.0f, input.h01);
 
     float3 N = normalize(lerp(normalize(input.local_normal), float3(0.0f, 1.0f, 0.0f), input.h01 * 0.6f));
 
@@ -255,20 +287,74 @@ PSOutput PSMain(PSInput input)
     float sh_det = saturate((weather_map.SampleLevel(weather_samp, (input.world_pos.xz + sh_off) * 0.0015f, 0).r - 0.35f) / 0.30f);
     float sombra_de_nuvem = 1.0f - shadow_str * sh_det * saturate(cloud_cover) * lerp(0.45f, 1.0f, sh_env);
 
-    float final_shadow = max(obj_shadow * sombra_de_nuvem, 0.12f); // piso anti-buraco-preto (dupla sombra)
+    // M2.5-26-13: O PISO DE 0.12 MORREU. Ele existia porque NAO HAVIA luz ambiente
+    // de verdade: sem ele, sombra de objeto x sombra de nuvem ia a preto absoluto.
+    // Desde a 26-7 o CEU e fonte de luz separada (Frostbite Tabela 8) e a sombra e
+    // iluminada por ele fisicamente. O piso passou a VAZAR 12% da luz direta do sol
+    // para dentro da sombra - ao meio-dia, ~12.000 lx inventados por pixel sombreado.
+    // E o mesmo caso do 'ambient' que a 26-7 matou: um remendo que compensava a falta
+    // de um sistema, e que vira defeito quando o sistema chega.
+    // Nenhuma fonte de producao endossa o piso; as tres buscas da fornada voltaram
+    // vazias (Bloco C3). O que existe e o contrario: Godot issue #90259 identifica
+    // exatamente esta classe de bug como causada por "luz ambiente, luz emissiva, ou
+    // outras luzes que nao projetam sombra".
+    float final_shadow = obj_shadow * sombra_de_nuvem;
 
-    float3 lit_pre = sun_color * (ambient + (1.0f - ambient) * t_hl * final_shadow);
-    float3 lit = albedo * (1.0f / 3.14159265f) * lit_pre; // M2.5-26-2b: BSDF lambertiana rho/pi (Listing 6)
+    // M2.5-26-7: idem basic.hlsl - sol (rho/pi * E) + ceu (rho * L_ceu), Tabela 8.
+    // NOTA DE DIVIDA (26-8): as duas linhas de backlight e specular logo abaixo
+    // multiplicam sun_color - agora em lux - sem BRDF normalizada. Ficam como
+    // estao NESTA estacao de proposito: mexer nelas junto misturaria duas
+    // mudancas na mesma medida.
+    // M2.5-26-13: o AO vertical passa a modular SO o termo indireto (o ceu), como
+    // manda a fonte. O termo do sol e luz DIRETA e nao deve ser afetado.
+    float3 lit = albedo * ((1.0f / 3.14159265f) * sun_color * t_hl * final_shadow
+                           + sky_light * sky_light_str * ao_vertical);
 
     float3 view_dir = normalize(input.world_pos - ps_cam_pos);
     float back = pow(saturate(dot(view_dir, -sun_dir)), 4.0f) * input.h01;
-    lit += albedo * sun_color * back * grass_backlight * final_shadow * day_gate;
+    // M2.5-26-10a: O /pi QUE FALTAVA. Desde a 26-2b sun_color e ILUMINANCIA (lux), e
+    // o Listing 6 do Frostbite manda  luminance = BSDF(V,D,L) * illuminance  - tudo que
+    // multiplica lux tem de ser uma BSDF, em 1/sr. Este termo e transmissao difusa
+    // (luz que atravessa a folha), cuja forma lambertiana e rho_t/pi. Sem o /pi ele
+    // valia pi vezes demais - a mesma familia do QUADRADO da 26-2d.
+    lit += albedo * (1.0f / 3.14159265f) * sun_color * back * grass_backlight * final_shadow * day_gate;
 
     float3 half_vec = normalize(-sun_dir + (-view_dir));
     float spec = pow(saturate(dot(N, half_vec)), 24.0f) * input.h01 * grass_specular;
-    lit += sun_color * spec * final_shadow * day_gate;
+    // M2.5-26-10a: idem, com uma LACUNA DECLARADA. O lobo aqui e pow(N.H, 24) puro,
+    // sem fator de normalizacao. A forma normalizada do Blinn-Phong e (n+8)/(8*pi),
+    // que para n=24 vale 1,27 - quatro vezes o 1/pi que estou pondo. Nao coloco o
+    // fator certo porque ele NAO esta no acervo: o Frostbite usa GGX com visibilidade
+    // de Smith, nao Blinn-Phong. O /pi entra so para o termo parar de multiplicar lux
+    // cru; a diferenca de fator fica absorvida no slider, que precisa de recalibracao
+    // de qualquer forma. FICA REGISTRADO como pendente de fonte.
+    // M2.5-26-13: A NORMALIZACAO DE VERDADE DO BLINN-PHONG.
+    // A fornada trouxe a derivacao: (n+8)/(8*pi) e uma APROXIMACAO de conveniencia,
+    // nao a normalizacao exata. Fabian Giesen publica a integral resolvida:
+    //   fator = (n+2)(n+4) / (8*pi*(2^(-n/2) + n))
+    // Para o nosso n = 24:  (26*28) / (8*pi*(2^-12 + 24)) = 728/603.19 = 1.20692
+    // (a aproximacao (n+8)/(8pi) daria 1.2732 - 5% acima).
+    // Estavamos com 1/pi = 0.3183, ou seja 3.79x ABAIXO do certo. O /pi da 26-10a
+    // foi paliativo declarado; este e o numero com derivacao publicada.
+    // O expoente 24 continua sendo ARTE (a fonte nao prescreve rugosidade de grama).
+    const float kBlinnNorm24 = 1.20692f;
+    lit += kBlinnNorm24 * sun_color * spec * final_shadow * day_gate;
 
-    float3 final_color = lerp(lit, float3(fog_color_r, fog_color_g, fog_color_b), fog_f);
+    // M2.5-26-8: a nevoa da cena vira a MESMA integral do ceu (Eq. 1 do Hillaire:
+    // L = T(c,p)*Lo(p,v) + in-scatter). O caminho antigo fica atras do interruptor
+    // 'ap_on' para comparacao A/B - instrumento, nao indecisao.
+    float3 final_color;
+    if (ap_on > 0.5f)
+    {
+        float3 T_ap, S_ap;
+        atmo_aerial(ps_cam_pos, input.world_pos, ap_to_sun, ap_sun_illum,
+                    ap_to_moon, ap_moon_illum, ap_steps, ap_str, T_ap, S_ap);
+        final_color = lit * T_ap + S_ap;
+    }
+    else
+    {
+        final_color = lerp(lit, float3(fog_color_r, fog_color_g, fog_color_b), fog_f);
+    }
 
     PSOutput output;
     output.color = float4(final_color * expo_mul(), 1.0f); // 26-2a: epilogueLighting

@@ -72,16 +72,16 @@ cbuffer SkyBlock : register(b0, space3)
     float night_floor;   // M2.5-25-5a: piso do ceu noturno (ocupa o pad_l)
     float sun_disk_deg;    // M2.5-25-7: raio angular do disco (graus); 0.2725 = real
     float sun_disk_bright; // M2.5-25-7: brilho do disco (arte)
-    float pad_m0;
-    float pad_m1;
+    float stars_str;      // M2.5-25-18: 1.0 = fisico (ARTE acima disso)
+    float stars_mag_lim;  // magnitude mais FRACA desenhada
     float3 night_tint;     // M2.5-25-8: cor do piso noturno (ARTE)
     float pad_n;
     float3 to_moon;        // M2.5-25-9a
     float moon_disk_deg;
     float moon_disk_bright;
-    float pad_o0;
-    float pad_o1;
-    float pad_o2;
+    float stars_size;     // sigma do borrao, em PIXELS
+    float stars_dens;      // celulas por lado de face do cubo
+    float stars_slope;     // inclinacao da contagem por magnitude
     float3 to_astro;       // M2.5-25-12: astro dominante (sol de dia, lua de noite)
     float pad_p;
     float3 astro_sky_col;  // M2.5-25-12: cor JA multiplicada pela intensidade
@@ -96,10 +96,13 @@ Texture3D<float> cloud_noise : register(t1, space2);
 Texture3D<float> cloud_detail : register(t2, space2); // M2.5-24C: Swiss Cheese Detail 32^3
 SamplerState cloud_samp : register(s1, space2);
 
-Texture2D trans_lut : register(t3, space2); // M2.5-25-2: Transmittance LUT 256x64 (Hillaire Â§5.2)
-Texture2D ms_lut : register(t4, space2);    // M2.5-25-2: Multiple-scattering LUT 32x32 (Â§5.5)
-SamplerState lut_samp : register(s2, space2);
-
+// M2.5-26-8: a atmosfera mudou de casa - agora vive em atmo_common.hlsli e e lida
+// TAMBEM pelo terreno e pela grama, para que nao possam divergir (doutrina 24F-1).
+// As LUTs continuam exatamente nos mesmos registradores t3/t4/s2.
+#define ATMO_T_TRANS t3
+#define ATMO_T_MS    t4
+#define ATMO_S_LUT   s2
+#include "atmo_common.hlsli"
 // M2.5-26-2a: PRE-EXPOSICAO. Lagarde & de Rousiers, "Moving Frostbite to PBR 3.0"
 // (SIGGRAPH 2014), sec. 5.2, VERBATIM: "Light buffer Float16. Exposure is
 // pre-applied. [...] We use the exposure information described in Section 5.1 to
@@ -166,6 +169,111 @@ float hg_phase(float cos_theta, float g)
 {
     float g2 = g * g;
     return (1.0f - g2) / (pow(1.0f + g2 - 2.0f * g * cos_theta, 1.5f) * 12.5663706f);
+}
+
+// ============================================================================
+// M2.5-25-18: AS ESTRELAS. Item 5 do VEREDITO da checklist da noite.
+//
+// A ANCORA E NOSSA, derivada de dois itens que a checklist ja carimbou como
+// "fisica com fonte", sem precisar de numero externo nenhum:
+//   N3.1, tres fontes convergentes: o ceu sem lua vale 2e-4 cd/m2, e isso E
+//         22,0 mag/arcsec2. Um arcsec quadrado mede 2.3504e-11 sr, entao um
+//         PONTO de magnitude 22,0 entrega 2e-4 * 2.3504e-11 = 4.7009e-15 lux.
+//   N3.4, Pogson: F1 = F2 * 10^(-0,4 (m1 - m2)).
+//   Compondo:  E(m) = 4.7009e-15 * 10^(-0,4 (m - 22)) = 2.96606e-6 * 10^(-0,4 m)
+// CONTRAPROVA: a fotometria padrao da ~2,54e-6 lux para m = 0; a nossa
+// derivacao da 2,966e-6. Dois caminhos independentes a 0,22 stop. A lacuna que
+// eu tinha declarado ("o N3.4 nao cita o valor absoluto de Vega") fecha aqui.
+//
+// ENERGIA CONSERVADA, e esta e a parte que importa. A estrela e um PONTO; o que
+// desenhamos e um borrao gaussiano de sigma s. A luminancia de pico e
+//     L = E(m) / (pi s^2)
+// e a integral de L sobre o borrao devolve E(m) EXATAMENTE, para qualquer s
+// (verificado numericamente antes de embarcar: erro 0,000%). Consequencia:
+// mudar o tamanho do borrao NAO muda o brilho da estrela, e o resultado nao
+// depende da resolucao nem do campo de visao. O sigma sai de fwidth(dir), que
+// e o tamanho angular de um pixel medido pelo proprio hardware.
+//
+// A GRADE E EM FACE DE CUBO, nao em (azimute, elevacao): uma grade esferica
+// amontoa estrelas nos polos. A face de cubo varia ~1,9x entre centro e canto -
+// aproximacao declarada, e invisivel contra a aleatoriedade da magnitude.
+//
+// O HASH E INTEIRO. A casa condenou o 'frac(sin(...))' em 26/08 (exaustao de
+// mantissa; a NVIDIA nao garante sin() entre plataformas) e o dither ainda usa
+// ele por divida tecnica. Codigo novo nao nasce com o defeito conhecido.
+//
+// LACUNA DECLARADA - a inclinacao da contagem. O numero de estrelas por
+// magnitude segue N(<m) proporcional a 10^(a m); usamos a CDF inversa
+//     m = mag_lim + log10(u) / a
+// mas o 'a' NAO tem fonte no nosso acervo. Ele entra como SLIDER rotulado de
+// arte, com 0,50 de partida, e vai para a fornada. Nao e constante escondida.
+// A N3.6 (catalogo real Hipparcos/Tycho-2 x procedural) tambem segue aberta:
+// isto e o caminho procedural, que a checklist registra como pratica de engine
+// de referencia, nao como o veredito de producao.
+// ============================================================================
+uint hash_u32(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16; return x;
+}
+float3 hash31_estrela(uint3 q)
+{
+    uint n = hash_u32(q.x ^ hash_u32(q.y ^ hash_u32(q.z)));
+    return float3(hash_u32(n), hash_u32(n ^ 0x9e3779b9u), hash_u32(n ^ 0x85ebca6bu))
+           * (1.0f / 4294967296.0f);
+}
+
+float3 campo_de_estrelas(float3 dir, float px_ang)
+{
+    if (stars_str <= 0.0f) { return float3(0.0f, 0.0f, 0.0f); }
+
+    float3 ad = abs(dir);
+    float mx = max(ad.x, max(ad.y, ad.z));
+    float2 fuv; uint face;
+    if (ad.x >= mx)      { fuv = dir.zy / max(ad.x, 1e-6f); face = (dir.x > 0.0f) ? 0u : 1u; }
+    else if (ad.y >= mx) { fuv = dir.xz / max(ad.y, 1e-6f); face = (dir.y > 0.0f) ? 2u : 3u; }
+    else                 { fuv = dir.xy / max(ad.z, 1e-6f); face = (dir.z > 0.0f) ? 4u : 5u; }
+
+    float N = clamp(stars_dens, 4.0f, 512.0f);
+    float2 g = (fuv * 0.5f + 0.5f) * N;
+    int2 gi = (int2)floor(g);
+
+    float sig = max(px_ang * max(stars_size, 0.05f), 1e-7f);
+    float inv2 = 1.0f / (sig * sig);
+    float norm = 1.0f / (3.14159265f * sig * sig);
+    float slope = max(stars_slope, 0.05f);
+
+    float3 soma = float3(0.0f, 0.0f, 0.0f);
+    [loop] for (int dy = -1; dy <= 1; ++dy)
+    {
+        [loop] for (int dx = -1; dx <= 1; ++dx)
+        {
+            int2 c = gi + int2(dx, dy);
+            if (c.x < 0 || c.y < 0 || c.x >= (int)N || c.y >= (int)N) { continue; }
+            float3 h = hash31_estrela(uint3((uint)c.x, (uint)c.y, face * 7919u));
+            float2 p = ((float2(c) + h.xy) / N) * 2.0f - 1.0f;
+            float3 sd;
+            if      (face == 0u) { sd = float3( 1.0f, p.y, p.x); }
+            else if (face == 1u) { sd = float3(-1.0f, p.y, p.x); }
+            else if (face == 2u) { sd = float3(p.x,  1.0f, p.y); }
+            else if (face == 3u) { sd = float3(p.x, -1.0f, p.y); }
+            else if (face == 4u) { sd = float3(p.x, p.y,  1.0f); }
+            else                 { sd = float3(p.x, p.y, -1.0f); }
+            sd = normalize(sd);
+            float cs = dot(sd, dir);
+            if (cs <= 0.0f) { continue; }
+            float d_ang = acos(clamp(cs, -1.0f, 1.0f));
+            float w = exp(-d_ang * d_ang * inv2);
+            if (w < 1e-4f) { continue; }
+            float u = max(h.z, 1e-6f);
+            float m = stars_mag_lim + log10(u) / slope;
+            // E(m) em lux, derivado de N3.1 + N3.4 (ver o bloco acima)
+            float Ei = 2.96606e-6f * pow(10.0f, -0.4f * m);
+            soma += Ei * norm * w;
+        }
+    }
+    return soma * stars_str;
 }
 
 float get_height_fraction(float4 grad, float hf)
@@ -258,69 +366,10 @@ float SampleCloudDensity(float3 p, float2 wdisp, float dist_frac, bool apply_det
 }
 
 // ============================================================================
-// M2.5-25-2: A ATMOSFERA FISICA (Hillaire, EGSR 2020)
-// Tabela 1 (coeficientes) + Â§3 (equacao de espalhamento) + Â§5.2 (Transmittance
-// LUT) + Â§5.5 (Psi_ms). Integral conservadora de energia do Hillaire 2015 sl.28.
-// Unidades internas: km. FISICA COM FONTE = CODIGO BLINDADO.
+// M2.5-26-8: constantes, atmo_sigma_t, atmo_trans_uv, atmo_ray_sphere, atmo_light
+// e atmo_phases foram para assets/shaders/atmo_common.hlsli (incluido no topo).
+// Byte por byte o mesmo codigo - so deixou de existir em duas copias.
 // ============================================================================
-static const float3 kRayS = float3(5.802e-3f, 13.558e-3f, 33.1e-3f);
-static const float  kMieS = 3.996e-3f;
-static const float  kMieA = 4.40e-3f;
-static const float3 kOzoA = float3(0.650e-3f, 1.881e-3f, 0.085e-3f);
-static const float  kRg = 6360.0f;
-static const float  kRt = 6460.0f;
-
-float3 atmo_sigma_t(float h)
-{
-    float dr = exp(-h / 8.0f);
-    float dm = exp(-h / 1.2f);
-    float dz = max(0.0f, 1.0f - abs(h - 25.0f) / 15.0f);
-    return kRayS * dr + (kMieS + kMieA) * dm + kOzoA * dz;
-}
-
-// MESMA parametrizacao do assador (src/sky/atmosphere.cpp) - contrato de casa
-float2 atmo_trans_uv(float h, float mu)
-{
-    float s = (mu < 0.0f ? -1.0f : 1.0f) * sqrt(abs(mu));
-    return float2(saturate(0.5f + 0.5f * s), saturate(h / (kRt - kRg)));
-}
-
-float atmo_ray_sphere(float3 p, float3 d, float r)
-{
-    float b = dot(p, d);
-    float c = dot(p, p) - r * r;
-    float disc = b * b - c;
-    if (disc < 0.0f) return -1.0f;
-    disc = sqrt(disc);
-    float t0 = -b - disc;
-    float t1 = -b + disc;
-    if (t1 < 0.0f) return -1.0f;
-    return (t0 < 0.0f) ? t1 : t0;
-}
-
-// M2.5-25-15: contribuicao de UMA luz direcional num ponto da marcha.
-// Extraida para funcao porque a Eq. 11 do Hillaire soma sobre Nlight luzes e a
-// forma e identica para todas - so mudam a direcao, as fases e a iluminancia.
-// A Transmittance LUT e a MS LUT sao parametrizadas pelo cosseno de zenite DA LUZ,
-// entao servem para qualquer direcional (sol, lua, o que vier).
-float3 atmo_light(float3 up_local, float h, float3 ss_r, float3 ss_m,
-                  float3 L_dir, float pr, float pm)
-{
-    float mu = dot(up_local, L_dir);
-    float3 Tl = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(h, mu), 0).rgb;
-    float3 psi = ms_lut.SampleLevel(lut_samp, float2(saturate(0.5f + 0.5f * mu), saturate(h / (kRt - kRg))), 0).rgb;
-    return (ss_r * pr + ss_m * pm) * Tl + (ss_r + ss_m) * psi;
-}
-
-// Fases de Rayleigh e de Mie para um cosseno de angulo de espalhamento (Hillaire Â§4).
-void atmo_phases(float cos_t, out float pr, out float pm)
-{
-    pr = 3.0f * (1.0f + cos_t * cos_t) / (16.0f * 3.14159265f);
-    const float g = 0.8f; // Cornette-Shanks, padrao do paper
-    pm = (3.0f / (8.0f * 3.14159265f)) * ((1.0f - g * g) * (1.0f + cos_t * cos_t)) /
-         ((2.0f + g * g) * pow(max(1.0f + g * g - 2.0f * g * cos_t, 1e-4f), 1.5f));
-}
-
 float3 atmo_sky(float3 dir)
 {
     // mundo: 1 unidade ~ 1 metro -> km
@@ -481,6 +530,21 @@ PSOutput PSMain(PSInput input)
             // distancia do sol. O slider vira multiplicador de arte (1.0 = fisico).
             astro += t_moon_disk * ((0.11f / 3.14159265f) * lam * edge_m * moon_disk_bright * sun_illum);
         }
+    }
+
+    // ========================================================================
+    // M2.5-25-18: as estrelas entram no 'astro', e nao numa camada propria.
+    // Com isso elas herdam DE GRACA as duas oclusoes que ja existem: o teste
+    // raio-esfera do planeta (o bloco logo abaixo) corta as que estao sob o
+    // horizonte, e o 'T *' da composicao final as esconde atras das nuvens.
+    // A atenuacao atmosferica e a MESMA etapa explicita que a N1.4 exige para o
+    // disco da lua: a Transmittance LUT na direcao do astro. Perto do horizonte
+    // as estrelas avermelham e apagam, como as de verdade.
+    // ========================================================================
+    {
+        float px_ang = max(length(fwidth(dir)), 1e-6f);
+        float3 t_est = trans_lut.SampleLevel(lut_samp, atmo_trans_uv(0.0f, dir.y), 0).rgb;
+        astro += t_est * campo_de_estrelas(dir, px_ang);
     }
 
     // M2.5-25-9b: O PLANETA OCLUI OS ASTROS. Sem isto, sol e lua sao desenhados
@@ -648,7 +712,21 @@ PSOutput PSMain(PSInput input)
                     // sol, essa constante era 2.5x a fase (0.048) - tudo chapava.
                     float luz = t_sun * (phase_val + cloud_iso_str) + ms_vol * cloud_ms_str * hg_phase(cos_astro, cloud_ms_g2);
                     float powder = 1.0f - exp(-2.0f * dens_sol);
-                    luz *= lerp(1.0f, powder, sun_angular_gate * powder_str);
+                    // M2.5-26-13: O x2 QUE FALTAVA. GPU Pro 7 cap. 4 (Schneider),
+                    // "Real-Time Volumetric Cloudscapes", p. 116, VERBATIM:
+                    //   powder_sugar_effect = 1.0 - exp(-light_samples * 2.0);
+                    //   beers_law           = exp(-light_samples);
+                    //   light_energy        = 2.0 * beers_law * powder_sugar_effect;
+                    // e o texto: "Note that we MULTIPLY THE ENTIRE RESULT BY 2, to bring
+                    // it closer to the original normalized range." Formula final do
+                    // sec. 4.4.6, p. 119:  E = 2.0 * e^(-dp) * (1 - e^(-2d)) * fase.
+                    // O nosso expoente 2 do powder ja estava exato; o fator 2.0 global
+                    // nunca existiu - com o powder no maximo estavamos na METADE da
+                    // energia que o modelo preve.
+                    // A forma abaixo preserva o comportamento quando o powder esta
+                    // DESLIGADO (gate 0 -> 2*0.5 = 1.0, nada muda) e entrega o 2.0 da
+                    // fonte quando esta ligado.
+                    luz *= 2.0f * lerp(0.5f, powder, sun_angular_gate * powder_str);
 
                     if (cloud_bands >= 2.0f)
                     {
@@ -703,11 +781,34 @@ PSOutput PSMain(PSInput input)
     float3 T_aer = exp(-atmo_sigma_t(h_aer_km) * (min(cloud_dist, 200000.0f) * 0.001f * aerial_str));
 
     float3 final_color = radiance * T_aer + ceu * (1.0f - T) * (1.0f - T_aer) + T * (ceu + astro);
-    final_color = min(max(final_color, 0.0f), 8.0f);
+    // M2.5-26-6a: O TETO DE 8.0 MORREU. Este era o defeito.
+    // A linha era  final_color = min(max(final_color, 0.0f), 8.0f);  - um teto da
+    // era da REGUA ARBITRARIA, quando sol=1.0 e o ceu vivia entre 0 e ~2. Com a
+    // 26-2b o ceu passou a valer 1.000-3.000 cd/m2 e o disco solar E/Omega ~ 1e9,
+    // entao o teto passou a achatar TODO o ceu, em TODA direcao, no MESMO numero.
+    // MEDIDO (26-M, camera para cima): 1024 texels do mapa de luminancia com
+    // Lavg = min = max = 7,989 cd/m2 - constante ate a 4a casa, que nenhuma soma de
+    // exponenciais produz. 7,989 e 8,0 menos a quantizacao de ida-e-volta em float16
+    // da pre-exposicao. O ceu nunca esteve morto: estava encostado no teto.
+    // CONSEQUENCIA MEDIDA: o histograma bimodal das 12h (550 texels em 1-10 cd/m2 =
+    // ceu no teto, 449 em 1k-10k = chao correto) e o vao de 1.000x entre os dois
+    // modos ERAM o teto. A media geometrica caia no vazio do meio (Lavg=117,
+    // EV100 9,87), o auto-exposure expunha para esse 117 e o chao de 11.340 cd/m2
+    // saia em ~10 unidades de tela - muito acima do ponto branco do tonemap (~2).
+    // Dia estourado = exposicao calculada sobre um ceu falso.
+    // O QUE FICA: max(.,0) (guarda de negativo/NaN, sem custo semantico) e um teto
+    // aplicado DEPOIS da pre-exposicao, no limite do FORMATO e nao do gosto: o
+    // alvo e RGBA16F e o maior finito de um half IEEE-754 binary16 e 65504. Acima
+    // disso o valor vira +inf e contamina bloom, luma e tonemap. Frostbite
+    // (Lagarde & de Rousiers, SIGGRAPH 2014), sec. 5.2, VERBATIM: "Light buffer
+    // Float16. Exposure is pre-applied." - a pre-exposicao E o mecanismo que faz
+    // unidades fisicas caberem no half; o clamp so protege a borda do formato.
+    final_color = max(final_color, 0.0f);
 
     PSOutput output;
     // M2.5-24G-7: alpha carrega a transmitancia - nuvem grossa OCLUI god ray no fullscreen
-    output.color = float4(final_color * expo_mul(), T); // 26-2a: epilogueLighting
+    float3 pre_exposto = final_color * expo_mul(); // 26-2a: epilogueLighting
+    output.color = float4(min(pre_exposto, 65504.0f), T); // 26-6a: teto = limite do half
     output.normal_id = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
 }

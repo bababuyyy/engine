@@ -64,6 +64,12 @@ SamplerState weather_samp : register(s3, space2);
 // satura em 65504. Sem pre-exposicao as unidades fisicas nao cabem no buffer.
 Texture2D tex_expo : register(t4, space2);
 SamplerState samp_expo : register(s4, space2);
+
+// M2.5-26-8: a atmosfera da cena. t5/t6/s5 estavam livres nestes dois shaders.
+#define ATMO_T_TRANS t5
+#define ATMO_T_MS    t6
+#define ATMO_S_LUT   s5
+#include "atmo_common.hlsli"
 float expo_mul()
 {
     float e = tex_expo.SampleLevel(samp_expo, float2(0.5f, 0.5f), 0).r;
@@ -94,7 +100,21 @@ cbuffer SunBlock : register(b0, space3)
     float debug_shadows;
     float pad_g1;
     float pad_g2;
+    // M2.5-26-7: o ceu como fonte separada (Frostbite Tabela 8: Sol = lx, Ceu = cd/m2).
+    // Offset 112, alinhado: float3 comeca em linha nova de 16 bytes; light_vp vai p/ 128.
+    float3 sky_light;
+    float sky_light_str;
     float4x4 light_vp; // alinhamento 112 da entrega (o certo — reversao do meu over-fix)
+    // M2.5-26-8: perspectiva aerea. Offsets 192..255 (a matriz light_vp fecha em 191).
+    // Uma declaracao por linha, como o resto deste cbuffer.
+    float3 ap_to_sun;
+    float ap_steps;
+    float3 ap_sun_illum;
+    float ap_str;
+    float3 ap_to_moon;
+    float ap_on;
+    float3 ap_moon_illum;
+    float ap_pad;
 };
 
 cbuffer ObjectIdBlock : register(b1, space3)
@@ -194,19 +214,55 @@ PSOutput PSMain(PSInput input)
     float sh_det = saturate((weather_map.SampleLevel(weather_samp, (input.world_pos.xz + sh_off) * 0.0015f, 0).r - 0.35f) / 0.30f);
     float sombra_de_nuvem = 1.0f - shadow_str * sh_det * saturate(cloud_cover) * lerp(0.45f, 1.0f, sh_env);
 
-    float final_shadow = max(obj_shadow * sombra_de_nuvem, 0.12f); // piso anti-buraco-preto (dupla sombra)
+    // M2.5-26-13: O PISO DE 0.12 MORREU. Ele existia porque NAO HAVIA luz ambiente
+    // de verdade: sem ele, sombra de objeto x sombra de nuvem ia a preto absoluto.
+    // Desde a 26-7 o CEU e fonte de luz separada (Frostbite Tabela 8) e a sombra e
+    // iluminada por ele fisicamente. O piso passou a VAZAR 12% da luz direta do sol
+    // para dentro da sombra - ao meio-dia, ~12.000 lx inventados por pixel sombreado.
+    // E o mesmo caso do 'ambient' que a 26-7 matou: um remendo que compensava a falta
+    // de um sistema, e que vira defeito quando o sistema chega.
+    // Nenhuma fonte de producao endossa o piso; as tres buscas da fornada voltaram
+    // vazias (Bloco C3). O que existe e o contrario: Godot issue #90259 identifica
+    // exatamente esta classe de bug como causada por "luz ambiente, luz emissiva, ou
+    // outras luzes que nao projetam sombra".
+    float final_shadow = obj_shadow * sombra_de_nuvem;
 
-    float3 direct_light = sun_color * ramp * final_shadow;
-    // M2.5-26-2b: sun_color agora e ILUMINANCIA (lux). Listing 6 do Frostbite:
+    // M2.5-26-7: DUAS FONTES, como manda a Tabela 8 do Frostbite.
+    // SOL - Listing 6, verbatim:
     //   float illuminance = sunIlluminanceInLux * saturate(dot(N, D));
     //   luminance = BSDF(V, D, L, data) * illuminance;
-    // e a BSDF difusa lambertiana e rho/pi (Kuzminykh eq. 2.32). O /pi que faltava
-    // estava ate agora escondido dentro da escala arbitraria.
-    float3 lit = albedo * (1.0f / 3.14159265f) * sun_color * (ambient + (1.0f - ambient) * ramp * final_shadow); // teto 1.0 restaurado (sagrada, 2a reincidencia)
+    // com BSDF difusa lambertiana = rho/pi (Kuzminykh eq. 2.32).
+    // CEU - "distant light probe". Sob um hemisferio de radiancia L_ceu, a
+    // irradiancia e E = pi*L_ceu e a radiancia de saida de um lambertiano e
+    //   L_saida = (rho/pi) * E = rho * L_ceu
+    // - o pi cancela. Por isso o termo do ceu NAO leva 1/pi: ele ja e luminancia.
+    // O 'ambient' MORREU aqui. Ele era um PISO multiplicativo sobre o sol
+    // (ambient + (1-ambient)*ramp*sombra, teto 1.0), entao nunca somava energia:
+    // ao meio-dia faltavam os 11.109 lx do ceu, e no crepusculo faltava tudo.
+    // Consequencia visual esperada e CORRETA: a sombra passa a ser iluminada SO
+    // pelo ceu - mais azul, mais escura ao meio-dia, MUITO mais clara ao amanhecer.
+    // O toon continua no termo do sol (o 'ramp' banda so a luz direta); o ceu entra
+    // liso, que e o que uma fonte de area difusa faz.
+    float3 lit = albedo * ((1.0f / 3.14159265f) * sun_color * ramp * final_shadow
+                           + sky_light * sky_light_str);
     float dist = length(cam_pos - input.world_pos);
     float fog_f = 1.0f - exp(-fog_density * dist);
 
-    float3 final_color = lerp(lit, float3(fog_color_r, fog_color_g, fog_color_b), fog_f);
+    // M2.5-26-8: a nevoa da cena vira a MESMA integral do ceu (Eq. 1 do Hillaire:
+    // L = T(c,p)*Lo(p,v) + in-scatter). O caminho antigo fica atras do interruptor
+    // 'ap_on' para comparacao A/B - instrumento, nao indecisao.
+    float3 final_color;
+    if (ap_on > 0.5f)
+    {
+        float3 T_ap, S_ap;
+        atmo_aerial(cam_pos, input.world_pos, ap_to_sun, ap_sun_illum,
+                    ap_to_moon, ap_moon_illum, ap_steps, ap_str, T_ap, S_ap);
+        final_color = lit * T_ap + S_ap;
+    }
+    else
+    {
+        final_color = lerp(lit, float3(fog_color_r, fog_color_g, fog_color_b), fog_f);
+    }
 
     output.color = float4(final_color * expo_mul(), tex_color.a); // 26-2a: epilogueLighting
     output.normal_id = float4(N * 0.5f + 0.5f, object_id);
